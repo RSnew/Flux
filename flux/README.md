@@ -8,7 +8,7 @@ supervised crash recovery, and an optional bytecode VM.
 ## Quick Start
 
 ```bash
-# Build (C++17, ~4,700 lines)
+# Build (C++17, ~5,500 lines)
 cd flux && mkdir -p build && cd build
 cmake .. && cmake --build . -j$(nproc)
 
@@ -33,6 +33,12 @@ cmake .. && cmake --build . -j$(nproc)
 # REPL (multi-line, history)
 ./flux
 ./flux repl
+
+# Package manager (Feature L)
+./flux new myapp        # create project
+./flux add mathlib      # add dependency
+./flux install          # install deps
+./flux build            # build & run
 ```
 
 ---
@@ -116,7 +122,7 @@ print(Json.stringify(m))
 | G  | 字节码VM | Stack-based bytecode VM + compiler; `--vm` flag; modules via tree-walker | ✅ Done |
 | J  | 工具链   | `flux check`, `flux fmt`, `flux run`, improved REPL, VSCode extension | ✅ Done |
 | K  | 并发模型 | `async`/`await`, GIL-based threads, `Chan` channels, `spawn` | ✅ Done |
-| L  | 包管理器 | `flux.toml`, dependency resolution, registry | 📋 Planned |
+| L  | 包管理器 | `flux.toml`, dep resolution, local registry, `flux new/add/install/build` | ✅ Done |
 | M  | 自举编译器 | Flux compiles Flux (self-hosting) | 🔭 Future |
 
 ---
@@ -230,11 +236,61 @@ let result = f.await(500)                          // 带 500ms 超时
 - `fut.isReady()` — Future 状态轮询
 - Example: `examples/concurrency_demo.flux`
 
-### 📋 Feature L — 包管理器 (Package Manager)
-- `flux.toml` — project manifest (name, version, deps, scripts)
-- `flux add <pkg>` — fetch and pin dependency
-- `flux build` — build with dependency graph
-- Central registry at `pkg.fluxlang.dev`
+### ✅ Feature L — 包管理器 (Package Manager)
+
+**Project manifest** (`flux.toml`):
+```toml
+[package]
+name    = "myapp"
+version = "0.1.0"
+flux    = "1.0"
+
+[dependencies]
+mathlib = "1.0.0"
+locallib = { path = "../locallib" }
+
+[scripts]
+run  = "src/main.flux"
+test = "tests/test.flux"
+```
+
+**CLI commands**:
+
+| Command | Description |
+|---------|-------------|
+| `flux new <name>` | Create new project with `flux.toml`, `src/main.flux`, `tests/test.flux` |
+| `flux build [script]` | Concatenate deps + entry file, then execute (default script: `run`) |
+| `flux add <pkg>[@ver]` | Add registry dependency to `flux.toml` |
+| `flux add <pkg> path=../lib` | Add local path dependency |
+| `flux remove <pkg>` | Remove dependency from manifest and `flux_packages/` |
+| `flux install` | Install all deps from `flux.toml` into `./flux_packages/` |
+| `flux publish` | Publish current package to local registry (`~/.flux/packages/`) |
+| `flux search [query]` | Search local registry |
+| `flux info <pkg>` | Show package details from registry |
+| `flux list` | List project dependencies and scripts |
+
+**How `flux build` works**:
+1. Reads `flux.toml` to find the entry script (e.g., `src/main.flux`)
+2. For each installed package in `flux_packages/`, reads its `flux.toml` to find its entry file
+3. Concatenates all package source files as a preamble (so their modules/functions are defined first)
+4. Appends the main entry file
+5. Runs the combined source through the interpreter
+
+**Registry layout** (`~/.flux/packages/`):
+```
+~/.flux/packages/
+├── mathlib-1.0.0/
+│   ├── flux.toml
+│   └── src/main.flux
+└── utils-0.2.1/
+    ├── flux.toml
+    └── src/main.flux
+```
+
+**Implementation files**:
+- `src/toml.h` — zero-dependency header-only TOML parser (sections, strings, inline tables)
+- `src/pkgmgr.h` — `Manifest`, `BuildResult` structs; command declarations
+- `src/pkgmgr.cpp` — full package manager implementation (~300 lines)
 
 ### 🔭 Feature M — 自举编译器 (Self-hosting Compiler)
 - Flux compiles Flux
@@ -263,7 +319,9 @@ flux/
 │   ├── vm.h/.cpp        Stack-based bytecode VM (Feature G)
 │   ├── formatter.h      AST → source code formatter (Feature J)
 │   ├── watcher.h/.cpp   inotify file watcher (hot reload)
-│   └── main.cpp         CLI: run/check/fmt/repl/--vm
+│   ├── toml.h           Zero-dep header-only TOML parser (Feature L)
+│   ├── pkgmgr.h/.cpp    Package manager: flux.toml, registry, deps (Feature L)
+│   └── main.cpp         CLI: run/check/fmt/repl/--vm + pkg commands
 ├── vscode-flux/         VSCode extension (Feature J)
 │   ├── package.json
 │   ├── language-configuration.json
@@ -280,6 +338,14 @@ flux/
     ├── stdlib_demo.flux
     ├── concurrency_demo.flux
     └── test_array_interp_forin.flux
+
+# Package manager creates projects like:
+myapp/
+├── flux.toml
+├── flux_packages/       # installed (gitignored)
+│   └── mathlib/         # full package directory
+├── src/main.flux
+└── tests/test.flux
 ```
 
 ## Lines of Code
@@ -287,14 +353,16 @@ flux/
 ```
 src/interpreter.cpp   ~960
 src/stdlib.cpp        ~510
+src/pkgmgr.cpp        ~320
 src/vm.cpp            ~420
 src/compiler.cpp      ~310
 src/parser.cpp        ~450
 src/typechecker.cpp   ~430
 src/formatter.h       ~220
 src/vm.h              ~130
-src/main.cpp          ~350
+src/toml.h            ~180
+src/main.cpp          ~480
 other headers/files   ~450
 ─────────────────────────
-Total                ~4,230 lines of C++17
+Total                ~4,860 lines of C++17
 ```

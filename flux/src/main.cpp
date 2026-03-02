@@ -6,6 +6,7 @@
 #include "vm.h"
 #include "formatter.h"
 #include "watcher.h"
+#include "pkgmgr.h"
 
 #include <iostream>
 #include <fstream>
@@ -390,7 +391,23 @@ static void printHelp() {
         << "  flux --vm  <file.flux>      Run file with bytecode VM (Feature G)\n"
         << "  flux --help                 Show this help\n"
         << "\n"
+        << CLR_BOLD << "Package Manager (Feature L):\n" << CLR_RESET
+        << "  flux new    <name>          Create a new Flux project\n"
+        << "  flux build  [script]        Build & run project (default: run)\n"
+        << "  flux add    <pkg>[@ver]     Add dependency to flux.toml\n"
+        << "  flux add    <pkg> path=..   Add local path dependency\n"
+        << "  flux remove <pkg>           Remove dependency\n"
+        << "  flux install                Install all dependencies from flux.toml\n"
+        << "  flux publish                Publish to local registry (~/.flux/packages)\n"
+        << "  flux search [query]         Search local registry\n"
+        << "  flux info   <pkg>           Show package info\n"
+        << "  flux list                   List project dependencies\n"
+        << "\n"
         << CLR_BOLD << "Examples:\n" << CLR_RESET
+        << "  flux new myapp\n"
+        << "  flux add mathlib@1.0.0\n"
+        << "  flux install\n"
+        << "  flux build\n"
         << "  flux run examples/hello.flux\n"
         << "  flux check examples/module_demo.flux\n"
         << "  flux fmt -w examples/stdlib_demo.flux\n"
@@ -453,6 +470,121 @@ int main(int argc, char* argv[]) {
             filepath = argv[3];
         }
         return cmdFmt(filepath, writeBack);
+    }
+
+    // ══════════════════════════════════════════════════════
+    // Feature L: 包管理器命令
+    // ══════════════════════════════════════════════════════
+
+    // ── flux new <name> ──────────────────────────────────
+    if (sub == "new") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux new <project-name>\n";
+            return 1;
+        }
+        try { pkgNew(argv[2]); return 0; }
+        catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
+    }
+
+    // ── flux build [script] ──────────────────────────────
+    // 读取 flux.toml，合并 flux_packages/*.flux + 入口文件，然后执行
+    if (sub == "build") {
+        std::string script = argc > 2 ? argv[2] : "run";
+        try {
+            auto r = pkgBuild(".", script);
+            if (!r.ok) {
+                std::cerr << CLR_RED << "Build error: " << r.error << CLR_RESET << "\n";
+                return 1;
+            }
+            Interpreter interp;
+            runSource(r.source, interp, false);
+            return 0;
+        } catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
+    }
+
+    // ── flux add <pkg>[@version] [path=../lib] ───────────
+    if (sub == "add") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux add <pkg>[@version]  or  flux add <pkg> path=<dir>\n";
+            return 1;
+        }
+        // 收集 argv[2..] 拼成一个 spec 字符串（兼容 "pkg path=../lib"）
+        std::string spec = argv[2];
+        if (argc > 3) spec += std::string(" ") + argv[3];
+        try { pkgAdd(spec); return 0; }
+        catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
+    }
+
+    // ── flux remove <pkg> ────────────────────────────────
+    if (sub == "remove") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux remove <pkg>\n";
+            return 1;
+        }
+        try { pkgRemove(argv[2]); return 0; }
+        catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
+    }
+
+    // ── flux install ─────────────────────────────────────
+    if (sub == "install") {
+        try { pkgInstall(); return 0; }
+        catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
+    }
+
+    // ── flux publish ─────────────────────────────────────
+    if (sub == "publish") {
+        try { pkgPublish(); return 0; }
+        catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
+    }
+
+    // ── flux search [query] ──────────────────────────────
+    if (sub == "search") {
+        std::string query = argc > 2 ? argv[2] : "";
+        try { pkgSearch(query); return 0; }
+        catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
+    }
+
+    // ── flux info <pkg> ──────────────────────────────────
+    if (sub == "info") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux info <pkg>\n";
+            return 1;
+        }
+        try { pkgInfo(argv[2]); return 0; }
+        catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
+    }
+
+    // ── flux list ────────────────────────────────────────
+    if (sub == "list") {
+        try { pkgList(); return 0; }
+        catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
     }
 
     // ── flux --vm <file> ────────────────────────────────

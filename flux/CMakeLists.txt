@@ -18,6 +18,7 @@ add_executable(flux
     src/compiler.cpp
     src/vm.cpp
     src/watcher.cpp
+    src/pkgmgr.cpp
 )
 
 # 链接 pthread（FileWatcher 使用线程）
