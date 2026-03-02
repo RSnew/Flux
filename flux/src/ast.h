@@ -1,0 +1,217 @@
+#pragma once
+#include <string>
+#include <vector>
+#include <memory>
+
+// ── 基类 ──────────────────────────────────────────────────
+struct ASTNode { virtual ~ASTNode() = default; };
+using NodePtr = std::unique_ptr<ASTNode>;
+
+// ── 表达式节点 ────────────────────────────────────────────
+struct NumberLit : ASTNode {
+    double value;
+    explicit NumberLit(double v) : value(v) {}
+};
+
+struct StringLit : ASTNode {
+    std::string value;
+    explicit StringLit(std::string v) : value(std::move(v)) {}
+};
+
+struct BoolLit : ASTNode {
+    bool value;
+    explicit BoolLit(bool v) : value(v) {}
+};
+
+struct Identifier : ASTNode {
+    std::string name;
+    explicit Identifier(std::string n) : name(std::move(n)) {}
+};
+
+struct BinaryExpr : ASTNode {
+    std::string op;
+    NodePtr     left, right;
+    BinaryExpr(std::string op, NodePtr l, NodePtr r)
+        : op(std::move(op)), left(std::move(l)), right(std::move(r)) {}
+};
+
+struct UnaryExpr : ASTNode {
+    std::string op;
+    NodePtr     operand;
+    UnaryExpr(std::string op, NodePtr o)
+        : op(std::move(op)), operand(std::move(o)) {}
+};
+
+struct CallExpr : ASTNode {
+    std::string          name;
+    std::vector<NodePtr> args;
+    CallExpr(std::string n, std::vector<NodePtr> a)
+        : name(std::move(n)), args(std::move(a)) {}
+};
+
+// ── 语句节点 ──────────────────────────────────────────────
+struct VarDecl : ASTNode {
+    bool        immutable;
+    std::string name;
+    std::string typeAnnotation; // 可选，如 "Int" "String"
+    NodePtr     initializer;
+    VarDecl(bool imm, std::string n, std::string ta, NodePtr init)
+        : immutable(imm), name(std::move(n))
+        , typeAnnotation(std::move(ta)), initializer(std::move(init)) {}
+};
+
+struct Assign : ASTNode {
+    std::string name;
+    NodePtr     value;
+    Assign(std::string n, NodePtr v)
+        : name(std::move(n)), value(std::move(v)) {}
+};
+
+struct ReturnStmt : ASTNode {
+    NodePtr value;
+    explicit ReturnStmt(NodePtr v) : value(std::move(v)) {}
+};
+
+struct IfStmt : ASTNode {
+    NodePtr              condition;
+    std::vector<NodePtr> thenBlock;
+    std::vector<NodePtr> elseBlock;
+    IfStmt(NodePtr cond, std::vector<NodePtr> th, std::vector<NodePtr> el)
+        : condition(std::move(cond)), thenBlock(std::move(th)), elseBlock(std::move(el)) {}
+};
+
+struct WhileStmt : ASTNode {
+    NodePtr              condition;
+    std::vector<NodePtr> body;
+    WhileStmt(NodePtr cond, std::vector<NodePtr> b)
+        : condition(std::move(cond)), body(std::move(b)) {}
+};
+
+struct ExprStmt : ASTNode {
+    NodePtr expr;
+    explicit ExprStmt(NodePtr e) : expr(std::move(e)) {}
+};
+
+// ── 顶层节点 ──────────────────────────────────────────────
+struct Param {
+    std::string name;
+    std::string type; // 暂时存为字符串，类型系统后续扩展
+};
+
+struct FnDecl : ASTNode {
+    std::string          name;
+    std::vector<Param>   params;
+    std::string          returnType;
+    std::vector<NodePtr> body;
+    FnDecl(std::string n, std::vector<Param> p, std::string rt, std::vector<NodePtr> b)
+        : name(std::move(n)), params(std::move(p)), returnType(std::move(rt)), body(std::move(b)) {}
+};
+
+struct Program : ASTNode {
+    std::vector<NodePtr> statements;
+};
+
+// ── persistent { name: defaultValue, ... } ───────────────
+struct PersistentField {
+    std::string name;
+    NodePtr     defaultValue;   // 仅首次运行时使用
+};
+
+struct PersistentBlock : ASTNode {
+    std::vector<PersistentField> fields;
+};
+
+// ── state.fieldName（读取持久状态）────────────────────────
+struct StateAccess : ASTNode {
+    std::string field;
+    explicit StateAccess(std::string f) : field(std::move(f)) {}
+};
+
+// ── state.fieldName = value（写入持久状态）────────────────
+struct StateAssign : ASTNode {
+    std::string field;
+    NodePtr     value;
+    StateAssign(std::string f, NodePtr v)
+        : field(std::move(f)), value(std::move(v)) {}
+};
+
+// ── 监督策略 ──────────────────────────────────────────────
+enum class RestartPolicy {
+    None,       // 无监督（默认）
+    Always,     // 崩溃后总是重启
+    Never,      // 崩溃后停止，不重启
+};
+
+// ── module MyModule { ... } ───────────────────────────────
+struct ModuleDecl : ASTNode {
+    std::string          name;
+    std::vector<NodePtr> body;
+    RestartPolicy        restartPolicy = RestartPolicy::None;
+    int                  maxRetries    = 3;
+    ModuleDecl(std::string n, std::vector<NodePtr> b,
+               RestartPolicy rp = RestartPolicy::None, int mr = 3)
+        : name(std::move(n)), body(std::move(b))
+        , restartPolicy(rp), maxRetries(mr) {}
+};
+
+// ── ModuleName.functionName(args) ─────────────────────────
+struct ModuleCall : ASTNode {
+    std::string          module;
+    std::string          fn;
+    std::vector<NodePtr> args;
+    ModuleCall(std::string m, std::string f, std::vector<NodePtr> a)
+        : module(std::move(m)), fn(std::move(f)), args(std::move(a)) {}
+};
+
+// ── migrate { field: value, ... } ────────────────────────
+// 当 persistent 新增字段时，必须提供此块，否则热更新被阻断
+struct MigrateField {
+    std::string name;
+    NodePtr     value;
+};
+
+struct MigrateBlock : ASTNode {
+    std::vector<MigrateField> fields;
+};
+
+// ── [1, 2, 3] 数组字面量 ─────────────────────────────────
+struct ArrayLit : ASTNode {
+    std::vector<NodePtr> elements;
+    explicit ArrayLit(std::vector<NodePtr> elems)
+        : elements(std::move(elems)) {}
+};
+
+// ── arr[i] 下标访问 ──────────────────────────────────────
+struct IndexExpr : ASTNode {
+    NodePtr object;
+    NodePtr index;
+    IndexExpr(NodePtr obj, NodePtr idx)
+        : object(std::move(obj)), index(std::move(idx)) {}
+};
+
+// ── arr[i] = value 下标赋值 ──────────────────────────────
+struct IndexAssign : ASTNode {
+    NodePtr object;
+    NodePtr index;
+    NodePtr value;
+    IndexAssign(NodePtr obj, NodePtr idx, NodePtr val)
+        : object(std::move(obj)), index(std::move(idx)), value(std::move(val)) {}
+};
+
+// ── arr.push(x) / arr.len() 方法调用 ────────────────────
+struct MethodCall : ASTNode {
+    NodePtr              object;
+    std::string          method;
+    std::vector<NodePtr> args;
+    MethodCall(NodePtr obj, std::string m, std::vector<NodePtr> a)
+        : object(std::move(obj)), method(std::move(m)), args(std::move(a)) {}
+};
+
+// ── for item in collection { } ───────────────────────────
+struct ForIn : ASTNode {
+    std::string          var;       // 迭代变量名
+    NodePtr              iterable;  // 被迭代的表达式
+    std::vector<NodePtr> body;
+    ForIn(std::string v, NodePtr it, std::vector<NodePtr> b)
+        : var(std::move(v)), iterable(std::move(it)), body(std::move(b)) {}
+};
