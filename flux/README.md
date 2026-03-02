@@ -85,7 +85,7 @@ let name = "Flux"   // inferred as String
 | `migrate` schema safety | ✅ |
 | `@supervised` crash isolation | ✅ |
 | Type system (inference + annotations) | ✅ |
-| Arrays / for-in / string interpolation | 🔧 In progress |
+| Arrays / for-in / string interpolation | ✅ |
 
 ## Project Structure
 

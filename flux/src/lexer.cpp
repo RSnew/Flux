@@ -213,6 +213,7 @@ std::vector<Token> Lexer::tokenize() {
                     tokens.push_back({TokenType::DOT, ".", line_});
                 }
                 break;
+            case '@': tokens.push_back({TokenType::AT, "@", line_}); break;
             case '[': tokens.push_back({TokenType::LBRACKET, "[", line_}); break;
             case ']': tokens.push_back({TokenType::RBRACKET, "]", line_}); break;
             default: break; // 忽略未知字符
