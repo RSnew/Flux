@@ -30,40 +30,104 @@ std::unique_ptr<Program> Parser::parse() {
     return prog;
 }
 
+// ── 解析 @threadpool(name: "io-pool", size: 4) ───────────
+NodePtr Parser::parseThreadPoolDecl() {
+    expect(TokenType::LPAREN, "expected '(' after @threadpool");
+    std::string poolName;
+    int         poolSize = 4;
+    while (!check(TokenType::RPAREN) && !check(TokenType::EOF_TOKEN)) {
+        std::string key = expect(TokenType::IDENTIFIER, "expected key in @threadpool").value;
+        expect(TokenType::COLON, "expected ':'");
+        if (key == "name") {
+            poolName = expect(TokenType::STRING, "expected string for pool name").value;
+        } else if (key == "size") {
+            poolSize = (int)std::stod(expect(TokenType::NUMBER, "expected number for pool size").value);
+        } else {
+            consume(); // 跳过未知键
+        }
+        if (!match(TokenType::COMMA)) break;
+    }
+    expect(TokenType::RPAREN, "expected ')'");
+    while (match(TokenType::NEWLINE)) {}
+    return std::make_unique<ThreadPoolDecl>(poolName, poolSize);
+}
+
 NodePtr Parser::parseTopLevel() {
-    // @supervised(restart: .always, maxRetries: 3)
+    // @annotation 处理
     if (check(TokenType::AT)) {
         consume(); // @
-        std::string annotation = expect(TokenType::SUPERVISED, "expected 'supervised' after '@'").value;
-        (void)annotation;
 
-        RestartPolicy rp = RestartPolicy::Always; // 默认
-        int maxRetries = 3;
-
-        if (match(TokenType::LPAREN)) {
-            while (!check(TokenType::RPAREN) && !check(TokenType::EOF_TOKEN)) {
-                std::string key = expect(TokenType::IDENTIFIER, "expected key").value;
-                expect(TokenType::COLON, "expected ':'");
-
-                if (key == "restart") {
-                    if      (check(TokenType::DOT_ALWAYS)) { consume(); rp = RestartPolicy::Always; }
-                    else if (check(TokenType::DOT_NEVER))  { consume(); rp = RestartPolicy::Never; }
-                    else throw ParseError("expected .always or .never", current().line);
-                } else if (key == "maxRetries") {
-                    maxRetries = (int)std::stod(expect(TokenType::NUMBER, "expected number").value);
-                } else {
-                    // 跳过未知键
-                    consume();
-                }
-                if (!match(TokenType::COMMA)) break;
-            }
-            expect(TokenType::RPAREN, "expected ')'");
+        // @threadpool(name: "io-pool", size: 4)
+        if (check(TokenType::THREADPOOL)) {
+            consume();
+            return parseThreadPoolDecl();
         }
-        skipNewlines();
 
-        if (!check(TokenType::MODULE))
-            throw ParseError("@supervised must be followed by module declaration", current().line);
-        return parseModuleDecl(rp, maxRetries);
+        // @concurrent(pool: "io-pool", queue: 100, overflow: .block)
+        if (check(TokenType::CONCURRENT)) {
+            consume();
+            std::string poolName;
+            int         poolQueue    = 100;
+            std::string poolOverflow = "block";
+
+            if (match(TokenType::LPAREN)) {
+                while (!check(TokenType::RPAREN) && !check(TokenType::EOF_TOKEN)) {
+                    std::string key = expect(TokenType::IDENTIFIER, "expected key in @concurrent").value;
+                    expect(TokenType::COLON, "expected ':'");
+                    if (key == "pool") {
+                        poolName = expect(TokenType::STRING, "expected string for pool").value;
+                    } else if (key == "queue") {
+                        poolQueue = (int)std::stod(expect(TokenType::NUMBER, "expected number").value);
+                    } else if (key == "overflow") {
+                        if      (check(TokenType::DOT_BLOCK)) { consume(); poolOverflow = "block"; }
+                        else if (check(TokenType::DOT_DROP))  { consume(); poolOverflow = "drop";  }
+                        else if (check(TokenType::DOT_ERROR)) { consume(); poolOverflow = "error"; }
+                        else throw ParseError("expected .block, .drop, or .error", current().line);
+                    } else {
+                        consume();
+                    }
+                    if (!match(TokenType::COMMA)) break;
+                }
+                expect(TokenType::RPAREN, "expected ')'");
+            }
+            skipNewlines();
+
+            if (!check(TokenType::MODULE))
+                throw ParseError("@concurrent must be followed by module declaration", current().line);
+            return parseModuleDecl(RestartPolicy::None, 3, poolName, poolQueue, poolOverflow);
+        }
+
+        // @supervised(restart: .always, maxRetries: 3)
+        if (check(TokenType::SUPERVISED)) {
+            consume();
+            RestartPolicy rp = RestartPolicy::Always;
+            int maxRetries = 3;
+
+            if (match(TokenType::LPAREN)) {
+                while (!check(TokenType::RPAREN) && !check(TokenType::EOF_TOKEN)) {
+                    std::string key = expect(TokenType::IDENTIFIER, "expected key").value;
+                    expect(TokenType::COLON, "expected ':'");
+                    if (key == "restart") {
+                        if      (check(TokenType::DOT_ALWAYS)) { consume(); rp = RestartPolicy::Always; }
+                        else if (check(TokenType::DOT_NEVER))  { consume(); rp = RestartPolicy::Never; }
+                        else throw ParseError("expected .always or .never", current().line);
+                    } else if (key == "maxRetries") {
+                        maxRetries = (int)std::stod(expect(TokenType::NUMBER, "expected number").value);
+                    } else {
+                        consume();
+                    }
+                    if (!match(TokenType::COMMA)) break;
+                }
+                expect(TokenType::RPAREN, "expected ')'");
+            }
+            skipNewlines();
+
+            if (!check(TokenType::MODULE))
+                throw ParseError("@supervised must be followed by module declaration", current().line);
+            return parseModuleDecl(rp, maxRetries);
+        }
+
+        throw ParseError("unknown annotation (expected supervised, concurrent, or threadpool)", current().line);
     }
 
     if (check(TokenType::FN))         return parseFnDecl();
@@ -98,7 +162,9 @@ NodePtr Parser::parseMigrateBlock() {
     return block;
 }
 
-NodePtr Parser::parseModuleDecl(RestartPolicy rp, int maxRetries) {
+NodePtr Parser::parseModuleDecl(RestartPolicy rp, int maxRetries,
+                                  std::string poolName, int poolQueue,
+                                  std::string poolOverflow) {
     expect(TokenType::MODULE, "expected 'module'");
     std::string name = expect(TokenType::IDENTIFIER, "expected module name").value;
     skipNewlines();
@@ -117,7 +183,8 @@ NodePtr Parser::parseModuleDecl(RestartPolicy rp, int maxRetries) {
     }
     expect(TokenType::RBRACE, "expected '}' to close module");
     while (match(TokenType::NEWLINE)) {}
-    return std::make_unique<ModuleDecl>(name, std::move(body), rp, maxRetries);
+    return std::make_unique<ModuleDecl>(name, std::move(body), rp, maxRetries,
+                                        poolName, poolQueue, poolOverflow);
 }
 
 // persistent { visits: 0, errors: 0 }
@@ -432,7 +499,13 @@ NodePtr Parser::parsePrimary() {
                 node = std::make_unique<IndexExpr>(std::move(node), std::move(idx));
             } else if (check(TokenType::DOT)) {
                 consume(); // .
-                std::string member = expect(TokenType::IDENTIFIER, "expected member name after '.'").value;
+                // DOT 后可跟标识符或部分关键字（async/await）作为成员名
+                std::string member;
+                if      (check(TokenType::IDENTIFIER)) member = consume().value;
+                else if (check(TokenType::ASYNC))      { consume(); member = "async"; }
+                else if (check(TokenType::AWAIT))      { consume(); member = "await"; }
+                else throw ParseError("expected member name after '.'", current().line);
+
                 if (check(TokenType::LPAREN)) {
                     // .method(...) 调用
                     consume();
@@ -443,15 +516,24 @@ NodePtr Parser::parsePrimary() {
                     }
                     expect(TokenType::RPAREN, "expected ')'");
 
-                    // 判断是否是 Module.fn（对象是纯标识符）
-                    if (auto* id = dynamic_cast<Identifier*>(node.get())) {
+                    if (member == "async") {
+                        // Module.fn.async(args) → AsyncCall（跨 pool 调用）
+                        auto* mc = dynamic_cast<ModuleCall*>(node.get());
+                        if (mc && mc->args.empty()) {
+                            node = std::make_unique<AsyncCall>(mc->module, mc->fn, std::move(args));
+                        } else {
+                            throw ParseError(".async() must follow a Module.fn reference (no preceding args)", current().line);
+                        }
+                    } else if (auto* id = dynamic_cast<Identifier*>(node.get())) {
+                        // 判断是否是 Module.fn（对象是纯标识符）
                         node = std::make_unique<ModuleCall>(id->name, member, std::move(args));
                     } else {
                         node = std::make_unique<MethodCall>(std::move(node), member, std::move(args));
                     }
                 } else {
-                    // 字段访问（未来扩展，目前当作方法调用零参）
+                    // 无括号：字段访问 / Module.fn 函数引用（为后续 .async() 做准备）
                     if (auto* id = dynamic_cast<Identifier*>(node.get())) {
+                        // Module.fn → 暂存为零参 ModuleCall，后续 .async() 会改写
                         node = std::make_unique<ModuleCall>(id->name, member, std::vector<NodePtr>{});
                     }
                 }

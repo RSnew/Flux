@@ -12,6 +12,9 @@ enum class TokenType {
     DOT_ALWAYS, DOT_NEVER,
     // 并发关键字 (Feature K)
     ASYNC, AWAIT, SPAWN,
+    // 线程池注解 (Feature K v2)
+    THREADPOOL, CONCURRENT,
+    DOT_BLOCK, DOT_DROP, DOT_ERROR,
     // 运算符
     PLUS, MINUS, STAR, SLASH, PERCENT,
     EQ, NEQ, LT, GT, LEQ, GEQ,

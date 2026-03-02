@@ -33,7 +33,10 @@ private:
     std::unique_ptr<FnDecl> parseFnDecl();
     NodePtr parsePersistentBlock();
     NodePtr parseMigrateBlock();
-    NodePtr parseModuleDecl(RestartPolicy rp = RestartPolicy::None, int maxRetries = 3);
+    NodePtr parseModuleDecl(RestartPolicy rp = RestartPolicy::None, int maxRetries = 3,
+                             std::string poolName = "", int poolQueue = 100,
+                             std::string poolOverflow = "block");
+    NodePtr parseThreadPoolDecl();
 
     // 语句
     NodePtr      parseStatement();

@@ -23,6 +23,9 @@ const std::unordered_map<std::string, TokenType> Lexer::keywords_ = {
     {"async",      TokenType::ASYNC},
     {"await",      TokenType::AWAIT},
     {"spawn",      TokenType::SPAWN},
+    // 线程池注解 (Feature K v2)
+    {"threadpool", TokenType::THREADPOOL},
+    {"concurrent", TokenType::CONCURRENT},
 };
 
 Lexer::Lexer(const std::string& source) : source_(source) {}
@@ -207,6 +210,9 @@ std::vector<Token> Lexer::tokenize() {
                         word += advance();
                     if      (word == "always") tokens.push_back({TokenType::DOT_ALWAYS, ".always", line_});
                     else if (word == "never")  tokens.push_back({TokenType::DOT_NEVER,  ".never",  line_});
+                    else if (word == "block")  tokens.push_back({TokenType::DOT_BLOCK,  ".block",  line_});
+                    else if (word == "drop")   tokens.push_back({TokenType::DOT_DROP,   ".drop",   line_});
+                    else if (word == "error")  tokens.push_back({TokenType::DOT_ERROR,  ".error",  line_});
                     else {
                         tokens.push_back({TokenType::DOT, ".", line_});
                         // 把 word 作为标识符推回

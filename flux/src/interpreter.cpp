@@ -61,12 +61,23 @@ Interpreter::Interpreter() {
 
 // 等待所有 async/spawn 任务完成，防止悬空引用
 Interpreter::~Interpreter() {
+    // 通知所有线程池停止（pool 析构会 join workers）
+    pools_.clear();
     for (auto& f : pendingTasks_) {
         if (f.valid()) {
             GILRelease release;
             try { f.wait(); } catch (...) {}
         }
     }
+}
+
+// 获取模块绑定的线程池（nullptr = 无绑定或 pool 未声明）
+ThreadPool* Interpreter::getModulePool(const std::string& moduleName) {
+    auto it = modulePools_.find(moduleName);
+    if (it == modulePools_.end()) return nullptr;
+    auto pit = pools_.find(it->second);
+    if (pit == pools_.end()) return nullptr;
+    return pit->second.get();
 }
 
 void Interpreter::registerBuiltins() {
@@ -246,6 +257,11 @@ void Interpreter::executeModule(ModuleDecl* decl, std::shared_ptr<Environment> e
     mod.maxRetries    = decl->maxRetries;
     mod.decl          = decl;   // 保存 AST 指针供重启使用
     mod.functions.clear();
+
+    // @concurrent 绑定：注册 module → pool 映射
+    if (!decl->poolName.empty()) {
+        modulePools_[decl->name] = decl->poolName;
+    }
 
     // ── 收集本次声明的 persistent 字段 ──
     std::vector<PersistentField*> persistFields;
@@ -672,6 +688,34 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
                 return Value::Arr(arr);
             }
         }
+        // ── Future 方法：future.await() / future.await(ms) / future.isReady() / future.get()
+        if (obj.type == Value::Type::Future && obj.future) {
+            if (n->method == "await" || n->method == "get" || n->method == "value") {
+                int timeout_ms = margs.empty() ? -1 : (int)margs[0].number;
+                return obj.future->getWithTimeout(timeout_ms);
+            }
+            if (n->method == "isReady") return Value::Bool(obj.future->isReady());
+        }
+        // ── Chan 方法（与 ModuleCall 路径共享实现）──────────
+        if (obj.type == Value::Type::Chan && obj.chan) {
+            if (n->method == "send") {
+                if (margs.empty()) throw std::runtime_error("chan.send() requires an argument");
+                bool ok = obj.chan->send(std::move(margs[0]));
+                return Value::Bool(ok);
+            }
+            if (n->method == "recv") {
+                auto val = obj.chan->recv();
+                return val.has_value() ? *val : Value::Nil();
+            }
+            if (n->method == "tryRecv") {
+                auto val = obj.chan->tryRecv();
+                return val.has_value() ? *val : Value::Nil();
+            }
+            if (n->method == "close")   { obj.chan->close(); return Value::Nil(); }
+            if (n->method == "len" || n->method == "size")
+                return Value::Num((double)obj.chan->len());
+            if (n->method == "isClosed") return Value::Bool(obj.chan->isClosed());
+        }
         throw std::runtime_error("unknown method '" + n->method + "' on " + obj.toString());
     }
 
@@ -705,10 +749,67 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
         return Value::Nil();
     }
 
+    // ── 线程池声明 @threadpool ──
+    if (auto* n = dynamic_cast<ThreadPoolDecl*>(node)) {
+        if (n->name.empty())
+            throw std::runtime_error("@threadpool: name cannot be empty");
+        OverflowPolicy ov = OverflowPolicy::Block;
+        auto pool = std::make_shared<ThreadPool>(n->name, (size_t)n->size, 0, ov);
+        pools_[n->name] = std::move(pool);
+        return Value::Nil();
+    }
+
     // ── 模块声明 ──
     if (auto* n = dynamic_cast<ModuleDecl*>(node)) {
         executeModule(n, env);
         return Value::Nil();
+    }
+
+    // ── Module.fn.async(args) — 跨 pool 异步调用 ──────────
+    if (auto* n = dynamic_cast<AsyncCall*>(node)) {
+        std::vector<Value> captArgs;
+        for (auto& a : n->args)
+            captArgs.push_back(evalNode(a.get(), env, mod));
+
+        auto promise = std::make_shared<std::promise<Value>>();
+        auto sfuture = promise->get_future().share();
+
+        ThreadPool* pool = getModulePool(n->module);
+        Interpreter* self = this;
+        std::string  modName = n->module;
+        std::string  fnName  = n->fn;
+
+        if (pool) {
+            // 提交到模块绑定的线程池
+            bool submitted = pool->submit(
+                [self, promise, modName, fnName, captArgs = std::move(captArgs)]() mutable {
+                    GILGuard gil;
+                    try {
+                        promise->set_value(self->callModuleFunction(modName, fnName, std::move(captArgs)));
+                    } catch (...) {
+                        promise->set_exception(std::current_exception());
+                    }
+                });
+            if (!submitted) {
+                // Drop 策略：直接返回 nil Future
+                promise->set_value(Value::Nil());
+            }
+        } else {
+            // 无 pool 绑定：退化为普通 detached 线程（向后兼容）
+            std::thread t(
+                [self, promise, modName, fnName, captArgs = std::move(captArgs)]() mutable {
+                    GILGuard gil;
+                    try {
+                        promise->set_value(self->callModuleFunction(modName, fnName, std::move(captArgs)));
+                    } catch (...) {
+                        promise->set_exception(std::current_exception());
+                    }
+                });
+            t.detach();
+        }
+
+        pendingTasks_.push_back(sfuture);
+        return Value::Future(std::make_shared<FutureVal>(std::move(sfuture)));
     }
 
     // ── 跨模块调用（含回退到变量方法调用）────────────────
@@ -899,8 +1000,11 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
         if (obj.type == Value::Type::Future && obj.future) {
             if (n->fn == "isReady")
                 return Value::Bool(obj.future->isReady());
-            if (n->fn == "get" || n->fn == "value")
-                return obj.future->get();
+            if (n->fn == "await" || n->fn == "get" || n->fn == "value") {
+                // await(timeout_ms?) — 支持可选超时参数
+                int timeout_ms = margs.empty() ? -1 : (int)margs[0].number;
+                return obj.future->getWithTimeout(timeout_ms);
+            }
         }
         throw std::runtime_error("unknown method '" + n->fn + "' on " + obj.toString());
     }

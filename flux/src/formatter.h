@@ -122,7 +122,11 @@ private:
         if (auto* n = dynamic_cast<ExprStmt*>(node)) {
             return fmtExpr(n->expr.get(), minPrec);
         }
-        // async <call> — 异步表达式
+        // Module.fn.async(args) — 跨 pool 异步调用
+        if (auto* n = dynamic_cast<AsyncCall*>(node)) {
+            return n->module + "." + n->fn + ".async(" + fmtArgList(n->args) + ")";
+        }
+        // async <call> — 异步表达式（向后兼容）
         if (auto* n = dynamic_cast<AsyncExpr*>(node)) {
             return "async " + fmtExpr(n->call.get());
         }
@@ -270,9 +274,22 @@ private:
             return s + ind() + "}\n";
         }
 
+        // ── @threadpool(name: "io-pool", size: 4) ────────────
+        if (auto* n = dynamic_cast<ThreadPoolDecl*>(node)) {
+            return ind() + "@threadpool(name: \"" + n->name
+                   + "\", size: " + std::to_string(n->size) + ")\n";
+        }
+
         // ── module [...] { } ─────────────────────────────────
         if (auto* n = dynamic_cast<ModuleDecl*>(node)) {
             std::string s = ind();
+            // @concurrent 注解（优先于 @supervised）
+            if (!n->poolName.empty()) {
+                s += "@concurrent(pool: \"" + n->poolName + "\"";
+                if (n->poolQueue != 100) s += ", queue: " + std::to_string(n->poolQueue);
+                if (n->poolOverflow != "block") s += ", overflow: ." + n->poolOverflow;
+                s += ")\n" + ind();
+            }
             if (n->restartPolicy == RestartPolicy::Always) {
                 s += "@supervised(restart: .always, maxRetries: "
                      + std::to_string(n->maxRetries) + ")\n" + ind();

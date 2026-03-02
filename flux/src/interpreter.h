@@ -1,6 +1,7 @@
 #pragma once
 #include "ast.h"
 #include "concurrency.h"
+#include "threadpool.h"
 #include <unordered_map>
 #include <unordered_set>
 #include <string>
@@ -116,11 +117,25 @@ struct Value {
 struct FutureVal {
     std::shared_future<Value> fut;
     explicit FutureVal(std::shared_future<Value> f) : fut(std::move(f)) {}
-    // 等待并获取结果（释放 GIL 以免阻塞其他 Flux 线程）
+
+    // 无超时等待（释放 GIL 以允许其他 Flux 线程运行）
     Value get() {
         GILRelease release;
         return fut.get();
     }
+
+    // 带超时等待：timeout_ms < 0 表示无限等待
+    // 超时抛出 runtime_error，其余同 get()
+    Value getWithTimeout(int timeout_ms) {
+        GILRelease release;
+        if (timeout_ms < 0) return fut.get();
+        auto status = fut.wait_for(std::chrono::milliseconds(timeout_ms));
+        if (status == std::future_status::timeout)
+            throw std::runtime_error("future.await() timed out after " +
+                                     std::to_string(timeout_ms) + "ms");
+        return fut.get();
+    }
+
     bool isReady() const {
         return fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
     }
@@ -266,4 +281,13 @@ private:
     // ── 并发任务追踪（Feature K）──────────────────────────
     // 析构时 join 所有未完成的 async/spawn 任务，防止悬空引用
     std::vector<std::shared_future<Value>> pendingTasks_;
+
+    // ── 线程池管理（Feature K v2）────────────────────────
+    // poolName → ThreadPool 实例（@threadpool 声明时创建）
+    std::unordered_map<std::string, std::shared_ptr<ThreadPool>> pools_;
+    // moduleName → poolName（@concurrent 绑定时注册）
+    std::unordered_map<std::string, std::string> modulePools_;
+
+    // 获取模块绑定的线程池（nullptr 表示无绑定）
+    ThreadPool* getModulePool(const std::string& moduleName);
 };

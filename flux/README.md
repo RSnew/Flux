@@ -191,15 +191,43 @@ non-module top-level code.
 - Code folding on `{` blocks
 - Snippets: `fn`, `module`, `if`, `while`, `for`, `persistent`, …
 
-### ✅ Feature K — 并发模型 (Concurrency Model)
-- **`async <call>`** — wrap any function call in a background thread; returns a `Future` value
-- **`await <future>`** — block until a `Future` resolves; releases GIL so other threads can run
-- **`spawn { ... }`** — fire-and-forget background task block; no return value needed
-- **`Chan.make()`** / **`Chan.make(cap)`** — unbounded or bounded thread-safe channels
-- **Channel ops** — `ch.send(v)`, `ch.recv()` (blocking), `ch.tryRecv()` (non-blocking), `ch.close()`
-- **GIL** — Global Interpreter Lock (`concurrency.h`) prevents data races; `GILRelease` enables parallel I/O
-- **`Future` methods** — `fut.isReady()`, `fut.get()`
-- **`nil` keyword** — added as first-class language literal (used in closed-channel detection)
+### ✅ Feature K — 并发模型 (Concurrency Model) v2
+
+**线程池声明** — 用户显式控制，语言保证安全：
+```flux
+@threadpool(name: "io-pool", size: 4)    // 声明 IO 线程池
+@threadpool(name: "cpu-pool", size: 2)   // 声明 CPU 线程池
+```
+
+**模块绑定** — 一行注解绑定到对应线程池：
+```flux
+@concurrent(pool: "io-pool")                                       // 默认: overflow: .block
+@concurrent(pool: "io-pool", queue: 32, overflow: .drop)           // 日志/采样
+@concurrent(pool: "order-pool", queue: 10000, overflow: .error)    // 金融关键路径
+module MyService { ... }
+```
+
+**跨 pool 异步调用** — `.async()` 方法语法：
+```flux
+let f = ImageProcessor.resize.async(1920, 1080)   // 提交到 cpu-pool，立即返回 Future
+let result = f.await()                             // 等待结果
+let result = f.await(500)                          // 带 500ms 超时
+```
+
+**溢出策略**：
+| 策略 | 说明 |
+|------|------|
+| `.block` (默认) | 阻塞发送方直到有空位，不丢数据 |
+| `.drop` | 静默丢弃（适合日志/采样） |
+| `.error` | 抛出异常（适合金融关键路径） |
+
+**Channels & 向后兼容**：
+- `Chan.make()` / `Chan.make(cap)` — 无界/有界线程安全通道
+- `ch.send(v)`, `ch.recv()`, `ch.tryRecv()`, `ch.close()`
+- `async fn(args)` / `await future` 关键字语法（向后兼容保留）
+- `spawn { ... }` — 独立后台任务
+- `nil` — 一等公民字面量（用于通道关闭检测）
+- `fut.isReady()` — Future 状态轮询
 - Example: `examples/concurrency_demo.flux`
 
 ### 📋 Feature L — 包管理器 (Package Manager)
@@ -228,6 +256,7 @@ flux/
 │   ├── parser.h/.cpp    Recursive-descent parser
 │   ├── typechecker.h/.cpp  Type inference + annotation checking
 │   ├── concurrency.h    GIL + GILGuard + GILRelease (Feature K)
+│   ├── threadpool.h     ThreadPool with overflow policies (Feature K v2)
 │   ├── interpreter.h/.cpp  Tree-walking interpreter (hot reload, modules, async/await/spawn)
 │   ├── stdlib.cpp       Standard library (File, Json, Http, Time, Chan)
 │   ├── compiler.h/.cpp  AST → bytecode compiler (Feature G)

@@ -144,16 +144,31 @@ enum class RestartPolicy {
     Never,      // 崩溃后停止，不重启
 };
 
+// ── @threadpool(name: "io-pool", size: 4) 声明 ───────────
+struct ThreadPoolDecl : ASTNode {
+    std::string name;   // pool 名称
+    int         size;   // worker 线程数
+    explicit ThreadPoolDecl(std::string n, int s) : name(std::move(n)), size(s) {}
+};
+
 // ── module MyModule { ... } ───────────────────────────────
+// 可附加 @concurrent(pool: ..., queue: ..., overflow: ...)
 struct ModuleDecl : ASTNode {
     std::string          name;
     std::vector<NodePtr> body;
     RestartPolicy        restartPolicy = RestartPolicy::None;
     int                  maxRetries    = 3;
+    // @concurrent 注解（空 poolName = 无绑定）
+    std::string          poolName;
+    int                  poolQueue    = 100;
+    std::string          poolOverflow = "block";   // "block" | "drop" | "error"
+
     ModuleDecl(std::string n, std::vector<NodePtr> b,
-               RestartPolicy rp = RestartPolicy::None, int mr = 3)
+               RestartPolicy rp = RestartPolicy::None, int mr = 3,
+               std::string pn = "", int pq = 100, std::string po = "block")
         : name(std::move(n)), body(std::move(b))
-        , restartPolicy(rp), maxRetries(mr) {}
+        , restartPolicy(rp), maxRetries(mr)
+        , poolName(std::move(pn)), poolQueue(pq), poolOverflow(std::move(po)) {}
 };
 
 // ── ModuleName.functionName(args) ─────────────────────────
@@ -218,7 +233,16 @@ struct ForIn : ASTNode {
         : var(std::move(v)), iterable(std::move(it)), body(std::move(b)) {}
 };
 
-// ── async call(args) — 返回 Future 值（Feature K）────────
+// ── Module.fn.async(args) — 跨 pool 异步调用（Feature K v2）
+struct AsyncCall : ASTNode {
+    std::string          module;  // 目标模块名
+    std::string          fn;      // 函数名
+    std::vector<NodePtr> args;    // 实参
+    AsyncCall(std::string mod, std::string f, std::vector<NodePtr> a)
+        : module(std::move(mod)), fn(std::move(f)), args(std::move(a)) {}
+};
+
+// ── async call(args) — 返回 Future 值（Feature K 向后兼容）
 struct AsyncExpr : ASTNode {
     NodePtr call;   // CallExpr 或 ModuleCall（被异步执行的调用）
     explicit AsyncExpr(NodePtr c) : call(std::move(c)) {}

@@ -1,106 +1,131 @@
-// concurrency_demo.flux — Feature K: 并发模型演示
-// 展示 async/await、Chan 通道、spawn 三种并发原语
+// concurrency_demo.flux — Feature K v2: 线程池并发模型
+// 演示 @threadpool / @concurrent / Module.fn.async() / future.await(timeout)
 
-// ── 1. async / await ──────────────────────────────────────
-// async 关键字将函数调用包装为 Future，在独立线程中运行
-// await 等待 Future 完成并取得返回值
+// ── 1. 声明线程池 ─────────────────────────────────────────
+// 一行声明即可，90% 场景默认值足够
+@threadpool(name: "io-pool", size: 4)
+@threadpool(name: "cpu-pool", size: 2)
+@threadpool(name: "order-pool", size: 1)
 
-fn slow_add(a, b) {
-    Time.sleep(50)
-    return a + b
+// ── 2. 绑定模块到线程池 ───────────────────────────────────
+// 默认：overflow: .block（安全优先，不丢任务）
+@concurrent(pool: "cpu-pool")
+module ImageProcessor {
+    fn resize(w, h) {
+        Time.sleep(50)    // 模拟 CPU 密集型：50ms
+        return w * h
+    }
+    fn compress(quality) {
+        Time.sleep(30)    // 模拟 CPU 密集型：30ms
+        return quality * 100
+    }
 }
 
-fn slow_mul(a, b) {
-    Time.sleep(30)
-    return a * b
+// 日志/采样场景：队列满时静默丢弃，不阻塞调用方
+@concurrent(pool: "io-pool", queue: 32, overflow: .drop)
+module FileService {
+    fn read(path) {
+        Time.sleep(20)    // 模拟 IO：20ms
+        return "content of " + path
+    }
+    fn write(path, data) {
+        Time.sleep(10)    // 模拟 IO：10ms
+        return true
+    }
 }
 
-print("=== async / await 演示 ===")
+// 金融/关键路径：队列满时报错，不能丢
+@concurrent(pool: "order-pool", queue: 10000, overflow: .error)
+module OrderBook {
+    fn place(symbol, qty, price) {
+        Time.sleep(5)
+        return symbol + " x" + qty + " @" + price
+    }
+}
 
+
+print("=== Feature K v2: 线程池并发模型 ===")
+print("")
+
+// ── 3. Module.fn.async(args) — 跨 pool 异步调用 ──────────
+// 调用方不阻塞，立即返回 Future；任务提交到目标模块的线程池
+print("--- 3.1 并行执行两个 CPU 密集型任务 ---")
 var t0 = Time.now()
 
-// 并发启动两个任务
-var f1 = async slow_add(10, 20)
-var f2 = async slow_mul(6, 7)
+var f1 = ImageProcessor.resize.async(1920, 1080)
+var f2 = ImageProcessor.compress.async(90)
 
-// 等待结果（两任务并行运行，总耗时约 50ms 而非 80ms）
-var sum = await f1
-var prod = await f2
-
+// future.await() 等待结果
+var pixels = f1.await()
+var compressed = f2.await()
 var elapsed = Time.diff(t0, Time.now())
-print("slow_add(10, 20) = " + sum)
-print("slow_mul(6, 7)   = " + prod)
-print("并行耗时约: " + elapsed + "s (串行需约 0.08s)")
 
+print("resize(1920, 1080) = " + pixels)
+print("compress(90) = " + compressed)
+print("并行耗时: " + elapsed + "s (串行需约 0.08s)")
 
-// ── 2. Chan 通道 ──────────────────────────────────────────
-// Chan.make()     — 创建无界通道
-// Chan.make(cap)  — 创建有界通道（满时发送者阻塞）
-// chan.send(v)    — 发送值
-// chan.recv()     — 阻塞接收
-// chan.close()    — 关闭通道
-
+// ── 4. future.await(timeout_ms) — 带超时的等待 ───────────
 print("")
-print("=== Chan 通道演示 ===")
+print("--- 4.1 future.await(timeout) ---")
+var f3 = FileService.read.async("config.json")
+var content = f3.await(500)    // 最多等 500ms
+print("读取结果: " + content)
+
+// ── 5. 同时运行多个 IO 任务 ──────────────────────────────
+print("")
+print("--- 5.1 多文件并发读取 ---")
+var t1 = Time.now()
+var fa = FileService.read.async("a.txt")
+var fb = FileService.read.async("b.txt")
+var fc = FileService.read.async("c.txt")
+
+var ca = fa.await()
+var cb = fb.await()
+var cc = fc.await()
+var el2 = Time.diff(t1, Time.now())
+print(ca)
+print(cb)
+print(cc)
+print("3 个文件并发耗时: " + el2 + "s (串行需约 0.06s)")
+
+// ── 6. 关键路径调用 ──────────────────────────────────────
+print("")
+print("--- 6.1 OrderBook 串行队列 ---")
+var o1 = OrderBook.place.async("AAPL", 100, 182.5)
+var o2 = OrderBook.place.async("GOOG", 50, 141.0)
+var r1 = o1.await()
+var r2 = o2.await()
+print("订单1: " + r1)
+print("订单2: " + r2)
+
+// ── 7. future.isReady() 轮询 ─────────────────────────────
+print("")
+print("--- 7.1 isReady() 状态轮询 ---")
+var fheavy = ImageProcessor.resize.async(3840, 2160)
+print("任务提交，isReady = " + fheavy.isReady())
+Time.sleep(80)
+print("等待 80ms 后，isReady = " + fheavy.isReady())
+var res = fheavy.await()
+print("结果: " + res)
+
+// ── 8. 向后兼容：保留 async keyword / await keyword / spawn ──
+print("")
+print("--- 8. 向后兼容语法（async/await 关键字 + spawn）---")
+fn slow_fn(x) {
+    Time.sleep(15)
+    return x * 2
+}
+var fut_kw = async slow_fn(21)
+var val_kw = await fut_kw
+print("async keyword 结果: " + val_kw)
 
 var ch = Chan.make(3)
-
 spawn {
-    var i = 1
-    while i <= 5 {
-        ch.send(i)
-        i = i + 1
-    }
+    ch.send(42)
+    ch.send(99)
     ch.close()
 }
-
-var received = ch.recv()
-while received != nil {
-    print("收到: " + received)
-    received = ch.recv()
-}
-print("通道已关闭，接收完毕")
-
-
-// ── 3. spawn 并发任务 ─────────────────────────────────────
-// spawn { ... } 启动 fire-and-forget 后台任务
+print("spawn + Chan: " + ch.recv() + ", " + ch.recv())
 
 print("")
-print("=== spawn 后台任务演示 ===")
-
-var result_ch = Chan.make()
-
-spawn {
-    Time.sleep(20)
-    result_ch.send(42)
-}
-
-spawn {
-    Time.sleep(10)
-    result_ch.send(100)
-}
-
-var r1 = result_ch.recv()
-var r2 = result_ch.recv()
-print("spawn 任务结果 1: " + r1)
-print("spawn 任务结果 2: " + r2)
-
-
-// ── 4. Future.isReady() ────────────────────────────────────
-print("")
-print("=== Future.isReady() 轮询演示 ===")
-
-fn compute_heavy() {
-    Time.sleep(40)
-    return 9999
-}
-
-var fut = async compute_heavy()
-print("任务已启动，isReady = " + fut.isReady())
-Time.sleep(60)
-print("等待 60ms 后，isReady = " + fut.isReady())
-var val = await fut
-print("最终结果: " + val)
-
-print("")
-print("Feature K 并发演示完成")
+print("Feature K v2 线程池并发演示完成 ✓")
