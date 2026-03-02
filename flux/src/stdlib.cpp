@@ -468,12 +468,15 @@ static std::unordered_map<std::string, StdlibFn> makeTimeModule() {
             return Value::Num((double)ns);
         }},
 
-        // Time.sleep(ms) → Nil
+        // Time.sleep(ms) → Nil  (releases GIL during sleep)
         {"sleep", [](std::vector<Value> args) -> Value {
             if (args.empty() || args[0].type != Value::Type::Number)
                 throw std::runtime_error("Time.sleep(ms) — ms must be a Number");
             auto ms = (long long)args[0].number;
-            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+            {
+                GILRelease release;   // allow other threads to run while sleeping
+                std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+            }
             return Value::Nil();
         }},
 
@@ -506,9 +509,24 @@ static std::unordered_map<std::string, StdlibFn> makeTimeModule() {
 // ═══════════════════════════════════════════════════════════
 // 注册所有标准库模块
 // ═══════════════════════════════════════════════════════════
+// ── Chan 模块：创建通道 ───────────────────────────────────
+// Chan.make()     — 无界通道
+// Chan.make(cap)  — 有界通道（capacity = cap）
+static std::unordered_map<std::string, StdlibFn> makeChanModule() {
+    std::unordered_map<std::string, StdlibFn> m;
+    m["make"] = [](std::vector<Value> args) -> Value {
+        size_t cap = 0;
+        if (!args.empty() && args[0].type == Value::Type::Number)
+            cap = (size_t)args[0].number;
+        return Value::Chan(std::make_shared<ChanVal>(cap));
+    };
+    return m;
+}
+
 void Interpreter::registerStdlib() {
     registerStdlibModule("File", makeFileModule());
     registerStdlibModule("Json", makeJsonModule());
     registerStdlibModule("Http", makeHttpModule());
     registerStdlibModule("Time", makeTimeModule());
+    registerStdlibModule("Chan", makeChanModule());
 }

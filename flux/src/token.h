@@ -5,11 +5,13 @@ enum class TokenType {
     // 字面量
     NUMBER, STRING, IDENTIFIER,
     // 关键字
-    LET, VAR, FN, RETURN, IF, ELSE, WHILE, TRUE, FALSE,
+    LET, VAR, FN, RETURN, IF, ELSE, WHILE, TRUE, FALSE, NIL,
     FOR, IN,
     PERSISTENT, STATE, MODULE, MIGRATE,
     SUPERVISED, AT,
     DOT_ALWAYS, DOT_NEVER,
+    // 并发关键字 (Feature K)
+    ASYNC, AWAIT, SPAWN,
     // 运算符
     PLUS, MINUS, STAR, SLASH, PERCENT,
     EQ, NEQ, LT, GT, LEQ, GEQ,

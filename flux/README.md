@@ -115,7 +115,7 @@ print(Json.stringify(m))
 | I  | 标准库   | File IO, JSON (zero-dep parser), HTTP (POSIX socket), Time | ✅ Done |
 | G  | 字节码VM | Stack-based bytecode VM + compiler; `--vm` flag; modules via tree-walker | ✅ Done |
 | J  | 工具链   | `flux check`, `flux fmt`, `flux run`, improved REPL, VSCode extension | ✅ Done |
-| K  | 并发模型 | `async`/`await`, Actor model, channels | 📋 Planned |
+| K  | 并发模型 | `async`/`await`, GIL-based threads, `Chan` channels, `spawn` | ✅ Done |
 | L  | 包管理器 | `flux.toml`, dependency resolution, registry | 📋 Planned |
 | M  | 自举编译器 | Flux compiles Flux (self-hosting) | 🔭 Future |
 
@@ -191,11 +191,16 @@ non-module top-level code.
 - Code folding on `{` blocks
 - Snippets: `fn`, `module`, `if`, `while`, `for`, `persistent`, …
 
-### 📋 Feature K — 并发模型 (Concurrency Model)
-- `async fn` / `await` — cooperative coroutines on a thread pool
-- Actor model — each module becomes an actor with a message queue
-- Channels — typed `Chan<T>` for inter-actor communication
-- Backpressure — bounded channels, `select` statement
+### ✅ Feature K — 并发模型 (Concurrency Model)
+- **`async <call>`** — wrap any function call in a background thread; returns a `Future` value
+- **`await <future>`** — block until a `Future` resolves; releases GIL so other threads can run
+- **`spawn { ... }`** — fire-and-forget background task block; no return value needed
+- **`Chan.make()`** / **`Chan.make(cap)`** — unbounded or bounded thread-safe channels
+- **Channel ops** — `ch.send(v)`, `ch.recv()` (blocking), `ch.tryRecv()` (non-blocking), `ch.close()`
+- **GIL** — Global Interpreter Lock (`concurrency.h`) prevents data races; `GILRelease` enables parallel I/O
+- **`Future` methods** — `fut.isReady()`, `fut.get()`
+- **`nil` keyword** — added as first-class language literal (used in closed-channel detection)
+- Example: `examples/concurrency_demo.flux`
 
 ### 📋 Feature L — 包管理器 (Package Manager)
 - `flux.toml` — project manifest (name, version, deps, scripts)
@@ -222,8 +227,9 @@ flux/
 │   ├── ast.h            AST node definitions (26 node types)
 │   ├── parser.h/.cpp    Recursive-descent parser
 │   ├── typechecker.h/.cpp  Type inference + annotation checking
-│   ├── interpreter.h/.cpp  Tree-walking interpreter (hot reload, modules)
-│   ├── stdlib.cpp       Standard library (File, Json, Http, Time)
+│   ├── concurrency.h    GIL + GILGuard + GILRelease (Feature K)
+│   ├── interpreter.h/.cpp  Tree-walking interpreter (hot reload, modules, async/await/spawn)
+│   ├── stdlib.cpp       Standard library (File, Json, Http, Time, Chan)
 │   ├── compiler.h/.cpp  AST → bytecode compiler (Feature G)
 │   ├── vm.h/.cpp        Stack-based bytecode VM (Feature G)
 │   ├── formatter.h      AST → source code formatter (Feature J)
@@ -243,6 +249,7 @@ flux/
     ├── migrate_demo.flux
     ├── supervisor_demo.flux
     ├── stdlib_demo.flux
+    ├── concurrency_demo.flux
     └── test_array_interp_forin.flux
 ```
 

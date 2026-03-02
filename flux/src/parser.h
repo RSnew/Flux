@@ -42,6 +42,7 @@ private:
     NodePtr      parseWhile();
     NodePtr      parseForIn();
     NodePtr      parseReturn();
+    NodePtr      parseSpawn();
     std::vector<NodePtr> parseBlock();
 
     // 表达式（递归下降，优先级从低到高）

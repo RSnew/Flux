@@ -4,11 +4,69 @@
 #include <cmath>
 #include <algorithm>
 
-// ── 构造 ──────────────────────────────────────────────────
+// ── ChanVal 方法实现 ──────────────────────────────────────
+// 锁顺序约束：先释放 GIL，再持有 channel 锁。
+// 不允许同时持有 GIL + channel 锁（防止死锁）。
+
+bool ChanVal::send(Value v) {
+    GILRelease release;                          // 先释放 GIL
+    std::unique_lock<std::mutex> lk(mu);         // 再持有 channel 锁
+    if (cap > 0) {                               // 有界通道满时等待
+        cv_send.wait(lk, [this] {
+            return q.size() < cap || closed_;
+        });
+    }
+    if (closed_) return false;
+    q.push_back(std::move(v));
+    cv_recv.notify_one();
+    return true;
+    // 析构顺序：lk 先释放，再 GILRelease 恢复 GIL（无死锁）
+}
+
+std::optional<Value> ChanVal::recv() {
+    GILRelease release;                          // 先释放 GIL
+    std::unique_lock<std::mutex> lk(mu);         // 再持有 channel 锁
+    cv_recv.wait(lk, [this] {
+        return !q.empty() || closed_;
+    });
+    if (q.empty()) return std::nullopt;          // 通道已关闭且空
+    Value v = std::move(q.front());
+    q.pop_front();
+    cv_send.notify_one();
+    return v;
+}
+
+std::optional<Value> ChanVal::tryRecv() {
+    std::unique_lock<std::mutex> lk(mu);
+    if (q.empty()) return std::nullopt;
+    Value v = std::move(q.front());
+    q.pop_front();
+    cv_send.notify_one();
+    return v;
+}
+
+void ChanVal::close() {
+    std::unique_lock<std::mutex> lk(mu);
+    closed_ = true;
+    cv_recv.notify_all();
+    cv_send.notify_all();
+}
+
+// ── 构造 & 析构 ───────────────────────────────────────────
 Interpreter::Interpreter() {
     globalEnv_ = std::make_shared<Environment>();
     registerBuiltins();
     registerStdlib();
+}
+
+// 等待所有 async/spawn 任务完成，防止悬空引用
+Interpreter::~Interpreter() {
+    for (auto& f : pendingTasks_) {
+        if (f.valid()) {
+            GILRelease release;
+            try { f.wait(); } catch (...) {}
+        }
+    }
 }
 
 void Interpreter::registerBuiltins() {
@@ -813,6 +871,37 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
                 return Value::Arr(arr);
             }
         }
+        // ── Chan 方法 ─────────────────────────────────────
+        if (obj.type == Value::Type::Chan && obj.chan) {
+            if (n->fn == "send") {
+                if (margs.empty()) throw std::runtime_error("Chan.send requires a value");
+                bool ok = obj.chan->send(std::move(margs[0]));
+                return Value::Bool(ok);
+            }
+            if (n->fn == "recv") {
+                auto val = obj.chan->recv();
+                return val.has_value() ? *val : Value::Nil();
+            }
+            if (n->fn == "tryRecv") {
+                auto val = obj.chan->tryRecv();
+                return val.has_value() ? *val : Value::Nil();
+            }
+            if (n->fn == "close") {
+                obj.chan->close();
+                return Value::Nil();
+            }
+            if (n->fn == "len" || n->fn == "size")
+                return Value::Num((double)obj.chan->len());
+            if (n->fn == "isClosed")
+                return Value::Bool(obj.chan->isClosed());
+        }
+        // ── Future 方法 ───────────────────────────────────
+        if (obj.type == Value::Type::Future && obj.future) {
+            if (n->fn == "isReady")
+                return Value::Bool(obj.future->isReady());
+            if (n->fn == "get" || n->fn == "value")
+                return obj.future->get();
+        }
         throw std::runtime_error("unknown method '" + n->fn + "' on " + obj.toString());
     }
 
@@ -840,6 +929,7 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
     if (auto* n = dynamic_cast<NumberLit*>(node))  return Value::Num(n->value);
     if (auto* n = dynamic_cast<StringLit*>(node))  return Value::Str(n->value);
     if (auto* n = dynamic_cast<BoolLit*>(node))    return Value::Bool(n->value);
+    if (dynamic_cast<NilLit*>(node))               return Value::Nil();
 
     // ── 变量 ──
     if (auto* n = dynamic_cast<Identifier*>(node)) return env->get(n->name);
@@ -907,6 +997,87 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
     // ── 表达式语句 ──
     if (auto* n = dynamic_cast<ExprStmt*>(node))
         return evalNode(n->expr.get(), env, mod);
+
+    // ── 并发节点（Feature K）──────────────────────────────
+
+    // async call(args) — 在新线程中运行函数调用，返回 Future
+    if (auto* n = dynamic_cast<AsyncExpr*>(node)) {
+        // 提取被调用函数名和已求值的参数
+        std::string     funcName, modName;
+        std::vector<Value> args;
+        bool isModule = false;
+
+        if (auto* call = dynamic_cast<CallExpr*>(n->call.get())) {
+            funcName = call->name;
+            for (auto& a : call->args) args.push_back(evalNode(a.get(), env, mod));
+        } else if (auto* mc = dynamic_cast<ModuleCall*>(n->call.get())) {
+            modName  = mc->module;
+            funcName = mc->fn;
+            isModule = true;
+            for (auto& a : mc->args) args.push_back(evalNode(a.get(), env, mod));
+        } else {
+            throw std::runtime_error("async only supports function calls");
+        }
+
+        // 创建 promise/future 对
+        auto promise = std::make_shared<std::promise<Value>>();
+        auto sfuture = promise->get_future().share();
+
+        Interpreter* self = this;
+        std::thread t([self, promise, funcName, modName, isModule,
+                        captArgs = std::move(args)]() mutable {
+            GILGuard gil;  // 异步线程进入时获取 GIL
+            try {
+                Value result = isModule
+                    ? self->callModuleFunction(modName, funcName, std::move(captArgs))
+                    : self->callFunction(funcName, std::move(captArgs));
+                promise->set_value(std::move(result));
+            } catch (...) {
+                promise->set_exception(std::current_exception());
+            }
+        });
+        t.detach();
+
+        pendingTasks_.push_back(sfuture);
+        return Value::Future(std::make_shared<FutureVal>(std::move(sfuture)));
+    }
+
+    // await expr — 等待 Future 完成，返回结果值（释放 GIL 期间阻塞）
+    if (auto* n = dynamic_cast<AwaitExpr*>(node)) {
+        Value futVal = evalNode(n->expr.get(), env, mod);
+        if (futVal.type != Value::Type::Future || !futVal.future)
+            throw std::runtime_error("await requires a Future value");
+        return futVal.future->get();  // GILRelease 在 FutureVal::get() 内部
+    }
+
+    // spawn { ... } — fire-and-forget 后台任务
+    if (auto* n = dynamic_cast<SpawnStmt*>(node)) {
+        // 复制 body 的 raw 指针列表（nodes 由 Program 所有，生命周期足够）
+        auto promise = std::make_shared<std::promise<Value>>();
+        auto sfuture = promise->get_future().share();
+
+        // 捕获 body 节点的原始指针（由 AST 拥有）
+        std::vector<ASTNode*> body;
+        for (auto& s : n->body) body.push_back(s.get());
+
+        Interpreter* self = this;
+        auto spawnEnv = std::make_shared<Environment>(env);  // 快照当前作用域
+
+        std::thread t([self, promise, body, spawnEnv, mod]() mutable {
+            GILGuard gil;
+            try {
+                for (ASTNode* stmt : body)
+                    self->evalNode(stmt, spawnEnv, mod);
+                promise->set_value(Value::Nil());
+            } catch (...) {
+                promise->set_exception(std::current_exception());
+            }
+        });
+        t.detach();
+
+        pendingTasks_.push_back(sfuture);
+        return Value::Nil();
+    }
 
     // ── 跳过顶层声明节点 ──
     if (dynamic_cast<FnDecl*>(node))          return Value::Nil();

@@ -1,5 +1,6 @@
 #pragma once
 #include "ast.h"
+#include "concurrency.h"
 #include <unordered_map>
 #include <unordered_set>
 #include <string>
@@ -8,22 +9,34 @@
 #include <vector>
 #include <stdexcept>
 #include <memory>
+#include <future>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <deque>
+#include <optional>
 
 // ── Value 类型 ────────────────────────────────────────────
-// 前向声明（Array 需要 shared_ptr<vector<Value>>）
+// 前向声明
 struct Value;
-using ValueArray = std::shared_ptr<std::vector<Value>>;
-using ValueMap   = std::shared_ptr<std::unordered_map<std::string, Value>>;
+struct FutureVal;
+struct ChanVal;
+using ValueArray  = std::shared_ptr<std::vector<Value>>;
+using ValueMap    = std::shared_ptr<std::unordered_map<std::string, Value>>;
+using ValueFuture = std::shared_ptr<FutureVal>;
+using ValueChan   = std::shared_ptr<ChanVal>;
 
 struct Value {
-    enum class Type { Nil, Number, String, Bool, Array, Map };
+    enum class Type { Nil, Number, String, Bool, Array, Map, Future, Chan };
     Type type = Type::Nil;
 
     double      number  = 0;
     std::string string;
     bool        boolean = false;
-    ValueArray  array;          // Array 类型
+    ValueArray  array;           // Array 类型
     ValueMap    map;             // Map 类型
+    ValueFuture future;          // Future 类型（async 返回值）
+    ValueChan   chan;            // Chan 类型（并发通道）
 
     static Value Nil()    { return {}; }
     static Value Num(double n)       { Value v; v.type = Type::Number; v.number = n; return v; }
@@ -43,6 +56,12 @@ struct Value {
     static Value MapOf(ValueMap m) {
         Value v; v.type = Type::Map; v.map = std::move(m); return v;
     }
+    static Value Future(ValueFuture f) {
+        Value v; v.type = Type::Future; v.future = std::move(f); return v;
+    }
+    static Value Chan(ValueChan c) {
+        Value v; v.type = Type::Chan; v.chan = std::move(c); return v;
+    }
 
     bool isTruthy() const {
         if (type == Type::Nil)    return false;
@@ -51,6 +70,8 @@ struct Value {
         if (type == Type::String) return !string.empty();
         if (type == Type::Array)  return array && !array->empty();
         if (type == Type::Map)    return map   && !map->empty();
+        if (type == Type::Future) return future != nullptr;
+        if (type == Type::Chan)   return chan   != nullptr;
         return false;
     }
 
@@ -85,8 +106,46 @@ struct Value {
             }
             return s + "}";
         }
+        if (type == Type::Future) return "<Future>";
+        if (type == Type::Chan)   return "<Chan>";
         return "nil";
     }
+};
+
+// ── FutureVal — async 操作的异步结果持有器 ────────────────
+struct FutureVal {
+    std::shared_future<Value> fut;
+    explicit FutureVal(std::shared_future<Value> f) : fut(std::move(f)) {}
+    // 等待并获取结果（释放 GIL 以免阻塞其他 Flux 线程）
+    Value get() {
+        GILRelease release;
+        return fut.get();
+    }
+    bool isReady() const {
+        return fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+    }
+};
+
+// ── ChanVal — 线程安全的有界/无界消息通道 ─────────────────
+struct ChanVal {
+    std::deque<Value>       q;
+    mutable std::mutex      mu;
+    std::condition_variable cv_recv;
+    std::condition_variable cv_send;
+    size_t                  cap;       // 0 = 无界
+    bool                    closed_ = false;
+
+    explicit ChanVal(size_t capacity = 0) : cap(capacity) {}
+
+    // 发送（有界通道满时阻塞，期间释放 GIL）
+    bool send(Value v);
+    // 阻塞接收（空时阻塞，期间释放 GIL）
+    std::optional<Value> recv();
+    // 非阻塞接收（空返回 nullopt，不阻塞）
+    std::optional<Value> tryRecv();
+    void  close();
+    bool  isClosed() const { std::unique_lock<std::mutex> lk(mu); return closed_; }
+    size_t len()     const { std::unique_lock<std::mutex> lk(mu); return q.size(); }
 };
 
 // ── Panic 信号（区别于普通 runtime_error）────────────────
@@ -161,6 +220,7 @@ class VM;        // forward declaration
 class Interpreter {
 public:
     Interpreter();
+    ~Interpreter();          // 等待所有 pending async 任务完成
     void  execute(Program* program);
     // REPL 模式：保留 globalEnv_ 和 functions_（增量执行）
     void  executeRepl(Program* program);
@@ -202,4 +262,8 @@ private:
                    ModuleRuntime* mod = nullptr);
     Value evalBinary(BinaryExpr* node, std::shared_ptr<Environment> env,
                      ModuleRuntime* mod = nullptr);
+
+    // ── 并发任务追踪（Feature K）──────────────────────────
+    // 析构时 join 所有未完成的 async/spawn 任务，防止悬空引用
+    std::vector<std::shared_future<Value>> pendingTasks_;
 };

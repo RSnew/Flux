@@ -178,6 +178,7 @@ NodePtr Parser::parseStatement() {
     if (check(TokenType::WHILE))  return parseWhile();
     if (check(TokenType::FOR))    return parseForIn();
     if (check(TokenType::RETURN)) return parseReturn();
+    if (check(TokenType::SPAWN))  return parseSpawn();
 
     // 赋值 or 表达式语句
     auto expr = parseExpr();
@@ -269,6 +270,14 @@ std::vector<NodePtr> Parser::parseBlock() {
     return stmts;
 }
 
+// spawn { ... } — 启动独立的并发任务（fire-and-forget）
+NodePtr Parser::parseSpawn() {
+    consume(); // spawn
+    auto body = parseBlock();
+    while (match(TokenType::NEWLINE)) {}
+    return std::make_unique<SpawnStmt>(std::move(body));
+}
+
 // ── 表达式（递归下降）─────────────────────────────────────
 NodePtr Parser::parseExpr()       { return parseOr(); }
 
@@ -328,8 +337,20 @@ NodePtr Parser::parseMulDiv() {
 }
 
 NodePtr Parser::parseUnary() {
-    if (check(TokenType::NOT)) { consume(); return std::make_unique<UnaryExpr>("!", parseUnary()); }
+    if (check(TokenType::NOT))   { consume(); return std::make_unique<UnaryExpr>("!", parseUnary()); }
     if (check(TokenType::MINUS)) { consume(); return std::make_unique<UnaryExpr>("-", parseUnary()); }
+    // async <call> — 异步执行函数调用，返回 Future 值
+    if (check(TokenType::ASYNC)) {
+        consume();
+        auto call = parsePrimary();   // 解析被调用的函数（CallExpr 或 ModuleCall）
+        return std::make_unique<AsyncExpr>(std::move(call));
+    }
+    // await <expr> — 等待 Future，返回其结果值
+    if (check(TokenType::AWAIT)) {
+        consume();
+        auto expr = parseUnary();
+        return std::make_unique<AwaitExpr>(std::move(expr));
+    }
     return parsePrimary();
 }
 
@@ -346,6 +367,8 @@ NodePtr Parser::parsePrimary() {
         consume();
         return std::make_unique<StringLit>(v);
     }
+    // nil 字面量
+    if (check(TokenType::NIL))   { consume(); return std::make_unique<NilLit>(); }
     // bool
     if (check(TokenType::TRUE))  { consume(); return std::make_unique<BoolLit>(true); }
     if (check(TokenType::FALSE)) { consume(); return std::make_unique<BoolLit>(false); }

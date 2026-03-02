@@ -11,6 +11,7 @@ const std::unordered_map<std::string, TokenType> Lexer::keywords_ = {
     {"while",      TokenType::WHILE},
     {"true",       TokenType::TRUE},
     {"false",      TokenType::FALSE},
+    {"nil",        TokenType::NIL},
     {"for",        TokenType::FOR},
     {"in",         TokenType::IN},
     {"persistent", TokenType::PERSISTENT},
@@ -18,6 +19,10 @@ const std::unordered_map<std::string, TokenType> Lexer::keywords_ = {
     {"module",     TokenType::MODULE},
     {"migrate",    TokenType::MIGRATE},
     {"supervised", TokenType::SUPERVISED},
+    // 并发关键字 (Feature K)
+    {"async",      TokenType::ASYNC},
+    {"await",      TokenType::AWAIT},
+    {"spawn",      TokenType::SPAWN},
 };
 
 Lexer::Lexer(const std::string& source) : source_(source) {}

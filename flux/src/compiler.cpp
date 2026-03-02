@@ -40,6 +40,10 @@ void Compiler::compileNode(ASTNode* node) {
         chunk_.emit(n->value ? OpCode::PUSH_TRUE : OpCode::PUSH_FALSE);
         return;
     }
+    if (dynamic_cast<NilLit*>(node)) {
+        chunk_.emit(OpCode::PUSH_NIL);
+        return;
+    }
 
     // ── 变量 ────────────────────────────────────────────
     if (auto* n = dynamic_cast<Identifier*>(node)) {

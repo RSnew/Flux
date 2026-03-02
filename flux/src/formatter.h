@@ -58,6 +58,8 @@ private:
     std::string fmtExpr(ASTNode* node, int minPrec = 0) {
         if (!node) return "nil";
 
+        // nil 字面量
+        if (dynamic_cast<NilLit*>(node)) return "nil";
         // 数字字面量
         if (auto* n = dynamic_cast<NumberLit*>(node)) {
             std::string s = fmtNum(n->value);
@@ -119,6 +121,14 @@ private:
         // ExprStmt 内嵌（在表达式上下文中剥掉外层）
         if (auto* n = dynamic_cast<ExprStmt*>(node)) {
             return fmtExpr(n->expr.get(), minPrec);
+        }
+        // async <call> — 异步表达式
+        if (auto* n = dynamic_cast<AsyncExpr*>(node)) {
+            return "async " + fmtExpr(n->call.get());
+        }
+        // await <expr> — 等待 Future
+        if (auto* n = dynamic_cast<AwaitExpr*>(node)) {
+            return "await " + fmtExpr(n->expr.get());
         }
 
         return "/* ? */";
@@ -271,6 +281,15 @@ private:
                      + std::to_string(n->maxRetries) + ")\n" + ind();
             }
             s += "module " + n->name + " {\n";
+            indent_++;
+            for (auto& st : n->body) s += fmtStmt(st.get());
+            indent_--;
+            return s + ind() + "}\n";
+        }
+
+        // ── spawn { } ────────────────────────────────────────
+        if (auto* n = dynamic_cast<SpawnStmt*>(node)) {
+            std::string s = ind() + "spawn {\n";
             indent_++;
             for (auto& st : n->body) s += fmtStmt(st.get());
             indent_--;

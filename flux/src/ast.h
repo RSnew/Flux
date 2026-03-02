@@ -23,6 +23,8 @@ struct BoolLit : ASTNode {
     explicit BoolLit(bool v) : value(v) {}
 };
 
+struct NilLit : ASTNode {};
+
 struct Identifier : ASTNode {
     std::string name;
     explicit Identifier(std::string n) : name(std::move(n)) {}
@@ -214,4 +216,22 @@ struct ForIn : ASTNode {
     std::vector<NodePtr> body;
     ForIn(std::string v, NodePtr it, std::vector<NodePtr> b)
         : var(std::move(v)), iterable(std::move(it)), body(std::move(b)) {}
+};
+
+// ── async call(args) — 返回 Future 值（Feature K）────────
+struct AsyncExpr : ASTNode {
+    NodePtr call;   // CallExpr 或 ModuleCall（被异步执行的调用）
+    explicit AsyncExpr(NodePtr c) : call(std::move(c)) {}
+};
+
+// ── await future — 等待 Future 完成，返回实际值 ───────────
+struct AwaitExpr : ASTNode {
+    NodePtr expr;   // Future 类型的表达式
+    explicit AwaitExpr(NodePtr e) : expr(std::move(e)) {}
+};
+
+// ── spawn { ... } — 后台执行（fire-and-forget）───────────
+struct SpawnStmt : ASTNode {
+    std::vector<NodePtr> body;
+    explicit SpawnStmt(std::vector<NodePtr> b) : body(std::move(b)) {}
 };
