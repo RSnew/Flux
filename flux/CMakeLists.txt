@@ -12,6 +12,7 @@ add_executable(flux
     src/main.cpp
     src/lexer.cpp
     src/parser.cpp
+    src/typechecker.cpp
     src/interpreter.cpp
     src/watcher.cpp
 )

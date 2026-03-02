@@ -22,6 +22,7 @@ enum class TypeKind {
 };
 
 struct FluxType {
+    explicit FluxType(TypeKind k = TypeKind::Any) : kind(k) {}
     TypeKind kind = TypeKind::Any;
 
     // Fn 类型的参数和返回类型
@@ -29,13 +30,13 @@ struct FluxType {
     std::shared_ptr<FluxType> returnType;
 
     // ── 工厂方法 ──────────────────────────────────────────
-    static FluxType Any()     { return {TypeKind::Any}; }
-    static FluxType Int()     { return {TypeKind::Int}; }
-    static FluxType Float()   { return {TypeKind::Float}; }
-    static FluxType String()  { return {TypeKind::String}; }
-    static FluxType Bool()    { return {TypeKind::Bool}; }
-    static FluxType Nil()     { return {TypeKind::Nil}; }
-    static FluxType Unknown() { return {TypeKind::Unknown}; }
+    static FluxType Any()     { return FluxType(TypeKind::Any); }
+    static FluxType Int()     { return FluxType(TypeKind::Int); }
+    static FluxType Float()   { return FluxType(TypeKind::Float); }
+    static FluxType String()  { return FluxType(TypeKind::String); }
+    static FluxType Bool()    { return FluxType(TypeKind::Bool); }
+    static FluxType Nil()     { return FluxType(TypeKind::Nil); }
+    static FluxType Unknown() { return FluxType(TypeKind::Unknown); }
 
     std::string name() const {
         switch (kind) {

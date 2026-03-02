@@ -294,7 +294,7 @@ NodePtr Parser::parseEquality() {
     auto left = parseComparison();
     while (check(TokenType::EQ) || check(TokenType::NEQ)) {
         std::string op = consume().value;
-        left = std::make_unique<BinaryExpr>(op == "=" ? "==" : "!=", std::move(left), parseComparison());
+        left = std::make_unique<BinaryExpr>(op, std::move(left), parseComparison()); // op is now "==" or "!=" directly
     }
     return left;
 }

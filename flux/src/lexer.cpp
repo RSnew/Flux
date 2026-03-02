@@ -174,18 +174,18 @@ std::vector<Token> Lexer::tokenize() {
         // 运算符和分隔符
         advance();
         switch (c) {
-            case '+': tokens.push_back({peek() == '=' ? (advance(), TokenType::PLUS_ASSIGN)  : TokenType::PLUS,   std::string(1,c), line_}); break;
+            case '+': { bool p = peek()=='='; if(p) advance(); tokens.push_back({p ? TokenType::PLUS_ASSIGN  : TokenType::PLUS,  p ? "+=" : "+", line_}); break; }
             case '-':
                 if (peek() == '>') { advance(); tokens.push_back({TokenType::ARROW, "->", line_}); }
-                else tokens.push_back({peek() == '=' ? (advance(), TokenType::MINUS_ASSIGN) : TokenType::MINUS, "-", line_});
+                else { bool p = peek()=='='; if(p) advance(); tokens.push_back({p ? TokenType::MINUS_ASSIGN : TokenType::MINUS, p ? "-=" : "-", line_}); }
                 break;
             case '*': tokens.push_back({TokenType::STAR,    "*", line_}); break;
             case '/': tokens.push_back({TokenType::SLASH,   "/", line_}); break;
             case '%': tokens.push_back({TokenType::PERCENT, "%", line_}); break;
-            case '=': tokens.push_back({peek() == '=' ? (advance(), TokenType::EQ) : TokenType::ASSIGN, "=", line_}); break;
-            case '!': tokens.push_back({peek() == '=' ? (advance(), TokenType::NEQ) : TokenType::NOT,   "!", line_}); break;
-            case '<': tokens.push_back({peek() == '=' ? (advance(), TokenType::LEQ) : TokenType::LT,    "<", line_}); break;
-            case '>': tokens.push_back({peek() == '=' ? (advance(), TokenType::GEQ) : TokenType::GT,    ">", line_}); break;
+            case '=': { bool p = peek()=='='; if(p) advance(); tokens.push_back({p ? TokenType::EQ     : TokenType::ASSIGN, p ? "==" : "=",  line_}); break; }
+            case '!': { bool p = peek()=='='; if(p) advance(); tokens.push_back({p ? TokenType::NEQ    : TokenType::NOT,    p ? "!=" : "!",  line_}); break; }
+            case '<': { bool p = peek()=='='; if(p) advance(); tokens.push_back({p ? TokenType::LEQ    : TokenType::LT,     p ? "<=" : "<",  line_}); break; }
+            case '>': { bool p = peek()=='='; if(p) advance(); tokens.push_back({p ? TokenType::GEQ    : TokenType::GT,     p ? ">=" : ">",  line_}); break; }
             case '&': if (peek()=='&') { advance(); tokens.push_back({TokenType::AND, "&&", line_}); } break;
             case '|': if (peek()=='|') { advance(); tokens.push_back({TokenType::OR,  "||", line_}); } break;
             case '(': tokens.push_back({TokenType::LPAREN, "(", line_}); break;
