@@ -5,6 +5,7 @@ const std::unordered_map<std::string, TokenType> Lexer::keywords_ = {
     {"let",        TokenType::LET},
     {"var",        TokenType::VAR},
     {"fn",         TokenType::FN},
+    {"func",       TokenType::FUNC},      // Spec v1.0: alias for fn
     {"return",     TokenType::RETURN},
     {"if",         TokenType::IF},
     {"else",       TokenType::ELSE},
@@ -26,6 +27,8 @@ const std::unordered_map<std::string, TokenType> Lexer::keywords_ = {
     // 线程池注解 (Feature K v2)
     {"threadpool", TokenType::THREADPOOL},
     {"concurrent", TokenType::CONCURRENT},
+    // Spec v1.0 新关键字
+    {"exception",  TokenType::EXCEPTION},
 };
 
 Lexer::Lexer(const std::string& source) : source_(source) {}
@@ -196,6 +199,7 @@ std::vector<Token> Lexer::tokenize() {
             case '>': { bool p = peek()=='='; if(p) advance(); tokens.push_back({p ? TokenType::GEQ    : TokenType::GT,     p ? ">=" : ">",  line_}); break; }
             case '&': if (peek()=='&') { advance(); tokens.push_back({TokenType::AND, "&&", line_}); } break;
             case '|': if (peek()=='|') { advance(); tokens.push_back({TokenType::OR,  "||", line_}); } break;
+            case '?': if (peek()=='?') { advance(); tokens.push_back({TokenType::QUESTION_QUESTION, "??", line_}); } break;
             case '(': tokens.push_back({TokenType::LPAREN, "(", line_}); break;
             case ')': tokens.push_back({TokenType::RPAREN, ")", line_}); break;
             case '{': tokens.push_back({TokenType::LBRACE, "{", line_}); break;

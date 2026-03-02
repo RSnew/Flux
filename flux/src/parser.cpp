@@ -130,11 +130,22 @@ NodePtr Parser::parseTopLevel() {
         throw ParseError("unknown annotation (expected supervised, concurrent, or threadpool)", current().line);
     }
 
-    if (check(TokenType::FN))         return parseFnDecl();
+    // func / fn (both introduce function declarations)
+    if (check(TokenType::FN) || check(TokenType::FUNC))  return parseFnDecl();
     if (check(TokenType::LET))        return parseVarDecl(true);
     if (check(TokenType::VAR))        return parseVarDecl(false);
     if (check(TokenType::PERSISTENT)) return parsePersistentBlock();
     if (check(TokenType::MODULE))     return parseModuleDecl();
+    // !var / !let / !func — 热更新强制覆盖 (NOT token followed by var/let/func/fn)
+    if (check(TokenType::NOT)) {
+        auto& nx = peek();
+        if (nx.type == TokenType::VAR)  { consume(); return parseVarDecl(false, true); }
+        if (nx.type == TokenType::LET)  { consume(); return parseVarDecl(true, true); }
+        if (nx.type == TokenType::FN || nx.type == TokenType::FUNC)
+            { consume(); return parseFnDecl(true); }
+    }
+    // exception — 顶层错误描述声明
+    if (check(TokenType::EXCEPTION))  return parseExceptionDecl();
     return parseStatement();
 }
 
@@ -173,7 +184,7 @@ NodePtr Parser::parseModuleDecl(RestartPolicy rp, int maxRetries,
 
     std::vector<NodePtr> body;
     while (!check(TokenType::RBRACE) && !check(TokenType::EOF_TOKEN)) {
-        if      (check(TokenType::FN))         body.push_back(parseFnDecl());
+        if      (check(TokenType::FN) || check(TokenType::FUNC)) body.push_back(parseFnDecl());
         else if (check(TokenType::PERSISTENT)) body.push_back(parsePersistentBlock());
         else if (check(TokenType::MIGRATE))    body.push_back(parseMigrateBlock());
         else if (check(TokenType::LET))        body.push_back(parseVarDecl(true));
@@ -212,8 +223,10 @@ NodePtr Parser::parsePersistentBlock() {
     return block;
 }
 
-std::unique_ptr<FnDecl> Parser::parseFnDecl() {
-    expect(TokenType::FN, "expected 'fn'");
+std::unique_ptr<FnDecl> Parser::parseFnDecl(bool forceOverride) {
+    // Accept both fn and func keywords
+    if (check(TokenType::FN) || check(TokenType::FUNC)) consume();
+    else throw ParseError("expected 'fn' or 'func'", current().line);
     std::string name = expect(TokenType::IDENTIFIER, "expected function name").value;
     expect(TokenType::LPAREN, "expected '('");
 
@@ -233,7 +246,7 @@ std::unique_ptr<FnDecl> Parser::parseFnDecl() {
         retType = expect(TokenType::IDENTIFIER, "expected return type").value;
 
     auto body = parseBlock();
-    return std::make_unique<FnDecl>(name, std::move(params), retType, std::move(body));
+    return std::make_unique<FnDecl>(name, std::move(params), retType, std::move(body), forceOverride);
 }
 
 // ── 语句 ──────────────────────────────────────────────────
@@ -241,11 +254,22 @@ NodePtr Parser::parseStatement() {
     skipNewlines();
     if (check(TokenType::LET))    return parseVarDecl(true);
     if (check(TokenType::VAR))    return parseVarDecl(false);
+    if (check(TokenType::FN) || check(TokenType::FUNC)) return parseFnDecl();
     if (check(TokenType::IF))     return parseIf();
     if (check(TokenType::WHILE))  return parseWhile();
     if (check(TokenType::FOR))    return parseForIn();
     if (check(TokenType::RETURN)) return parseReturn();
     if (check(TokenType::SPAWN))  return parseSpawn();
+    // !var / !let / !func in statement context
+    if (check(TokenType::NOT)) {
+        auto& nx = peek();
+        if (nx.type == TokenType::VAR)  { consume(); return parseVarDecl(false, true); }
+        if (nx.type == TokenType::LET)  { consume(); return parseVarDecl(true, true); }
+        if (nx.type == TokenType::FN || nx.type == TokenType::FUNC)
+            { consume(); return parseFnDecl(true); }
+    }
+    // inline exception { "..." }
+    if (check(TokenType::EXCEPTION)) return parseExceptionDecl();
 
     // 赋值 or 表达式语句
     auto expr = parseExpr();
@@ -262,6 +286,11 @@ NodePtr Parser::parseStatement() {
             auto obj = std::move(ie->object);
             auto idx = std::move(ie->index);
             expr = std::make_unique<IndexAssign>(std::move(obj), std::move(idx), std::move(val));
+        } else if (auto* mc = dynamic_cast<ModuleCall*>(expr.get())) {
+            // obj.field = value — struct field assignment (e.g. self.x = ...)
+            // ModuleCall with no args represents a zero-arg field/method access
+            auto objExpr = std::make_unique<Identifier>(mc->module);
+            expr = std::make_unique<FieldAssign>(std::move(objExpr), mc->fn, std::move(val));
         } else if (auto* id = dynamic_cast<Identifier*>(expr.get())) {
             expr = std::make_unique<Assign>(id->name, std::move(val));
         } else {
@@ -274,17 +303,35 @@ NodePtr Parser::parseStatement() {
     return std::make_unique<ExprStmt>(std::move(expr));
 }
 
-NodePtr Parser::parseVarDecl(bool immutable) {
+NodePtr Parser::parseVarDecl(bool immutable, bool forceOverride) {
     consume(); // let / var
     std::string name = expect(TokenType::IDENTIFIER, "expected variable name").value;
     std::string typeAnnotation;
+    bool        isInterface = false;
     if (match(TokenType::COLON)) {
-        typeAnnotation = expect(TokenType::IDENTIFIER, "expected type").value;
+        // Check for `interface` type annotation (not a keyword, just identifier)
+        if (check(TokenType::IDENTIFIER) && current().value == "interface") {
+            isInterface = true;
+            consume(); // "interface"
+        } else {
+            typeAnnotation = expect(TokenType::IDENTIFIER, "expected type").value;
+        }
     }
     expect(TokenType::ASSIGN, "expected '=' in variable declaration");
-    auto init = parseExpr();
+    NodePtr init;
+    if (isInterface && check(TokenType::LBRACE)) {
+        // var Shape: interface = { func area() ... }
+        init = parseInterfaceLit();
+    } else if (!isInterface && check(TokenType::IDENTIFIER) && peek().type == TokenType::LBRACE) {
+        // var Circle = Shape { ... } — struct implementing interface
+        std::string ifaceName = consume().value;
+        init = parseStructLit(ifaceName);
+    } else {
+        init = parseExpr();
+    }
     while (match(TokenType::NEWLINE)) {}
-    return std::make_unique<VarDecl>(immutable, name, typeAnnotation, std::move(init));
+    return std::make_unique<VarDecl>(immutable, name, typeAnnotation, std::move(init),
+                                     forceOverride, isInterface);
 }
 
 NodePtr Parser::parseIf() {
@@ -308,8 +355,30 @@ NodePtr Parser::parseForIn() {
     consume(); // for
     std::string var = expect(TokenType::IDENTIFIER, "expected variable name").value;
     expect(TokenType::IN, "expected 'in' after variable");
-    auto iterable = parseExpr();
-    auto body     = parseBlock();
+
+    NodePtr iterable;
+    // 尝试解析区间范围 [start, end] 或 [start, end)
+    if (check(TokenType::LBRACKET)) {
+        size_t savedPos = pos_;
+        try {
+            consume(); // [
+            auto start = parseExpr();
+            expect(TokenType::COMMA, "expected ','");
+            auto end   = parseExpr();
+            bool inclusive = false;
+            if (check(TokenType::RBRACKET)) { consume(); inclusive = true;  }  // [a, b]
+            else if (check(TokenType::RPAREN)) { consume(); inclusive = false; }  // [a, b)
+            else throw ParseError("expected ']' or ')' after interval end", current().line);
+            iterable = std::make_unique<IntervalRange>(std::move(start), std::move(end), inclusive);
+        } catch (...) {
+            pos_ = savedPos;
+            iterable = parseExpr();  // 普通数组
+        }
+    } else {
+        iterable = parseExpr();
+    }
+
+    auto body = parseBlock();
     return std::make_unique<ForIn>(var, std::move(iterable), std::move(body));
 }
 
@@ -346,7 +415,18 @@ NodePtr Parser::parseSpawn() {
 }
 
 // ── 表达式（递归下降）─────────────────────────────────────
-NodePtr Parser::parseExpr()       { return parseOr(); }
+// parseExpr → parseNilCoalesce → parseOr → ... → parsePrimary
+NodePtr Parser::parseExpr()       { return parseNilCoalesce(); }
+
+// ?? 空合并运算符（最低优先级）: a ?? b  →  a if a != nil else b
+NodePtr Parser::parseNilCoalesce() {
+    auto left = parseOr();
+    while (check(TokenType::QUESTION_QUESTION)) {
+        consume();
+        left = std::make_unique<BinaryExpr>("??", std::move(left), parseOr());
+    }
+    return left;
+}
 
 NodePtr Parser::parseOr() {
     auto left = parseAnd();
@@ -463,6 +543,22 @@ NodePtr Parser::parsePrimary() {
         return arr;
     }
 
+    // struct literal { field: val, func method() {} }
+    if (check(TokenType::LBRACE)) {
+        return parseStructLit("");
+    }
+
+    // func(s) — 迭代结构体方法（func 是关键字，特殊处理）
+    if (check(TokenType::FUNC) && peek().type == TokenType::LPAREN) {
+        consume(); // func
+        consume(); // (
+        std::vector<NodePtr> args;
+        auto arg = parseExpr();
+        args.push_back(std::move(arg));
+        expect(TokenType::RPAREN, "expected ')'");
+        return std::make_unique<CallExpr>("__func_iter__", std::move(args));
+    }
+
     // 标识符 or 函数调用 or state.field or Module.fn() or arr[i] or arr.method()
     if (check(TokenType::IDENTIFIER) || check(TokenType::STATE)) {
         std::string name = consume().value;
@@ -476,8 +572,25 @@ NodePtr Parser::parsePrimary() {
 
         NodePtr node;
 
-        // 函数调用
+        // 函数调用（检测具名参数 name: val 格式 → 结构体构造）
         if (match(TokenType::LPAREN)) {
+            // Peek: if first arg looks like "IDENTIFIER COLON", it's named (struct construction)
+            bool isNamed = (check(TokenType::IDENTIFIER) && peek().type == TokenType::COLON);
+            if (isNamed) {
+                // 解析具名参数 → StructCreate
+                auto sc = std::make_unique<StructCreate>();
+                sc->typeName = name;
+                while (!check(TokenType::RPAREN) && !check(TokenType::EOF_TOKEN)) {
+                    StructFieldInit fi;
+                    fi.name  = expect(TokenType::IDENTIFIER, "expected field name").value;
+                    expect(TokenType::COLON, "expected ':'");
+                    fi.value = parseExpr();
+                    sc->fields.push_back(std::move(fi));
+                    if (!match(TokenType::COMMA)) break;
+                }
+                expect(TokenType::RPAREN, "expected ')'");
+                return sc;
+            }
             std::vector<NodePtr> args;
             while (!check(TokenType::RPAREN) && !check(TokenType::EOF_TOKEN)) {
                 args.push_back(parseExpr());
@@ -499,11 +612,13 @@ NodePtr Parser::parsePrimary() {
                 node = std::make_unique<IndexExpr>(std::move(node), std::move(idx));
             } else if (check(TokenType::DOT)) {
                 consume(); // .
-                // DOT 后可跟标识符或部分关键字（async/await）作为成员名
+                // DOT 后可跟标识符或部分关键字（async/await/func/fn）作为成员名
                 std::string member;
                 if      (check(TokenType::IDENTIFIER)) member = consume().value;
                 else if (check(TokenType::ASYNC))      { consume(); member = "async"; }
                 else if (check(TokenType::AWAIT))      { consume(); member = "await"; }
+                else if (check(TokenType::FUNC) || check(TokenType::FN))
+                                                       { consume(); member = "func"; }
                 else throw ParseError("expected member name after '.'", current().line);
 
                 if (check(TokenType::LPAREN)) {
@@ -552,4 +667,139 @@ NodePtr Parser::parsePrimary() {
     }
 
     throw ParseError("unexpected token '" + current().value + "'", current().line);
+}
+
+// ══════════════════════════════════════════════════════════
+// Spec v1.0 新解析方法
+// ══════════════════════════════════════════════════════════
+
+// ── 结构体字面量解析 ──────────────────────────────────────
+// { field: val, ..., func method(params) { body } }
+// interfaceName 不为空时：var Circle = Shape { ... }
+NodePtr Parser::parseStructLit(std::string interfaceName) {
+    expect(TokenType::LBRACE, "expected '{' for struct literal");
+    skipNewlines();
+
+    auto s = std::make_unique<StructLit>();
+    s->interfaceName = std::move(interfaceName);
+
+    while (!check(TokenType::RBRACE) && !check(TokenType::EOF_TOKEN)) {
+        skipNewlines();
+        if (check(TokenType::RBRACE)) break;
+
+        if (check(TokenType::FN) || check(TokenType::FUNC)) {
+            // struct method: func name(params) { body }
+            consume(); // fn / func
+            StructMethodDef m;
+            m.name = expect(TokenType::IDENTIFIER, "expected method name").value;
+            expect(TokenType::LPAREN, "expected '('");
+            while (!check(TokenType::RPAREN) && !check(TokenType::EOF_TOKEN)) {
+                Param p;
+                p.name = expect(TokenType::IDENTIFIER, "expected parameter name").value;
+                if (match(TokenType::COLON))
+                    p.type = expect(TokenType::IDENTIFIER, "expected type").value;
+                m.params.push_back(std::move(p));
+                if (!match(TokenType::COMMA)) break;
+            }
+            expect(TokenType::RPAREN, "expected ')'");
+            if (match(TokenType::ARROW))
+                m.returnType = expect(TokenType::IDENTIFIER, "expected return type").value;
+            m.body = parseBlock();
+            s->methods.push_back(std::move(m));
+        } else if (check(TokenType::IDENTIFIER)) {
+            // struct field: name: default_value
+            StructFieldDef f;
+            f.name         = consume().value;
+            expect(TokenType::COLON, "expected ':' after field name");
+            f.defaultValue = parseExpr();
+            s->fields.push_back(std::move(f));
+        } else {
+            throw ParseError("expected field or method in struct literal", current().line);
+        }
+
+        match(TokenType::COMMA);
+        skipNewlines();
+    }
+    expect(TokenType::RBRACE, "expected '}' to close struct literal");
+    while (match(TokenType::NEWLINE)) {}
+    return s;
+}
+
+// ── 接口字面量解析 ────────────────────────────────────────
+// { func area() func perimeter() }
+NodePtr Parser::parseInterfaceLit() {
+    expect(TokenType::LBRACE, "expected '{' for interface literal");
+    skipNewlines();
+
+    auto iface = std::make_unique<InterfaceLit>();
+
+    while (!check(TokenType::RBRACE) && !check(TokenType::EOF_TOKEN)) {
+        skipNewlines();
+        if (check(TokenType::RBRACE)) break;
+
+        if (check(TokenType::FN) || check(TokenType::FUNC)) {
+            consume(); // fn / func
+            InterfaceMethodSig sig;
+            sig.name = expect(TokenType::IDENTIFIER, "expected method name").value;
+            expect(TokenType::LPAREN, "expected '('");
+            while (!check(TokenType::RPAREN) && !check(TokenType::EOF_TOKEN)) {
+                Param p;
+                p.name = expect(TokenType::IDENTIFIER, "expected parameter name").value;
+                if (match(TokenType::COLON))
+                    p.type = expect(TokenType::IDENTIFIER, "expected type").value;
+                sig.params.push_back(std::move(p));
+                if (!match(TokenType::COMMA)) break;
+            }
+            expect(TokenType::RPAREN, "expected ')'");
+            if (match(TokenType::ARROW))
+                sig.returnType = expect(TokenType::IDENTIFIER, "expected return type").value;
+            iface->methods.push_back(std::move(sig));
+        } else {
+            throw ParseError("expected method signature in interface literal", current().line);
+        }
+
+        match(TokenType::COMMA);
+        skipNewlines();
+    }
+    expect(TokenType::RBRACE, "expected '}' to close interface literal");
+    while (match(TokenType::NEWLINE)) {}
+    return iface;
+}
+
+// ── exception 声明解析 ────────────────────────────────────
+// 顶层：exception divide { "..." }
+// 方法：exception Point:move { "..." }
+// 内联：exception { "..." }
+NodePtr Parser::parseExceptionDecl() {
+    expect(TokenType::EXCEPTION, "expected 'exception'");
+
+    auto decl = std::make_unique<ExceptionDecl>();
+
+    // 内联：exception { ... }
+    if (check(TokenType::LBRACE)) {
+        // No target
+    } else {
+        // 具名：exception funcName { ... } or exception Type:method { ... }
+        decl->target = expect(TokenType::IDENTIFIER, "expected function/type name").value;
+        if (match(TokenType::COLON)) {
+            // exception Type:method { ... }
+            std::string method = expect(TokenType::IDENTIFIER, "expected method name").value;
+            decl->target += ":" + method;
+        }
+    }
+
+    expect(TokenType::LBRACE, "expected '{' for exception body");
+    skipNewlines();
+    while (!check(TokenType::RBRACE) && !check(TokenType::EOF_TOKEN)) {
+        skipNewlines();
+        if (check(TokenType::STRING)) {
+            decl->messages.push_back(current().value);
+            consume();
+        }
+        match(TokenType::COMMA);
+        skipNewlines();
+    }
+    expect(TokenType::RBRACE, "expected '}'");
+    while (match(TokenType::NEWLINE)) {}
+    return decl;
 }

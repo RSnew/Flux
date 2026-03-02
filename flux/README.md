@@ -109,6 +109,24 @@ let m = Map()
 m["key"] = "value"
 for k in m { print(k, "→", m[k]) }
 print(Json.stringify(m))
+
+// ── Spec v1.0: Structs & Interfaces ────────────────────────
+var Shape: interface = { func area() }
+var Circle = Shape {
+    radius: 1,
+    func area() { return 3.14159 * self.radius * self.radius }
+}
+let c = Circle(radius: 5)
+print(c.area())   // → 78.54
+
+// ── Spec v1.0: Interval loops & nil-coalescing ─────────────
+for i in [1, 5]  { print(i) }   // 1 2 3 4 5 (closed)
+for i in [1, 5)  { print(i) }   // 1 2 3 4   (half-open)
+let name = nil ?? "Guest"        // "Guest"
+
+// ── Spec v1.0: exception descriptions ──────────────────────
+exception divide { "Denominator must be non-zero" }
+func divide(a, b) { if b == 0 { panic("div0") }; return a / b }
 ```
 
 ---
@@ -123,6 +141,7 @@ print(Json.stringify(m))
 | J  | 工具链   | `flux check`, `flux fmt`, `flux run`, improved REPL, VSCode extension | ✅ Done |
 | K  | 并发模型 | `async`/`await`, GIL-based threads, `Chan` channels, `spawn` | ✅ Done |
 | L  | 包管理器 | `flux.toml`, dep resolution, local registry, `flux new/add/install/build` | ✅ Done |
+| v1 | Spec v1.0 | Structs, interfaces, `??`, `func`, `!var`, interval loops, `exception` | ✅ Done |
 | M  | 自举编译器 | Flux compiles Flux (self-hosting) | 🔭 Future |
 
 ---
@@ -292,6 +311,76 @@ test = "tests/test.flux"
 - `src/pkgmgr.h` — `Manifest`, `BuildResult` structs; command declarations
 - `src/pkgmgr.cpp` — full package manager implementation (~300 lines)
 
+### ✅ Spec v1.0 — Language Specification v1.0
+
+New language constructs added by the formal spec:
+
+**`func` keyword** — alias for `fn`:
+```flux
+func greet(name) { return "Hello, " + name + "!" }
+```
+
+**`??` nil-coalescing operator** — returns left if non-nil, else right:
+```flux
+let display = username ?? "Guest"
+```
+
+**`!var` / `!func` hot-reload force override** — always re-initialize on reload:
+```flux
+!var config = loadConfig()   // re-read config on every hot reload
+!func handler(req) { ... }   // always replace handler definition
+```
+
+**Struct literals with fields and methods**:
+```flux
+var Point = {
+    x: 0,
+    y: 0,
+    func dist() { return self.x * self.x + self.y * self.y },
+    func move(dx, dy) { self.x = self.x + dx; self.y = self.y + dy }
+}
+let p = Point(x: 3, y: 4)   // named-arg construction
+print(p.dist())              // → 25
+p.move(1, 2)                 // mutates p.x and p.y via self
+```
+
+**Interface declarations and conformance**:
+```flux
+var Shape: interface = {
+    func area()
+    func perimeter()
+}
+var Circle = Shape {         // must implement all Shape methods
+    radius: 1,
+    func area()      { return 3.14159 * self.radius * self.radius },
+    func perimeter() { return 2 * 3.14159 * self.radius }
+}
+let c = Circle(radius: 5)
+print(c.area())              // → 78.54
+```
+
+**Math interval loops**:
+```flux
+for i in [1, 5]  { print(i) }  // closed:    1 2 3 4 5
+for i in [1, 5)  { print(i) }  // half-open: 1 2 3 4
+```
+
+**`struct(s)` — iterate struct field names**:
+```flux
+let fields = struct(p)   // → ["x", "y"]
+for f in fields { print(f, "=", p.x) }
+```
+
+**`exception` — error descriptions** (documentation attached to functions):
+```flux
+exception divide { "Division by zero is not allowed" }
+func divide(a, b) { if b == 0 { panic("div by zero") }; return a / b }
+
+exception Point:move { "dx and dy must be finite numbers" }
+```
+
+**`self.field = value`** — struct field mutation inside methods (uses `FieldAssign` AST node).
+
 ### 🔭 Feature M — 自举编译器 (Self-hosting Compiler)
 - Flux compiles Flux
 - Replaces the C++ compiler/VM with a Flux-written backend
@@ -308,7 +397,7 @@ flux/
 ├── src/
 │   ├── token.h          Token types
 │   ├── lexer.h/.cpp     Lexer (string interpolation, all token types)
-│   ├── ast.h            AST node definitions (26 node types)
+│   ├── ast.h            AST node definitions (33 node types, incl. Spec v1.0)
 │   ├── parser.h/.cpp    Recursive-descent parser
 │   ├── typechecker.h/.cpp  Type inference + annotation checking
 │   ├── concurrency.h    GIL + GILGuard + GILRelease (Feature K)
@@ -337,6 +426,7 @@ flux/
     ├── supervisor_demo.flux
     ├── stdlib_demo.flux
     ├── concurrency_demo.flux
+    ├── spec_v1_demo.flux
     └── test_array_interp_forin.flux
 
 # Package manager creates projects like:

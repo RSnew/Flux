@@ -22,22 +22,32 @@
 struct Value;
 struct FutureVal;
 struct ChanVal;
-using ValueArray  = std::shared_ptr<std::vector<Value>>;
-using ValueMap    = std::shared_ptr<std::unordered_map<std::string, Value>>;
-using ValueFuture = std::shared_ptr<FutureVal>;
-using ValueChan   = std::shared_ptr<ChanVal>;
+struct StructTypeInfo;
+struct StructInstInfo;
+struct InterfaceInfo;
+using ValueArray      = std::shared_ptr<std::vector<Value>>;
+using ValueMap        = std::shared_ptr<std::unordered_map<std::string, Value>>;
+using ValueFuture     = std::shared_ptr<FutureVal>;
+using ValueChan       = std::shared_ptr<ChanVal>;
+using ValueStructType = std::shared_ptr<StructTypeInfo>;
+using ValueStructInst = std::shared_ptr<StructInstInfo>;
+using ValueInterface  = std::shared_ptr<InterfaceInfo>;
 
 struct Value {
-    enum class Type { Nil, Number, String, Bool, Array, Map, Future, Chan };
+    enum class Type { Nil, Number, String, Bool, Array, Map, Future, Chan,
+                      StructType, StructInst, Interface };
     Type type = Type::Nil;
 
     double      number  = 0;
     std::string string;
     bool        boolean = false;
-    ValueArray  array;           // Array 类型
-    ValueMap    map;             // Map 类型
-    ValueFuture future;          // Future 类型（async 返回值）
-    ValueChan   chan;            // Chan 类型（并发通道）
+    ValueArray      array;       // Array 类型
+    ValueMap        map;         // Map 类型
+    ValueFuture     future;      // Future 类型（async 返回值）
+    ValueChan       chan;        // Chan 类型（并发通道）
+    ValueStructType structType;  // StructType（结构体定义）
+    ValueStructInst structInst;  // StructInst（结构体实例）
+    ValueInterface  iface;       // Interface（接口定义）
 
     static Value Nil()    { return {}; }
     static Value Num(double n)       { Value v; v.type = Type::Number; v.number = n; return v; }
@@ -63,6 +73,15 @@ struct Value {
     static Value Chan(ValueChan c) {
         Value v; v.type = Type::Chan; v.chan = std::move(c); return v;
     }
+    static Value StructTypeV(ValueStructType s) {
+        Value v; v.type = Type::StructType; v.structType = std::move(s); return v;
+    }
+    static Value StructInstV(ValueStructInst s) {
+        Value v; v.type = Type::StructInst; v.structInst = std::move(s); return v;
+    }
+    static Value InterfaceV(ValueInterface i) {
+        Value v; v.type = Type::Interface; v.iface = std::move(i); return v;
+    }
 
     bool isTruthy() const {
         if (type == Type::Nil)    return false;
@@ -71,8 +90,11 @@ struct Value {
         if (type == Type::String) return !string.empty();
         if (type == Type::Array)  return array && !array->empty();
         if (type == Type::Map)    return map   && !map->empty();
-        if (type == Type::Future) return future != nullptr;
-        if (type == Type::Chan)   return chan   != nullptr;
+        if (type == Type::Future)     return future     != nullptr;
+        if (type == Type::Chan)       return chan        != nullptr;
+        if (type == Type::StructType) return structType != nullptr;
+        if (type == Type::StructInst) return structInst != nullptr;
+        if (type == Type::Interface)  return iface      != nullptr;
         return false;
     }
 
@@ -107,10 +129,17 @@ struct Value {
             }
             return s + "}";
         }
-        if (type == Type::Future) return "<Future>";
-        if (type == Type::Chan)   return "<Chan>";
+        if (type == Type::Future)     return "<Future>";
+        if (type == Type::Chan)       return "<Chan>";
+        // Struct types: full toString() implemented in interpreter.cpp (after complete types)
+        if (type == Type::StructType) return "<StructType>";
+        if (type == Type::StructInst) return "<StructInst>";
+        if (type == Type::Interface)  return "<Interface>";
         return "nil";
     }
+
+    // Full toString for struct instances (defined after StructInstInfo is complete)
+    std::string toStringFull() const;
 };
 
 // ── FutureVal — async 操作的异步结果持有器 ────────────────
@@ -161,6 +190,50 @@ struct ChanVal {
     void  close();
     bool  isClosed() const { std::unique_lock<std::mutex> lk(mu); return closed_; }
     size_t len()     const { std::unique_lock<std::mutex> lk(mu); return q.size(); }
+};
+
+// ── 结构体类型信息（结构体定义）──────────────────────────
+struct StructTypeInfo {
+    std::string name;
+    std::string interfaceName;  // 实现的接口名（可为空）
+
+    struct Field {
+        std::string                name;
+        std::shared_ptr<ASTNode>   defaultExpr;   // 可为 null
+    };
+    struct Method {
+        std::string                              name;
+        std::vector<Param>                       params;
+        std::string                              returnType;
+        std::vector<std::shared_ptr<ASTNode>>    body;
+    };
+    std::vector<Field>  fields;
+    std::vector<Method> methods;
+
+    const Method* findMethod(const std::string& n) const {
+        for (auto& m : methods) if (m.name == n) return &m;
+        return nullptr;
+    }
+    const Field* findField(const std::string& n) const {
+        for (auto& f : fields) if (f.name == n) return &f;
+        return nullptr;
+    }
+};
+
+// ── 结构体实例 ────────────────────────────────────────────
+struct StructInstInfo {
+    std::shared_ptr<StructTypeInfo>        type;
+    std::unordered_map<std::string, Value> fields;
+};
+
+// ── 接口定义 ──────────────────────────────────────────────
+struct InterfaceInfo {
+    std::string name;
+    struct MethodSig {
+        std::string        name;
+        std::vector<Param> params;
+    };
+    std::vector<MethodSig> methods;
 };
 
 // ── Panic 信号（区别于普通 runtime_error）────────────────
@@ -290,4 +363,13 @@ private:
 
     // 获取模块绑定的线程池（nullptr 表示无绑定）
     ThreadPool* getModulePool(const std::string& moduleName);
+
+    // ── Spec v1.0 新增 ────────────────────────────────────
+    // exception 描述表：target → [message1, message2, ...]
+    std::unordered_map<std::string, std::vector<std::string>> exceptionDescs_;
+
+    // 创建结构体实例（StructTypeInfo + 具名参数）
+    Value createStructInst(std::shared_ptr<StructTypeInfo> type,
+                           const std::vector<std::pair<std::string,Value>>& initFields,
+                           std::shared_ptr<Environment> env, ModuleRuntime* mod);
 };

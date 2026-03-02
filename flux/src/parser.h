@@ -30,17 +30,18 @@ private:
 
     // 顶层
     NodePtr parseTopLevel();
-    std::unique_ptr<FnDecl> parseFnDecl();
+    std::unique_ptr<FnDecl> parseFnDecl(bool forceOverride = false);
     NodePtr parsePersistentBlock();
     NodePtr parseMigrateBlock();
     NodePtr parseModuleDecl(RestartPolicy rp = RestartPolicy::None, int maxRetries = 3,
                              std::string poolName = "", int poolQueue = 100,
                              std::string poolOverflow = "block");
     NodePtr parseThreadPoolDecl();
+    NodePtr parseExceptionDecl();   // exception 关键字
 
     // 语句
     NodePtr      parseStatement();
-    NodePtr      parseVarDecl(bool immutable);
+    NodePtr      parseVarDecl(bool immutable, bool forceOverride = false);
     NodePtr      parseIf();
     NodePtr      parseWhile();
     NodePtr      parseForIn();
@@ -48,8 +49,13 @@ private:
     NodePtr      parseSpawn();
     std::vector<NodePtr> parseBlock();
 
+    // Spec v1.0 新语法
+    NodePtr parseStructLit(std::string interfaceName = "");
+    NodePtr parseInterfaceLit();
+
     // 表达式（递归下降，优先级从低到高）
     NodePtr parseExpr();
+    NodePtr parseNilCoalesce();   // ?? 运算符（最低优先级）
     NodePtr parseOr();
     NodePtr parseAnd();
     NodePtr parseEquality();

@@ -148,6 +148,32 @@ void Interpreter::registerBuiltins() {
     registerBuiltin("Map", [](std::vector<Value>) -> Value {
         return Value::MapVal();
     });
+
+    // struct(s) — 迭代结构体字段名（Spec v1.0）
+    registerBuiltin("struct", [](std::vector<Value> args) -> Value {
+        if (args.empty()) throw std::runtime_error("struct() requires one argument");
+        auto& v = args[0];
+        if (v.type == Value::Type::StructInst && v.structInst) {
+            auto arr = std::make_shared<std::vector<Value>>();
+            for (auto& f : v.structInst->type->fields)
+                arr->push_back(Value::Str(f.name));
+            return Value::Arr(arr);
+        }
+        throw std::runtime_error("struct() requires a struct instance");
+    });
+
+    // __func_iter__(s) — 迭代结构体方法名 via func(s) syntax（Spec v1.0）
+    registerBuiltin("__func_iter__", [](std::vector<Value> args) -> Value {
+        if (args.empty()) throw std::runtime_error("func() requires one argument");
+        auto& v = args[0];
+        if (v.type == Value::Type::StructInst && v.structInst) {
+            auto arr = std::make_shared<std::vector<Value>>();
+            for (auto& m : v.structInst->type->methods)
+                arr->push_back(Value::Str(m.name));
+            return Value::Arr(arr);
+        }
+        throw std::runtime_error("func() requires a struct instance");
+    });
 }
 
 void Interpreter::registerBuiltin(const std::string& name, BuiltinFn fn) {
@@ -489,8 +515,20 @@ Value Interpreter::callFunction(const std::string& name,
         auto fit = functions_.find(name);
         if (fit != functions_.end()) fn = fit->second;
     }
-    if (!fn)
+    if (!fn) {
+        // Check if name is a struct type in globalEnv_
+        try {
+            Value v = globalEnv_->get(name);
+            if (v.type == Value::Type::StructType && v.structType) {
+                // Create instance with positional args filling fields in order
+                std::vector<std::pair<std::string, Value>> initFields;
+                for (size_t i = 0; i < args.size() && i < v.structType->fields.size(); ++i)
+                    initFields.push_back({v.structType->fields[i].name, args[i]});
+                return createStructInst(v.structType, initFields, globalEnv_, mod);
+            }
+        } catch (...) {}
         throw std::runtime_error("undefined function: " + name);
+    }
 
     auto fnEnv = std::make_shared<Environment>(globalEnv_);
     for (size_t i = 0; i < fn->params.size(); i++)
@@ -542,6 +580,23 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
             return it != obj.map->end() ? it->second : Value::Nil();
         }
         throw std::runtime_error("cannot index into " + obj.toString());
+    }
+
+    // ── 字段赋值 obj.field = value（struct 方法内 self.x = ...）──
+    if (auto* n = dynamic_cast<FieldAssign*>(node)) {
+        Value obj = evalNode(n->object.get(), env, mod);
+        Value val = evalNode(n->value.get(),  env, mod);
+        if (obj.type == Value::Type::StructInst && obj.structInst) {
+            obj.structInst->fields[n->field] = val;
+            // Update binding in environment so 'self' reflects mutated instance
+            if (auto* id = dynamic_cast<Identifier*>(n->object.get())) {
+                env->assign(id->name, obj);
+                // Also update direct field local binding if present
+                env->assign(n->field, val);
+            }
+            return val;
+        }
+        throw std::runtime_error("field assignment on non-struct-instance");
     }
 
     // ── 下标赋值 arr[i] = value ───────────────────────────
@@ -721,9 +776,27 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
 
     // ── for item in iterable { } ──────────────────────────
     if (auto* n = dynamic_cast<ForIn*>(node)) {
+        // 区间范围 [a, b] / [a, b)
+        if (auto* ir = dynamic_cast<IntervalRange*>(n->iterable.get())) {
+            Value sv = evalNode(ir->start.get(), env, mod);
+            Value ev = evalNode(ir->end.get(),   env, mod);
+            if (sv.type != Value::Type::Number || ev.type != Value::Type::Number)
+                throw std::runtime_error("interval range requires numeric start and end");
+            long long start = (long long)sv.number;
+            long long end   = (long long)ev.number;
+            long long limit = ir->inclusive ? end + 1 : end;
+            for (long long i = start; i < limit; ++i) {
+                auto loopEnv = std::make_shared<Environment>(env);
+                loopEnv->set(n->var, Value::Num((double)i));
+                try { for (auto& s : n->body) evalNode(s.get(), loopEnv, mod); }
+                catch (ReturnSignal&) { throw; }
+            }
+            return Value::Nil();
+        }
+
         Value iterable = evalNode(n->iterable.get(), env, mod);
         std::vector<Value>* items = nullptr;
-        std::vector<Value> strChars; // 字符串迭代时的临时存储
+        std::vector<Value> strChars; // 字符串/结构体迭代时的临时存储
 
         if (iterable.type == Value::Type::Array && iterable.array) {
             items = iterable.array.get();
@@ -735,8 +808,13 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
             for (auto& kv : *iterable.map)
                 strChars.push_back(Value::Str(kv.first));
             items = &strChars;
+        } else if (iterable.type == Value::Type::StructInst && iterable.structInst) {
+            // for x in struct_instance → iterate over field names
+            for (auto& f : iterable.structInst->type->fields)
+                strChars.push_back(Value::Str(f.name));
+            items = &strChars;
         } else {
-            throw std::runtime_error("'for-in' requires an Array, String, or Map, got " + iterable.toString());
+            throw std::runtime_error("'for-in' requires an Array, String, Map, or struct, got " + iterable.toString());
         }
 
         for (auto& item : *items) {
@@ -1006,6 +1084,53 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
                 return obj.future->getWithTimeout(timeout_ms);
             }
         }
+        // ── 结构体实例 字段访问 / 方法调用 ──────────────────
+        if (obj.type == Value::Type::StructInst && obj.structInst) {
+            auto& inst = *obj.structInst;
+            // Method call
+            const auto* method = inst.type->findMethod(n->fn);
+            if (method) {
+                // Create a new env with 'self' bound to the instance, plus params
+                auto methodEnv = std::make_shared<Environment>(env);
+                // Bind 'self' so methods can access other methods/fields
+                methodEnv->set("self", obj);
+                if (margs.size() != method->params.size())
+                    throw std::runtime_error("method '" + n->fn + "': expected " +
+                        std::to_string(method->params.size()) + " args, got " +
+                        std::to_string(margs.size()));
+                for (size_t i = 0; i < method->params.size(); ++i)
+                    methodEnv->set(method->params[i].name, margs[i]);
+                // Bind all fields as locals for easy access
+                for (auto& [fname, fval] : inst.fields)
+                    methodEnv->set(fname, fval);
+                try {
+                    for (auto& s : method->body)
+                        evalNode(s.get(), methodEnv, mod);
+                } catch (ReturnSignal& rs) {
+                    return rs.value;
+                }
+                return Value::Nil();
+            }
+            // Field access (0-arg)
+            if (margs.empty()) {
+                auto fit = inst.fields.find(n->fn);
+                if (fit != inst.fields.end()) return fit->second;
+            }
+            throw std::runtime_error("struct '" + inst.type->name + "' has no field/method '" + n->fn + "'");
+        }
+        // ── 结构体类型 字段/方法名列表 ─────────────────────
+        if (obj.type == Value::Type::StructType && obj.structType) {
+            if (n->fn == "fields") {
+                auto arr = std::make_shared<std::vector<Value>>();
+                for (auto& f : obj.structType->fields) arr->push_back(Value::Str(f.name));
+                return Value::Arr(arr);
+            }
+            if (n->fn == "methods") {
+                auto arr = std::make_shared<std::vector<Value>>();
+                for (auto& m : obj.structType->methods) arr->push_back(Value::Str(m.name));
+                return Value::Arr(arr);
+            }
+        }
         throw std::runtime_error("unknown method '" + n->fn + "' on " + obj.toString());
     }
 
@@ -1040,7 +1165,13 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
 
     // ── 声明 ──
     if (auto* n = dynamic_cast<VarDecl*>(node)) {
+        // !var: 强制覆盖; var: 热更新时保留已存在的值
+        if (!n->forceOverride && env->has(n->name))
+            return env->get(n->name);   // 热更新保留旧值
         Value v = n->initializer ? evalNode(n->initializer.get(), env, mod) : Value::Nil();
+        // 如果是接口声明，标记接口名称
+        if (n->isInterface && v.type == Value::Type::Interface && v.iface)
+            v.iface->name = n->name;
         env->set(n->name, v);
         return v;
     }
@@ -1188,7 +1319,114 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
     if (dynamic_cast<PersistentBlock*>(node)) return Value::Nil();
     if (dynamic_cast<MigrateBlock*>(node))    return Value::Nil();
 
+    // ══════════════════════════════════════════════════════
+    // Spec v1.0 新节点
+    // ══════════════════════════════════════════════════════
+
+    // ── 结构体字面量 { field: val, ..., func method() {} } ──
+    if (auto* n = dynamic_cast<StructLit*>(node)) {
+        auto typeInfo = std::make_shared<StructTypeInfo>();
+        typeInfo->interfaceName = n->interfaceName;
+
+        // Store fields
+        for (auto& f : n->fields) {
+            StructTypeInfo::Field fi;
+            fi.name = f.name;
+            if (f.defaultValue)
+                fi.defaultExpr = std::shared_ptr<ASTNode>(f.defaultValue.get(),
+                                                          [](ASTNode*){});  // non-owning
+            typeInfo->fields.push_back(std::move(fi));
+        }
+        // Store methods (share body ownership through shared_ptr)
+        for (auto& m : n->methods) {
+            StructTypeInfo::Method mi;
+            mi.name       = m.name;
+            mi.params     = m.params;
+            mi.returnType = m.returnType;
+            for (auto& s : m.body)
+                mi.body.push_back(std::shared_ptr<ASTNode>(s.get(), [](ASTNode*){}));
+            typeInfo->methods.push_back(std::move(mi));
+        }
+
+        // Interface conformance check
+        if (!n->interfaceName.empty()) {
+            try {
+                Value ifaceVal = env->get(n->interfaceName);
+                if (ifaceVal.type == Value::Type::Interface && ifaceVal.iface) {
+                    for (auto& sig : ifaceVal.iface->methods) {
+                        if (!typeInfo->findMethod(sig.name))
+                            throw std::runtime_error(
+                                "struct missing method '" + sig.name +
+                                "' required by interface '" + n->interfaceName + "'");
+                    }
+                    typeInfo->interfaceName = n->interfaceName;
+                }
+            } catch (std::runtime_error& e) {
+                // Re-throw interface conformance errors
+                if (std::string(e.what()).find("missing method") != std::string::npos)
+                    throw;
+                // "undefined variable" means the interface name wasn't found — ignore
+            }
+        }
+        return Value::StructTypeV(std::move(typeInfo));
+    }
+
+    // ── 接口字面量 { func area() } ────────────────────────
+    if (auto* n = dynamic_cast<InterfaceLit*>(node)) {
+        auto iface = std::make_shared<InterfaceInfo>();
+        iface->name = n->name;
+        for (auto& m : n->methods) {
+            InterfaceInfo::MethodSig sig;
+            sig.name   = m.name;
+            sig.params = m.params;
+            iface->methods.push_back(std::move(sig));
+        }
+        return Value::InterfaceV(std::move(iface));
+    }
+
+    // ── 结构体具名构造 Point(x: 3, y: 4) ─────────────────
+    if (auto* n = dynamic_cast<StructCreate*>(node)) {
+        Value typeVal = env->get(n->typeName);
+        if (typeVal.type != Value::Type::StructType || !typeVal.structType)
+            throw std::runtime_error("'" + n->typeName + "' is not a struct type");
+        std::vector<std::pair<std::string, Value>> initFields;
+        for (auto& fi : n->fields)
+            initFields.push_back({fi.name, evalNode(fi.value.get(), env, mod)});
+        return createStructInst(typeVal.structType, initFields, env, mod);
+    }
+
+    // ── exception 描述声明 ─────────────────────────────────
+    if (auto* n = dynamic_cast<ExceptionDecl*>(node)) {
+        if (!n->target.empty()) {
+            // 全局/方法描述：存入 exceptionDescs_
+            auto& descs = exceptionDescs_[n->target];
+            descs.insert(descs.end(), n->messages.begin(), n->messages.end());
+        }
+        // 内联 exception: no-op for now (IDE/tooling metadata)
+        return Value::Nil();
+    }
+
     throw std::runtime_error("unknown AST node");
+}
+
+// ── 创建结构体实例 ─────────────────────────────────────────
+Value Interpreter::createStructInst(std::shared_ptr<StructTypeInfo> type,
+                                     const std::vector<std::pair<std::string,Value>>& initFields,
+                                     std::shared_ptr<Environment> env, ModuleRuntime* mod) {
+    auto inst = std::make_shared<StructInstInfo>();
+    inst->type = type;
+
+    // Initialize fields with defaults, then override with provided values
+    for (auto& f : type->fields) {
+        if (f.defaultExpr)
+            inst->fields[f.name] = evalNode(f.defaultExpr.get(), env, mod);
+        else
+            inst->fields[f.name] = Value::Nil();
+    }
+    for (auto& [name, val] : initFields) {
+        inst->fields[name] = val;  // override with provided value
+    }
+    return Value::StructInstV(std::move(inst));
 }
 
 // ── 二元运算 ──────────────────────────────────────────────
@@ -1203,6 +1441,12 @@ Value Interpreter::evalBinary(BinaryExpr* node, std::shared_ptr<Environment> env
         Value l = evalNode(node->left.get(), env, mod);
         if (l.isTruthy()) return Value::Bool(true);
         return Value::Bool(evalNode(node->right.get(), env, mod).isTruthy());
+    }
+    // ?? nil coalescing: return left if not nil, else right
+    if (node->op == "??") {
+        Value l = evalNode(node->left.get(), env, mod);
+        if (l.type != Value::Type::Nil) return l;
+        return evalNode(node->right.get(), env, mod);
     }
 
     Value l = evalNode(node->left.get(), env, mod);

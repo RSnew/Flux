@@ -44,6 +44,7 @@ private:
 
     // ── 运算符优先级（用于正确插入括号）──────────────────
     static int prec(const std::string& op) {
+        if (op == "??") return 0;  // lowest: nil coalescing
         if (op == "||") return 1;
         if (op == "&&") return 2;
         if (op == "==" || op == "!=") return 3;
@@ -135,6 +136,22 @@ private:
             return "await " + fmtExpr(n->expr.get());
         }
 
+        // ── StructCreate: Point(x: 3, y: 4) ─────────────────
+        if (auto* n = dynamic_cast<StructCreate*>(node)) {
+            std::string s = n->typeName + "(";
+            for (size_t i = 0; i < n->fields.size(); ++i) {
+                if (i) s += ", ";
+                s += n->fields[i].name + ": " + fmtExpr(n->fields[i].value.get());
+            }
+            return s + ")";
+        }
+
+        // ── IntervalRange: [1, 5] / [1, 5) ──────────────────
+        if (auto* n = dynamic_cast<IntervalRange*>(node)) {
+            return "[" + fmtExpr(n->start.get()) + ", " + fmtExpr(n->end.get()) +
+                   (n->inclusive ? "]" : ")");
+        }
+
         return "/* ? */";
     }
 
@@ -154,7 +171,11 @@ private:
 
         // ── 变量声明 ────────────────────────────────────────
         if (auto* n = dynamic_cast<VarDecl*>(node)) {
-            std::string s = ind() + (n->immutable ? "let " : "var ") + n->name;
+            std::string kw = n->forceOverride
+                ? (n->immutable ? "!let " : "!var ")
+                : (n->immutable ? "let "  : "var ");
+            std::string s = ind() + kw + n->name;
+            if (n->isInterface) s += ": interface";
             if (!n->typeAnnotation.empty()) s += ": " + n->typeAnnotation;
             if (n->initializer) s += " = " + fmtExpr(n->initializer.get());
             return s + "\n";
@@ -239,7 +260,8 @@ private:
 
         // ── 函数声明 ─────────────────────────────────────────
         if (auto* n = dynamic_cast<FnDecl*>(node)) {
-            std::string s = ind() + "fn " + n->name + "(";
+            std::string kw = n->forceOverride ? "!func " : "func ";
+            std::string s = ind() + kw + n->name + "(";
             for (size_t i = 0; i < n->params.size(); i++) {
                 if (i) s += ", ";
                 s += n->params[i].name;
@@ -309,6 +331,58 @@ private:
             std::string s = ind() + "spawn {\n";
             indent_++;
             for (auto& st : n->body) s += fmtStmt(st.get());
+            indent_--;
+            return s + ind() + "}\n";
+        }
+
+        // ── exception declaration ────────────────────────────
+        if (auto* n = dynamic_cast<ExceptionDecl*>(node)) {
+            std::string s = ind() + "exception";
+            if (!n->target.empty()) s += " " + n->target;
+            s += " {\n";
+            indent_++;
+            for (auto& m : n->messages) s += ind() + "\"" + m + "\"\n";
+            indent_--;
+            return s + ind() + "}\n";
+        }
+
+        // ── struct literal ────────────────────────────────────
+        if (auto* n = dynamic_cast<StructLit*>(node)) {
+            std::string s = ind();
+            if (!n->interfaceName.empty()) s += n->interfaceName + " ";
+            s += "{\n";
+            indent_++;
+            for (auto& f : n->fields)
+                s += ind() + f.name + ": " + fmtExpr(f.defaultValue.get()) + "\n";
+            for (auto& m : n->methods) {
+                s += ind() + "func " + m.name + "(";
+                for (size_t i = 0; i < m.params.size(); ++i) {
+                    if (i > 0) s += ", ";
+                    s += m.params[i].name;
+                    if (!m.params[i].type.empty()) s += ": " + m.params[i].type;
+                }
+                s += ") {\n";
+                indent_++;
+                for (auto& st : m.body) s += fmtStmt(st.get());
+                indent_--;
+                s += ind() + "}\n";
+            }
+            indent_--;
+            return s + ind() + "}\n";
+        }
+
+        // ── interface literal ─────────────────────────────────
+        if (auto* n = dynamic_cast<InterfaceLit*>(node)) {
+            std::string s = ind() + "{\n";
+            indent_++;
+            for (auto& m : n->methods) {
+                s += ind() + "func " + m.name + "(";
+                for (size_t i = 0; i < m.params.size(); ++i) {
+                    if (i > 0) s += ", ";
+                    s += m.params[i].name;
+                }
+                s += ")\n";
+            }
             indent_--;
             return s + ind() + "}\n";
         }

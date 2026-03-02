@@ -54,11 +54,15 @@ struct CallExpr : ASTNode {
 // ── 语句节点 ──────────────────────────────────────────────
 struct VarDecl : ASTNode {
     bool        immutable;
+    bool        forceOverride = false;  // !var / !let: always overwrite on hot-reload
+    bool        isInterface   = false;  // var S: interface = { ... }
     std::string name;
     std::string typeAnnotation; // 可选，如 "Int" "String"
     NodePtr     initializer;
-    VarDecl(bool imm, std::string n, std::string ta, NodePtr init)
-        : immutable(imm), name(std::move(n))
+    VarDecl(bool imm, std::string n, std::string ta, NodePtr init,
+            bool fo = false, bool iface = false)
+        : immutable(imm), forceOverride(fo), isInterface(iface)
+        , name(std::move(n))
         , typeAnnotation(std::move(ta)), initializer(std::move(init)) {}
 };
 
@@ -105,8 +109,11 @@ struct FnDecl : ASTNode {
     std::vector<Param>   params;
     std::string          returnType;
     std::vector<NodePtr> body;
-    FnDecl(std::string n, std::vector<Param> p, std::string rt, std::vector<NodePtr> b)
-        : name(std::move(n)), params(std::move(p)), returnType(std::move(rt)), body(std::move(b)) {}
+    bool                 forceOverride = false;  // !func: always replace on hot-reload
+    FnDecl(std::string n, std::vector<Param> p, std::string rt, std::vector<NodePtr> b,
+           bool fo = false)
+        : name(std::move(n)), params(std::move(p)), returnType(std::move(rt)), body(std::move(b))
+        , forceOverride(fo) {}
 };
 
 struct Program : ASTNode {
@@ -215,6 +222,15 @@ struct IndexAssign : ASTNode {
         : object(std::move(obj)), index(std::move(idx)), value(std::move(val)) {}
 };
 
+// ── obj.field = value 字段赋值（struct 方法内 self.x = ...）──
+struct FieldAssign : ASTNode {
+    NodePtr     object;   // 对象表达式（通常是 Identifier "self"）
+    std::string field;    // 字段名
+    NodePtr     value;
+    FieldAssign(NodePtr obj, std::string f, NodePtr val)
+        : object(std::move(obj)), field(std::move(f)), value(std::move(val)) {}
+};
+
 // ── arr.push(x) / arr.len() 方法调用 ────────────────────
 struct MethodCall : ASTNode {
     NodePtr              object;
@@ -258,4 +274,71 @@ struct AwaitExpr : ASTNode {
 struct SpawnStmt : ASTNode {
     std::vector<NodePtr> body;
     explicit SpawnStmt(std::vector<NodePtr> b) : body(std::move(b)) {}
+};
+
+// ══════════════════════════════════════════════════════════
+// Spec v1.0 新节点
+// ══════════════════════════════════════════════════════════
+
+// ── 结构体字段定义 { x: 0 } ──────────────────────────────
+struct StructFieldDef {
+    std::string name;
+    NodePtr     defaultValue;  // 可为 null（无默认值）
+};
+
+// ── 结构体方法定义 { func distance() { ... } } ────────────
+struct StructMethodDef {
+    std::string          name;
+    std::vector<Param>   params;
+    std::string          returnType;
+    std::vector<NodePtr> body;
+};
+
+// ── 结构体字面量 { field: val, ..., func method() {} } ────
+// interfaceName 不为空 → var Circle = Shape { ... }（实现接口）
+struct StructLit : ASTNode {
+    std::string                  interfaceName;  // 实现的接口名，"" = 匿名
+    std::vector<StructFieldDef>  fields;
+    std::vector<StructMethodDef> methods;
+};
+
+// ── 接口方法签名（只有名称和参数，无函数体）────────────────
+struct InterfaceMethodSig {
+    std::string        name;
+    std::vector<Param> params;
+    std::string        returnType;
+};
+
+// ── 接口字面量 { func area() func perimeter() } ──────────
+struct InterfaceLit : ASTNode {
+    std::string                      name;  // 保存到变量的名称（后填充）
+    std::vector<InterfaceMethodSig>  methods;
+};
+
+// ── 结构体具名参数构造 Point(x: 3, y: 4) ──────────────────
+struct StructFieldInit {
+    std::string name;
+    NodePtr     value;
+};
+
+struct StructCreate : ASTNode {
+    std::string                   typeName;
+    std::vector<StructFieldInit>  fields;
+};
+
+// ── 区间范围 [1, 5] / [1, 5) ─────────────────────────────
+struct IntervalRange : ASTNode {
+    NodePtr start, end;
+    bool    inclusive;  // true = [a,b]（闭区间），false = [a,b)（半开区间）
+    IntervalRange(NodePtr s, NodePtr e, bool inc)
+        : start(std::move(s)), end(std::move(e)), inclusive(inc) {}
+};
+
+// ── exception 错误描述 ────────────────────────────────────
+// 顶层：exception divide { "描述" }   target = "divide"
+// 方法：exception Point:move { "描述" } target = "Point:move"
+// 内联：exception { "描述" }           target = ""（函数体内部）
+struct ExceptionDecl : ASTNode {
+    std::string              target;    // "" = 内联, "fn" = 全局, "Type:method" = 方法
+    std::vector<std::string> messages;
 };
