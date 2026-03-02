@@ -2,6 +2,8 @@
 #include "parser.h"
 #include "typechecker.h"
 #include "interpreter.h"
+#include "compiler.h"
+#include "vm.h"
 #include "watcher.h"
 
 #include <iostream>
@@ -37,6 +39,8 @@ static void printBanner(const std::string& file) {
 }
 
 // ── 编译并执行（热更新时复用解释器状态）──────────────────
+static bool g_useVM = false;   // --vm 标志
+
 static void runSource(const std::string& source, Interpreter& interp, bool isReload) {
     try {
         Lexer  lexer(source);
@@ -66,7 +70,20 @@ static void runSource(const std::string& source, Interpreter& interp, bool isRel
             std::cout << CLR_GRAY   << "─────────────────────────────\n" << CLR_RESET;
         }
 
-        interp.execute(program.get());
+        if (g_useVM) {
+            // ── 字节码 VM 路径 ─────────────────────────────
+            // 1. 初始化：注册函数 + persistent + 模块声明（解释器处理）
+            interp.initProgram(program.get());
+            // 2. 编译常规语句到字节码
+            Chunk chunk;
+            Compiler compiler(chunk, interp);
+            compiler.compile(program.get());
+            // 3. 用 VM 执行
+            VM vm(interp);
+            vm.run(chunk, interp.globalEnv_);
+        } else {
+            interp.execute(program.get());
+        }
 
         if (isReload)
             std::cout << CLR_GREEN << "✅ Hot reload complete\n" << CLR_RESET;
@@ -141,11 +158,23 @@ int main(int argc, char* argv[]) {
         std::cout << CLR_BOLD << "Flux Language\n" << CLR_RESET
                   << "  flux               启动 REPL\n"
                   << "  flux <file.flux>   运行文件（启用热更新）\n"
+                  << "  flux --vm <file>   用字节码 VM 运行（Feature G）\n"
                   << "  flux --help        显示帮助\n";
         return 0;
     }
 
+    // --vm 标志
+    std::string filepath = arg;
+    if (arg == "--vm") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux --vm <file.flux>\n";
+            return 1;
+        }
+        g_useVM   = true;
+        filepath  = argv[2];
+    }
+
     // 运行文件
-    runFile(arg);
+    runFile(filepath);
     return 0;
 }

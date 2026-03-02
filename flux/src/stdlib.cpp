@@ -1,4 +1,4 @@
-// stdlib.cpp — Flux 标准库（File、Json、Http）
+// stdlib.cpp — Flux 标准库（File、Json、Http、Time）
 // 通过 Interpreter::registerStdlib() 注册到解释器
 #include "interpreter.h"
 
@@ -8,6 +8,9 @@
 #include <cstring>
 #include <cctype>
 #include <cstdio>   // std::remove, std::snprintf
+#include <ctime>    // std::time, std::localtime, std::strftime
+#include <chrono>   // std::chrono::*
+#include <thread>   // std::this_thread::sleep_for
 
 // POSIX socket（Http 模块使用）
 #include <sys/socket.h>
@@ -445,10 +448,67 @@ static std::unordered_map<std::string, StdlibFn> makeHttpModule() {
 }
 
 // ═══════════════════════════════════════════════════════════
+// Time 模块
+// ═══════════════════════════════════════════════════════════
+static std::unordered_map<std::string, StdlibFn> makeTimeModule() {
+    return {
+        // Time.now() → Number  (Unix epoch seconds, double precision)
+        {"now", [](std::vector<Value>) -> Value {
+            using namespace std::chrono;
+            auto tp  = system_clock::now();
+            auto sec = duration<double>(tp.time_since_epoch()).count();
+            return Value::Num(sec);
+        }},
+
+        // Time.clock() → Number  (nanoseconds since epoch, for benchmarking)
+        {"clock", [](std::vector<Value>) -> Value {
+            using namespace std::chrono;
+            auto tp = high_resolution_clock::now();
+            auto ns = duration_cast<nanoseconds>(tp.time_since_epoch()).count();
+            return Value::Num((double)ns);
+        }},
+
+        // Time.sleep(ms) → Nil
+        {"sleep", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::Number)
+                throw std::runtime_error("Time.sleep(ms) — ms must be a Number");
+            auto ms = (long long)args[0].number;
+            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+            return Value::Nil();
+        }},
+
+        // Time.format(ts) → String  (human-readable local time)
+        {"format", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::Number)
+                throw std::runtime_error("Time.format(ts) — ts must be a Number (epoch seconds)");
+            std::time_t t = (std::time_t)args[0].number;
+            // Optional format string (arg 1); default: "%Y-%m-%d %H:%M:%S"
+            std::string fmt = "%Y-%m-%d %H:%M:%S";
+            if (args.size() > 1 && args[1].type == Value::Type::String)
+                fmt = args[1].string;
+            char buf[128];
+            struct tm* tm_info = std::localtime(&t);
+            std::strftime(buf, sizeof(buf), fmt.c_str(), tm_info);
+            return Value::Str(buf);
+        }},
+
+        // Time.diff(a, b) → Number  (b − a, in seconds)
+        {"diff", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2
+                || args[0].type != Value::Type::Number
+                || args[1].type != Value::Type::Number)
+                throw std::runtime_error("Time.diff(a, b) — both arguments must be Numbers");
+            return Value::Num(args[1].number - args[0].number);
+        }},
+    };
+}
+
+// ═══════════════════════════════════════════════════════════
 // 注册所有标准库模块
 // ═══════════════════════════════════════════════════════════
 void Interpreter::registerStdlib() {
     registerStdlibModule("File", makeFileModule());
     registerStdlibModule("Json", makeJsonModule());
     registerStdlibModule("Http", makeHttpModule());
+    registerStdlibModule("Time", makeTimeModule());
 }

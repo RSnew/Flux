@@ -15,6 +15,8 @@ add_executable(flux
     src/typechecker.cpp
     src/interpreter.cpp
     src/stdlib.cpp
+    src/compiler.cpp
+    src/vm.cpp
     src/watcher.cpp
 )
 

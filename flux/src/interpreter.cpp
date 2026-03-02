@@ -90,6 +90,36 @@ void Interpreter::registerStdlibModule(const std::string& name,
     stdlibModules_[name] = std::move(fns);
 }
 
+// ── VM 模式初始化（仅注册，不执行普通语句）────────────────
+void Interpreter::initProgram(Program* program) {
+    globalEnv_ = std::make_shared<Environment>();
+    functions_.clear();
+
+    // 第一遍：注册全局函数 + 初始化 persistent
+    for (auto& stmt : program->statements) {
+        if (auto* fn = dynamic_cast<FnDecl*>(stmt.get())) {
+            functions_[fn->name] = fn;
+        } else if (auto* pb = dynamic_cast<PersistentBlock*>(stmt.get())) {
+            for (auto& field : pb->fields) {
+                if (!persistentStore_.count(field.name)) {
+                    persistentStore_[field.name] =
+                        field.defaultValue
+                            ? evalNode(field.defaultValue.get(), globalEnv_)
+                            : Value::Nil();
+                }
+            }
+        }
+    }
+
+    // 第二遍：执行模块声明（模块仍用树遍历解释器）
+    for (auto& stmt : program->statements) {
+        if (auto* md = dynamic_cast<ModuleDecl*>(stmt.get())) {
+            try { executeModule(md, globalEnv_); }
+            catch (ReturnSignal&) {}
+        }
+    }
+}
+
 // ── 主执行入口 ────────────────────────────────────────────
 void Interpreter::execute(Program* program) {
     // 热更新：重建全局环境（普通变量重置），持久化存储保留

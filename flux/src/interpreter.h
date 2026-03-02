@@ -127,6 +127,9 @@ public:
         return false;
     }
 
+    // VM 用于 POP_SCOPE
+    std::shared_ptr<Environment> parent() const { return parent_; }
+
 private:
     std::unordered_map<std::string, Value>  vars_;
     std::shared_ptr<Environment>            parent_;
@@ -152,17 +155,34 @@ struct ModuleRuntime {
 };
 
 // ── 解释器 ───────────────────────────────────────────────
+class Compiler;  // forward declaration
+class VM;        // forward declaration
+
 class Interpreter {
 public:
     Interpreter();
-    void execute(Program* program);
-    void registerBuiltin(const std::string& name, BuiltinFn fn);
+    void  execute(Program* program);
+    // VM 模式：只做注册 + 初始化 + 模块声明，不执行普通语句
+    void  initProgram(Program* program);
+    void  registerBuiltin(const std::string& name, BuiltinFn fn);
 
-private:
+    // ── VM / Compiler 需要调用的公共接口 ─────────────────
+    Value callFunction(const std::string& name, std::vector<Value> args,
+                       ModuleRuntime* mod = nullptr);
+    Value callModuleFunction(const std::string& modName,
+                             const std::string& fnName,
+                             std::vector<Value> args);
+
+    // ── VM / Compiler 直接访问的公共成员 ─────────────────
     std::shared_ptr<Environment>               globalEnv_;
     std::unordered_map<std::string, FnDecl*>   functions_;
-    std::unordered_map<std::string, BuiltinFn> builtins_;
     std::unordered_map<std::string, Value>     persistentStore_;
+
+private:
+    friend class VM;
+    friend class Compiler;
+
+    std::unordered_map<std::string, BuiltinFn> builtins_;
 
     // ── 模块表：moduleName → ModuleRuntime ──────────────
     std::unordered_map<std::string, ModuleRuntime> modules_;
@@ -180,9 +200,4 @@ private:
                    ModuleRuntime* mod = nullptr);
     Value evalBinary(BinaryExpr* node, std::shared_ptr<Environment> env,
                      ModuleRuntime* mod = nullptr);
-    Value callFunction(const std::string& name, std::vector<Value> args,
-                       ModuleRuntime* mod = nullptr);
-    Value callModuleFunction(const std::string& modName,
-                             const std::string& fnName,
-                             std::vector<Value> args);
 };
