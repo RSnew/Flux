@@ -8,6 +8,7 @@
 Interpreter::Interpreter() {
     globalEnv_ = std::make_shared<Environment>();
     registerBuiltins();
+    registerStdlib();
 }
 
 void Interpreter::registerBuiltins() {
@@ -52,13 +53,15 @@ void Interpreter::registerBuiltins() {
         for (int i = 0; i < n; i++) arr->push_back(Value::Num(i));
         return Value::Arr(arr);
     });
-    // len(x) → number (string length or array length)
+    // len(x) → number (string/array/map length)
     registerBuiltin("len", [](std::vector<Value> args) -> Value {
         if (args.empty()) return Value::Num(0);
         if (args[0].type == Value::Type::String)
             return Value::Num((double)args[0].string.size());
         if (args[0].type == Value::Type::Array && args[0].array)
             return Value::Num((double)args[0].array->size());
+        if (args[0].type == Value::Type::Map && args[0].map)
+            return Value::Num((double)args[0].map->size());
         return Value::Num(0);
     });
     registerBuiltin("type", [](std::vector<Value> args) -> Value {
@@ -67,13 +70,24 @@ void Interpreter::registerBuiltins() {
             case Value::Type::Number: return Value::Str("Number");
             case Value::Type::String: return Value::Str("String");
             case Value::Type::Bool:   return Value::Str("Bool");
+            case Value::Type::Array:  return Value::Str("Array");
+            case Value::Type::Map:    return Value::Str("Map");
             default:                  return Value::Str("Nil");
         }
+    });
+    // Map() → 创建空 Map
+    registerBuiltin("Map", [](std::vector<Value>) -> Value {
+        return Value::MapVal();
     });
 }
 
 void Interpreter::registerBuiltin(const std::string& name, BuiltinFn fn) {
     builtins_[name] = std::move(fn);
+}
+
+void Interpreter::registerStdlibModule(const std::string& name,
+                                        std::unordered_map<std::string, StdlibFn> fns) {
+    stdlibModules_[name] = std::move(fns);
 }
 
 // ── 主执行入口 ────────────────────────────────────────────
@@ -224,6 +238,15 @@ void Interpreter::executeModule(ModuleDecl* decl, std::shared_ptr<Environment> e
 Value Interpreter::callModuleFunction(const std::string& modName,
                                        const std::string& fnName,
                                        std::vector<Value> args) {
+    // ── 标准库模块优先 ──────────────────────────────────
+    auto sit = stdlibModules_.find(modName);
+    if (sit != stdlibModules_.end()) {
+        auto fit = sit->second.find(fnName);
+        if (fit == sit->second.end())
+            throw std::runtime_error("undefined stdlib function: " + modName + "." + fnName);
+        return fit->second(std::move(args));
+    }
+
     auto mit = modules_.find(modName);
     if (mit == modules_.end())
         throw std::runtime_error("undefined module: " + modName);
@@ -381,6 +404,11 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
                 throw std::runtime_error("string index out of bounds");
             return Value::Str(std::string(1, obj.string[i]));
         }
+        if (obj.type == Value::Type::Map) {
+            if (!obj.map) return Value::Nil();
+            auto it = obj.map->find(idx.toString());
+            return it != obj.map->end() ? it->second : Value::Nil();
+        }
         throw std::runtime_error("cannot index into " + obj.toString());
     }
 
@@ -389,6 +417,11 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
         Value obj = evalNode(n->object.get(), env, mod);
         Value idx = evalNode(n->index.get(),  env, mod);
         Value val = evalNode(n->value.get(),  env, mod);
+        if (obj.type == Value::Type::Map) {
+            if (!obj.map) throw std::runtime_error("null map");
+            (*obj.map)[idx.toString()] = val;
+            return val;
+        }
         if (obj.type != Value::Type::Array || !obj.array)
             throw std::runtime_error("cannot index-assign into non-array");
         int i = (int)idx.number;
@@ -483,6 +516,46 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
                 return Value::Str(l == std::string::npos ? "" : s.substr(l, r - l + 1));
             }
         }
+        // ── Map 方法 ──────────────────────────────────────
+        if (obj.type == Value::Type::Map && obj.map) {
+            if (n->method == "len" || n->method == "size")
+                return Value::Num((double)obj.map->size());
+            if (n->method == "has")
+                return Value::Bool(!margs.empty() && obj.map->count(margs[0].toString()) > 0);
+            if (n->method == "get") {
+                if (margs.empty()) return Value::Nil();
+                auto it = obj.map->find(margs[0].toString());
+                return it != obj.map->end() ? it->second
+                       : (margs.size() > 1 ? margs[1] : Value::Nil());
+            }
+            if (n->method == "set") {
+                if (margs.size() < 2) return Value::Nil();
+                (*obj.map)[margs[0].toString()] = margs[1];
+                return margs[1];
+            }
+            if (n->method == "delete" || n->method == "remove")
+                return Value::Bool(!margs.empty() && obj.map->erase(margs[0].toString()) > 0);
+            if (n->method == "keys") {
+                auto arr = std::make_shared<std::vector<Value>>();
+                for (auto& kv : *obj.map) arr->push_back(Value::Str(kv.first));
+                return Value::Arr(arr);
+            }
+            if (n->method == "values") {
+                auto arr = std::make_shared<std::vector<Value>>();
+                for (auto& kv : *obj.map) arr->push_back(kv.second);
+                return Value::Arr(arr);
+            }
+            if (n->method == "entries") {
+                auto arr = std::make_shared<std::vector<Value>>();
+                for (auto& kv : *obj.map) {
+                    auto pair = std::make_shared<std::vector<Value>>();
+                    pair->push_back(Value::Str(kv.first));
+                    pair->push_back(kv.second);
+                    arr->push_back(Value::Arr(pair));
+                }
+                return Value::Arr(arr);
+            }
+        }
         throw std::runtime_error("unknown method '" + n->method + "' on " + obj.toString());
     }
 
@@ -498,8 +571,12 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
             for (char c : iterable.string)
                 strChars.push_back(Value::Str(std::string(1, c)));
             items = &strChars;
+        } else if (iterable.type == Value::Type::Map && iterable.map) {
+            for (auto& kv : *iterable.map)
+                strChars.push_back(Value::Str(kv.first));
+            items = &strChars;
         } else {
-            throw std::runtime_error("'for-in' requires an Array or String, got " + iterable.toString());
+            throw std::runtime_error("'for-in' requires an Array, String, or Map, got " + iterable.toString());
         }
 
         for (auto& item : *items) {
@@ -520,7 +597,14 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
 
     // ── 跨模块调用（含回退到变量方法调用）────────────────
     if (auto* n = dynamic_cast<ModuleCall*>(node)) {
-        // 先检查是否是已注册的模块
+        // 先检查标准库模块
+        if (stdlibModules_.count(n->module)) {
+            std::vector<Value> args;
+            for (auto& a : n->args)
+                args.push_back(evalNode(a.get(), env, mod));
+            return callModuleFunction(n->module, n->fn, std::move(args));
+        }
+        // 再检查用户模块
         auto mit = modules_.find(n->module);
         if (mit != modules_.end()) {
             // 检查是否是 persistent 字段访问（零参，且不是函数）
@@ -629,6 +713,46 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
                 size_t l = s.find_first_not_of(" \t\n\r");
                 size_t r = s.find_last_not_of(" \t\n\r");
                 return Value::Str(l == std::string::npos ? "" : s.substr(l, r - l + 1));
+            }
+        }
+        // ── Map 方法（变量回退路径）──────────────────────
+        if (obj.type == Value::Type::Map && obj.map) {
+            if (n->fn == "len" || n->fn == "size")
+                return Value::Num((double)obj.map->size());
+            if (n->fn == "has")
+                return Value::Bool(!margs.empty() && obj.map->count(margs[0].toString()) > 0);
+            if (n->fn == "get") {
+                if (margs.empty()) return Value::Nil();
+                auto it = obj.map->find(margs[0].toString());
+                return it != obj.map->end() ? it->second
+                       : (margs.size() > 1 ? margs[1] : Value::Nil());
+            }
+            if (n->fn == "set") {
+                if (margs.size() < 2) return Value::Nil();
+                (*obj.map)[margs[0].toString()] = margs[1];
+                return margs[1];
+            }
+            if (n->fn == "delete" || n->fn == "remove")
+                return Value::Bool(!margs.empty() && obj.map->erase(margs[0].toString()) > 0);
+            if (n->fn == "keys") {
+                auto arr = std::make_shared<std::vector<Value>>();
+                for (auto& kv : *obj.map) arr->push_back(Value::Str(kv.first));
+                return Value::Arr(arr);
+            }
+            if (n->fn == "values") {
+                auto arr = std::make_shared<std::vector<Value>>();
+                for (auto& kv : *obj.map) arr->push_back(kv.second);
+                return Value::Arr(arr);
+            }
+            if (n->fn == "entries") {
+                auto arr = std::make_shared<std::vector<Value>>();
+                for (auto& kv : *obj.map) {
+                    auto pair = std::make_shared<std::vector<Value>>();
+                    pair->push_back(Value::Str(kv.first));
+                    pair->push_back(kv.second);
+                    arr->push_back(Value::Arr(pair));
+                }
+                return Value::Arr(arr);
             }
         }
         throw std::runtime_error("unknown method '" + n->fn + "' on " + obj.toString());

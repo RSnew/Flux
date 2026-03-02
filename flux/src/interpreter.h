@@ -13,15 +13,17 @@
 // 前向声明（Array 需要 shared_ptr<vector<Value>>）
 struct Value;
 using ValueArray = std::shared_ptr<std::vector<Value>>;
+using ValueMap   = std::shared_ptr<std::unordered_map<std::string, Value>>;
 
 struct Value {
-    enum class Type { Nil, Number, String, Bool, Array };
+    enum class Type { Nil, Number, String, Bool, Array, Map };
     Type type = Type::Nil;
 
     double      number  = 0;
     std::string string;
     bool        boolean = false;
     ValueArray  array;          // Array 类型
+    ValueMap    map;             // Map 类型
 
     static Value Nil()    { return {}; }
     static Value Num(double n)       { Value v; v.type = Type::Number; v.number = n; return v; }
@@ -33,6 +35,14 @@ struct Value {
         v.array = std::make_shared<std::vector<Value>>();
         return v;
     }
+    static Value MapVal() {
+        Value v; v.type = Type::Map;
+        v.map = std::make_shared<std::unordered_map<std::string, Value>>();
+        return v;
+    }
+    static Value MapOf(ValueMap m) {
+        Value v; v.type = Type::Map; v.map = std::move(m); return v;
+    }
 
     bool isTruthy() const {
         if (type == Type::Nil)    return false;
@@ -40,6 +50,7 @@ struct Value {
         if (type == Type::Number) return number != 0;
         if (type == Type::String) return !string.empty();
         if (type == Type::Array)  return array && !array->empty();
+        if (type == Type::Map)    return map   && !map->empty();
         return false;
     }
 
@@ -61,6 +72,18 @@ struct Value {
             }
             s += "]";
             return s;
+        }
+        if (type == Type::Map) {
+            std::string s = "{";
+            if (map) {
+                bool first = true;
+                for (auto& kv : *map) {
+                    if (!first) s += ", ";
+                    s += kv.first + ": " + kv.second.toString();
+                    first = false;
+                }
+            }
+            return s + "}";
         }
         return "nil";
     }
@@ -111,6 +134,7 @@ private:
 
 // ── 内置函数类型 ──────────────────────────────────────────
 using BuiltinFn = std::function<Value(std::vector<Value>)>;
+using StdlibFn  = std::function<Value(std::vector<Value>)>;
 
 // ── 模块运行时（每个模块独立的状态空间）─────────────────
 struct ModuleRuntime {
@@ -143,7 +167,13 @@ private:
     // ── 模块表：moduleName → ModuleRuntime ──────────────
     std::unordered_map<std::string, ModuleRuntime> modules_;
 
+    // ── 标准库模块表（C++ 实现）──────────────────────────
+    std::unordered_map<std::string, std::unordered_map<std::string, StdlibFn>> stdlibModules_;
+
     void  registerBuiltins();
+    void  registerStdlibModule(const std::string& name,
+                                std::unordered_map<std::string, StdlibFn> fns);
+    void  registerStdlib();   // 在 stdlib.cpp 中实现
     void  executeModule(ModuleDecl* decl, std::shared_ptr<Environment> env);
 
     Value evalNode(ASTNode* node, std::shared_ptr<Environment> env,
