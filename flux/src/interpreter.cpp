@@ -152,6 +152,34 @@ void Interpreter::execute(Program* program) {
     }
 }
 
+// ── REPL 增量执行（保留 globalEnv_ + functions_）──────────
+// 不重置环境：变量和函数定义在 REPL 会话中持续积累。
+void Interpreter::executeRepl(Program* program) {
+    // 第一遍：仅注册新函数 + 初始化尚未存在的 persistent 字段
+    for (auto& stmt : program->statements) {
+        if (auto* fn = dynamic_cast<FnDecl*>(stmt.get())) {
+            functions_[fn->name] = fn;  // 添加或覆盖
+        } else if (auto* pb = dynamic_cast<PersistentBlock*>(stmt.get())) {
+            for (auto& field : pb->fields) {
+                if (!persistentStore_.count(field.name)) {
+                    persistentStore_[field.name] =
+                        field.defaultValue
+                            ? evalNode(field.defaultValue.get(), globalEnv_)
+                            : Value::Nil();
+                }
+            }
+        }
+    }
+    // 第二遍：执行非声明语句
+    for (auto& stmt : program->statements) {
+        if (dynamic_cast<FnDecl*>(stmt.get()))          continue;
+        if (dynamic_cast<PersistentBlock*>(stmt.get())) continue;
+        try {
+            evalNode(stmt.get(), globalEnv_);
+        } catch (ReturnSignal&) {}
+    }
+}
+
 // ── 模块执行（含迁移检测）────────────────────────────────
 void Interpreter::executeModule(ModuleDecl* decl, std::shared_ptr<Environment> env) {
     auto& mod = modules_[decl->name];

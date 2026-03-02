@@ -162,6 +162,8 @@ class Interpreter {
 public:
     Interpreter();
     void  execute(Program* program);
+    // REPL 模式：保留 globalEnv_ 和 functions_（增量执行）
+    void  executeRepl(Program* program);
     // VM 模式：只做注册 + 初始化 + 模块声明，不执行普通语句
     void  initProgram(Program* program);
     void  registerBuiltin(const std::string& name, BuiltinFn fn);

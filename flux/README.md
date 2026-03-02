@@ -8,18 +8,31 @@ supervised crash recovery, and an optional bytecode VM.
 ## Quick Start
 
 ```bash
-# Build (C++17, ~4,500 lines)
+# Build (C++17, ~4,700 lines)
 cd flux && mkdir -p build && cd build
 cmake .. && cmake --build . -j$(nproc)
 
-# Run with hot-reload (tree-walking interpreter)
+# Run once (no file watcher)
+./flux run examples/hello.flux
+
+# Run with hot-reload (watch mode)
 ./flux examples/hello.flux
 
 # Run with bytecode VM (Feature G)
 ./flux --vm examples/language_demo.flux
 
-# REPL
+# Type-check only
+./flux check examples/module_demo.flux
+
+# Format source to stdout
+./flux fmt examples/hello.flux
+
+# Format in-place
+./flux fmt -w examples/hello.flux
+
+# REPL (multi-line, history)
 ./flux
+./flux repl
 ```
 
 ---
@@ -101,7 +114,7 @@ print(Json.stringify(m))
 | H  | 语言完善 | Arrays, string interpolation `\()`, for-in, method calls | ✅ Done |
 | I  | 标准库   | File IO, JSON (zero-dep parser), HTTP (POSIX socket), Time | ✅ Done |
 | G  | 字节码VM | Stack-based bytecode VM + compiler; `--vm` flag; modules via tree-walker | ✅ Done |
-| J  | 工具链   | `flux check`, `flux fmt`, `flux run`, VSCode extension | 📋 Planned |
+| J  | 工具链   | `flux check`, `flux fmt`, `flux run`, improved REPL, VSCode extension | ✅ Done |
 | K  | 并发模型 | `async`/`await`, Actor model, channels | 📋 Planned |
 | L  | 包管理器 | `flux.toml`, dependency resolution, registry | 📋 Planned |
 | M  | 自举编译器 | Flux compiles Flux (self-hosting) | 🔭 Future |
@@ -150,12 +163,33 @@ non-module top-level code.
 **`for-in`** — expanded to index loop with hidden `__iter_N` / `__idx_N` variables.
 **Modules** — still handled by the tree-walking interpreter (`initProgram()` phase).
 
-### 📋 Feature J — 工具链 (Toolchain)
-- `flux check <file>` — type-check without running
-- `flux fmt <file>` — auto-format source
-- `flux run <file>` — run once, no file watcher
-- `flux repl` — improved interactive REPL (multi-line, history)
-- VSCode extension — syntax highlighting, hover types, diagnostics
+### ✅ Feature J — 工具链 (Toolchain)
+
+| Command | Description |
+|---------|-------------|
+| `flux run <file>` | Run file once (no file watcher) |
+| `flux check <file>` | Type-check without executing; exit 0 = clean |
+| `flux fmt <file>` | Format source to stdout (canonical style) |
+| `flux fmt -w <file>` | Format in-place (overwrite) |
+| `flux repl` | Multi-line REPL with history (`.history`, `.clear`, `.help`) |
+
+**Formatter** (`src/formatter.h`) — AST-to-source pretty-printer:
+- 4-space indentation
+- Opening `{` on same line as keyword
+- Operator spacing normalized
+- Correct parenthesization via precedence-aware recursive descent
+
+**REPL improvements** over the original:
+- Multi-line block support (brace depth counting)
+- Session history (`.history` command)
+- State preserved across inputs: variables, functions, persistent blocks
+- `.clear` resets interpreter; `.help` lists commands
+
+**VSCode Extension** (`vscode-flux/`):
+- Syntax highlighting via TextMate grammar (`flux.tmLanguage.json`)
+- Bracket matching and auto-closing
+- Code folding on `{` blocks
+- Snippets: `fn`, `module`, `if`, `while`, `for`, `persistent`, …
 
 ### 📋 Feature K — 并发模型 (Concurrency Model)
 - `async fn` / `await` — cooperative coroutines on a thread pool
@@ -192,8 +226,15 @@ flux/
 │   ├── stdlib.cpp       Standard library (File, Json, Http, Time)
 │   ├── compiler.h/.cpp  AST → bytecode compiler (Feature G)
 │   ├── vm.h/.cpp        Stack-based bytecode VM (Feature G)
+│   ├── formatter.h      AST → source code formatter (Feature J)
 │   ├── watcher.h/.cpp   inotify file watcher (hot reload)
-│   └── main.cpp         CLI: lex→parse→typecheck→interpret/VM
+│   └── main.cpp         CLI: run/check/fmt/repl/--vm
+├── vscode-flux/         VSCode extension (Feature J)
+│   ├── package.json
+│   ├── language-configuration.json
+│   ├── syntaxes/flux.tmLanguage.json
+│   ├── snippets/flux.json
+│   └── extension.js
 └── examples/
     ├── hello.flux
     ├── language_demo.flux
@@ -208,15 +249,16 @@ flux/
 ## Lines of Code
 
 ```
-src/interpreter.cpp   ~930
+src/interpreter.cpp   ~960
 src/stdlib.cpp        ~510
 src/vm.cpp            ~420
 src/compiler.cpp      ~310
 src/parser.cpp        ~450
 src/typechecker.cpp   ~430
+src/formatter.h       ~220
 src/vm.h              ~130
-src/main.cpp          ~160
+src/main.cpp          ~350
 other headers/files   ~450
 ─────────────────────────
-Total                ~3,790 lines of C++17
+Total                ~4,230 lines of C++17
 ```

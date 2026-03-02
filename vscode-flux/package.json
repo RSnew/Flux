@@ -1,0 +1,50 @@
+{
+    "name": "flux-language",
+    "displayName": "Flux Language",
+    "description": "Syntax highlighting, bracket matching, and language support for the Flux scripting language",
+    "version": "0.1.0",
+    "publisher": "flux-lang",
+    "engines": {
+        "vscode": "^1.75.0"
+    },
+    "categories": [
+        "Programming Languages"
+    ],
+    "keywords": [
+        "flux",
+        "scripting",
+        "hot-reload"
+    ],
+    "contributes": {
+        "languages": [
+            {
+                "id": "flux",
+                "aliases": [
+                    "Flux",
+                    "flux"
+                ],
+                "extensions": [
+                    ".flux"
+                ],
+                "configuration": "./language-configuration.json"
+            }
+        ],
+        "grammars": [
+            {
+                "language": "flux",
+                "scopeName": "source.flux",
+                "path": "./syntaxes/flux.tmLanguage.json"
+            }
+        ],
+        "snippets": [
+            {
+                "language": "flux",
+                "path": "./snippets/flux.json"
+            }
+        ]
+    },
+    "main": "./extension.js",
+    "scripts": {
+        "vscode:prepublish": "echo 'no build step required'"
+    }
+}
