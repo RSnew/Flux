@@ -1006,6 +1006,12 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
 
         // 不是模块——当作变量的方法调用（arr.push / str.upper 等）
         Value obj = evalNode(std::make_unique<Identifier>(n->module).get(), env, mod);
+
+        // 如果是 Map 且零参数 → 字段访问（支持 enum: Direction.North）
+        if (obj.type == Value::Type::Map && obj.map && n->args.empty()) {
+            auto it = obj.map->find(n->fn);
+            if (it != obj.map->end()) return it->second;
+        }
         // 复用 MethodCall 逻辑：构造一个临时 MethodCall 并求值
         std::vector<Value> margs;
         for (auto& a : n->args) margs.push_back(evalNode(a.get(), env, mod));
@@ -1286,8 +1292,34 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
         return v;
     }
 
+    // ── conf 常量声明 ──
+    if (auto* n = dynamic_cast<ConfDecl*>(node)) {
+        Value v = n->initializer ? evalNode(n->initializer.get(), env, mod) : Value::Nil();
+        // 热更新时保留旧值（与 var 行为一致）
+        if (env->has(n->name)) return env->get(n->name);
+        env->set(n->name, v);
+        constants_.insert(n->name);
+        return v;
+    }
+
+    // ── enum 枚举声明 ──
+    if (auto* n = dynamic_cast<EnumDecl*>(node)) {
+        // 创建一个 Map 值来表示枚举：Direction.North → 0 等
+        auto enumMap = std::make_shared<std::unordered_map<std::string, Value>>();
+        for (auto& variant : n->variants) {
+            (*enumMap)[variant.name] = Value::Num((double)variant.value);
+        }
+        Value enumVal = Value::MapOf(enumMap);
+        env->set(n->name, enumVal);
+        constants_.insert(n->name);
+        return enumVal;
+    }
+
     // ── 赋值 ──
     if (auto* n = dynamic_cast<Assign*>(node)) {
+        // 检查是否尝试赋值给常量
+        if (constants_.count(n->name))
+            throw std::runtime_error("cannot assign to constant: " + n->name);
         Value v = evalNode(n->value.get(), env, mod);
         if (!env->assign(n->name, v))
             throw std::runtime_error("assignment to undefined variable: " + n->name);

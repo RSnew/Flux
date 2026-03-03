@@ -133,6 +133,8 @@ NodePtr Parser::parseTopLevel() {
     // func / fn (both introduce function declarations)
     if (check(TokenType::FN) || check(TokenType::FUNC))  return parseFnDecl();
     if (check(TokenType::VAR))        return parseVarDecl();
+    if (check(TokenType::CONF))       return parseConfDecl();
+    if (check(TokenType::ENUM))       return parseEnumDecl();
     if (check(TokenType::PERSISTENT)) return parsePersistentBlock();
     if (check(TokenType::MODULE))     return parseModuleDecl();
     // !var / !func — 热更新强制覆盖 (NOT token followed by var/func/fn)
@@ -250,6 +252,8 @@ std::unique_ptr<FnDecl> Parser::parseFnDecl(bool forceOverride) {
 NodePtr Parser::parseStatement() {
     skipNewlines();
     if (check(TokenType::VAR))    return parseVarDecl();
+    if (check(TokenType::CONF))   return parseConfDecl();
+    if (check(TokenType::ENUM))   return parseEnumDecl();
     if (check(TokenType::FN) || check(TokenType::FUNC)) return parseFnDecl();
     if (check(TokenType::IF))     return parseIf();
     if (check(TokenType::WHILE))  return parseWhile();
@@ -327,6 +331,53 @@ NodePtr Parser::parseVarDecl(bool forceOverride) {
     while (match(TokenType::NEWLINE)) {}
     return std::make_unique<VarDecl>(name, typeAnnotation, std::move(init),
                                      forceOverride, isInterface);
+}
+
+// conf MAX = 100 — 常量声明（运行时只读）
+NodePtr Parser::parseConfDecl() {
+    consume(); // conf
+    std::string name = expect(TokenType::IDENTIFIER, "expected constant name").value;
+    std::string typeAnnotation;
+    if (match(TokenType::COLON))
+        typeAnnotation = expect(TokenType::IDENTIFIER, "expected type").value;
+    expect(TokenType::ASSIGN, "expected '=' in conf declaration");
+    auto init = parseExpr();
+    while (match(TokenType::NEWLINE)) {}
+    return std::make_unique<ConfDecl>(name, typeAnnotation, std::move(init));
+}
+
+// enum Direction { North = 0, South = 1 }
+NodePtr Parser::parseEnumDecl() {
+    consume(); // enum
+    std::string name = expect(TokenType::IDENTIFIER, "expected enum name").value;
+    skipNewlines();
+    expect(TokenType::LBRACE, "expected '{' after enum name");
+    skipNewlines();
+
+    std::vector<EnumVariant> variants;
+    int nextValue = 0;
+    while (!check(TokenType::RBRACE) && !check(TokenType::EOF_TOKEN)) {
+        skipNewlines();
+        if (check(TokenType::RBRACE)) break;
+        EnumVariant v;
+        v.name = expect(TokenType::IDENTIFIER, "expected variant name").value;
+        if (match(TokenType::ASSIGN)) {
+            auto numTok = expect(TokenType::NUMBER, "expected Natural value for enum variant");
+            double val = std::stod(numTok.value);
+            if (val < 0 || val != (int)val)
+                throw ParseError("enum values must be Natural (non-negative integers)", current().line);
+            v.value = (int)val;
+            nextValue = v.value + 1;
+        } else {
+            v.value = nextValue++;
+        }
+        variants.push_back(std::move(v));
+        match(TokenType::COMMA);
+        skipNewlines();
+    }
+    expect(TokenType::RBRACE, "expected '}' to close enum");
+    while (match(TokenType::NEWLINE)) {}
+    return std::make_unique<EnumDecl>(name, std::move(variants));
 }
 
 NodePtr Parser::parseIf() {
@@ -641,22 +692,33 @@ NodePtr Parser::parsePrimary() {
 
         // 后缀链：arr[i]、arr.method()、Module.fn()
         while (true) {
+            // 处理 DOT_* 枚举 token 作为成员访问 (.error, .block, .drop, .always, .never)
+            // 这允许 log.error(...) 等语法正常工作
+            bool isDotEnum = check(TokenType::DOT_ERROR)  || check(TokenType::DOT_BLOCK)
+                          || check(TokenType::DOT_DROP)   || check(TokenType::DOT_ALWAYS)
+                          || check(TokenType::DOT_NEVER);
             if (check(TokenType::LBRACKET)) {
                 // arr[i] 下标访问
                 consume();
                 auto idx = parseExpr();
                 expect(TokenType::RBRACKET, "expected ']'");
                 node = std::make_unique<IndexExpr>(std::move(node), std::move(idx));
-            } else if (check(TokenType::DOT)) {
-                consume(); // .
-                // DOT 后可跟标识符或部分关键字（async/await/func/fn）作为成员名
+            } else if (check(TokenType::DOT) || isDotEnum) {
                 std::string member;
-                if      (check(TokenType::IDENTIFIER)) member = consume().value;
-                else if (check(TokenType::ASYNC))      { consume(); member = "async"; }
-                else if (check(TokenType::AWAIT))      { consume(); member = "await"; }
-                else if (check(TokenType::FUNC) || check(TokenType::FN))
-                                                       { consume(); member = "func"; }
-                else throw ParseError("expected member name after '.'", current().line);
+                if (isDotEnum) {
+                    // DOT_ERROR → member = "error" etc
+                    auto tok = consume();
+                    member = tok.value.substr(1); // strip leading '.'
+                } else {
+                    consume(); // .
+                    // DOT 后可跟标识符或部分关键字（async/await/func/fn）作为成员名
+                    if      (check(TokenType::IDENTIFIER)) member = consume().value;
+                    else if (check(TokenType::ASYNC))      { consume(); member = "async"; }
+                    else if (check(TokenType::AWAIT))      { consume(); member = "await"; }
+                    else if (check(TokenType::FUNC) || check(TokenType::FN))
+                                                           { consume(); member = "func"; }
+                    else throw ParseError("expected member name after '.'", current().line);
+                }
 
                 if (check(TokenType::LPAREN)) {
                     // .method(...) 调用（支持具名参数 name: value，值按位置使用）

@@ -382,6 +382,9 @@ private:
     // 获取模块绑定的线程池（nullptr 表示无绑定）
     ThreadPool* getModulePool(const std::string& moduleName);
 
+    // ── conf 常量名集合（运行时只读）──────────────────────
+    std::unordered_set<std::string> constants_;
+
     // ── Spec v1.0 新增 ────────────────────────────────────
     // exception 描述表：target → [message1, message2, ...]
     std::unordered_map<std::string, std::vector<std::string>> exceptionDescs_;

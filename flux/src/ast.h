@@ -65,6 +65,15 @@ struct VarDecl : ASTNode {
         , typeAnnotation(std::move(ta)), initializer(std::move(init)) {}
 };
 
+// ── conf MAX = 100（常量声明，运行时只读）──────────────────
+struct ConfDecl : ASTNode {
+    std::string name;
+    std::string typeAnnotation;
+    NodePtr     initializer;
+    ConfDecl(std::string n, std::string ta, NodePtr init)
+        : name(std::move(n)), typeAnnotation(std::move(ta)), initializer(std::move(init)) {}
+};
+
 struct Assign : ASTNode {
     std::string name;
     NodePtr     value;
@@ -349,4 +358,18 @@ struct FuncExpr : ASTNode {
 struct ExceptionDecl : ASTNode {
     std::string              target;    // "" = 内联, "fn" = 全局, "Type:method" = 方法
     std::vector<std::string> messages;
+};
+
+// ── enum 枚举声明（值限制为 Natural 非负整数）─────────────
+// enum Direction { North = 0, South = 1, East = 2, West = 3 }
+struct EnumVariant {
+    std::string name;
+    int         value;
+};
+
+struct EnumDecl : ASTNode {
+    std::string              name;
+    std::vector<EnumVariant> variants;
+    EnumDecl(std::string n, std::vector<EnumVariant> v)
+        : name(std::move(n)), variants(std::move(v)) {}
 };

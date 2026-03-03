@@ -42,6 +42,8 @@ private:
     // 语句
     NodePtr      parseStatement();
     NodePtr      parseVarDecl(bool forceOverride = false);
+    NodePtr      parseConfDecl();
+    NodePtr      parseEnumDecl();
     NodePtr      parseIf();
     NodePtr      parseWhile();
     NodePtr      parseForIn();

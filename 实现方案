@@ -686,61 +686,113 @@ test {} 块的执行由 `flux-test` 驱动，集成在 `flux dev` 模式中：
 
 -----
 
-## 八、实现路线图
+## 八、当前原型实现状态
 
-### Phase 1：基础可用（MVP）
+> C++17 原型实现，约 5,000 行代码，验证了核心设计可行性。
+
+### 8.1 已实现组件
+
+|组件      |实现状态  |说明                                      |
+|--------|------|----------------------------------------|
+|Lexer   |✅ 完成 |32+ Token 类型，字符串插值 `\()`，关键字完整           |
+|Parser  |✅ 完成 |递归下降，支持所有语法结构                           |
+|TypeChecker|✅ 完成|类型推断 + 注解检查、接口完整性验证、枚举值验证              |
+|Interpreter|✅ 完成|树遍历解释器，热更新、模块隔离、监督恢复                   |
+|Bytecode VM|✅ 完成|28 条指令栈式 VM，`--vm` 标志                   |
+|Formatter|✅ 完成|AST → 源码美化输出                             |
+|File Watcher|✅ 完成|inotify 文件监听，支持热更新                      |
+|Concurrency|✅ 完成|线程池、@concurrent、.async()/.await()、Chan 通道|
+|Package Mgr|✅ 完成|flux.toml、依赖解析、本地仓库                      |
+|VSCode Ext|✅ 完成|TextMate 语法高亮、代码片段、折叠                   |
+|conf 常量 |✅ 完成|`conf` 关键字，运行时只读保护                      |
+|enum 枚举 |✅ 完成|Natural-only 值验证，执行前检查                   |
+|log 日志  |✅ 完成|内置 log.info/warn/error/debug，结构化输出       |
+
+### 8.2 当前标准库
+
+|模块  |函数                                           |
+|-----|---------------------------------------------|
+|File |read, write, append, exists, lines, delete    |
+|Json |parse (零依赖), stringify, pretty               |
+|Http |get, post, put, delete (HTTP only)            |
+|Time |now, clock, sleep, format, diff               |
+|Chan |make, make(cap)                               |
+|log  |info, warn, error, debug                      |
+
+### 8.3 CLI 命令
+
+```
+flux                          REPL 交互模式
+flux dev <file>               开发模式（热更新 + 文件监听）
+flux <file>                   运行 + 热更新
+flux run <file>               单次运行
+flux check <file>             类型检查
+flux fmt [-w] <file>          格式化
+flux --vm <file>              字节码 VM 运行
+flux new/add/install/build/publish   包管理器
+```
+
+-----
+
+## 九、实现路线图
+
+### Phase 1：基础可用（MVP）✅
 
 目标：能编译运行基本 Flux 程序，支持核心语法。
 
-- [ ] Lexer + Parser → AST
-- [ ] 基础类型系统（Int, String, Bool, Array）
-- [ ] 函数、结构体、接口
-- [ ] 字节码解释器（fluz-vm v1）
-- [ ] 基础错误处理（default {}、exception）
-- [ ] `flux run` 命令
+- [x] Lexer + Parser → AST
+- [x] 基础类型系统（Int, String, Bool, Array）
+- [x] 函数、结构体、接口
+- [x] 字节码解释器（fluz-vm v1）
+- [x] 基础错误处理（default {}、exception）
+- [x] `flux run` 命令
 
-### Phase 2：热更新
+### Phase 2：热更新 ✅
 
 目标：实现核心差异化功能。
 
-- [ ] 增量编译器
-- [ ] 文件监听器（FSWatcher）
-- [ ] 热更新引擎（任务边界替换）
-- [ ] 执行前检查（接口完整性、exception 引用）
-- [ ] `flux dev` 命令
-- [ ] 内置 log
+- [x] 文件监听器（FSWatcher）— inotify 实现
+- [x] 热更新引擎（任务边界替换）
+- [x] 执行前检查（接口完整性、enum 值验证、类型一致性）
+- [x] `flux dev` 命令
+- [x] 内置 log（log.info / log.warn / log.error / log.debug）
+- [ ] 增量编译器（当前为全量重编译）
 
-### Phase 3：并发
+### Phase 3：并发 ✅
 
 目标：完整并发模型。
 
-- [ ] 线程池管理
-- [ ] @concurrent 模块
-- [ ] 自动同步/异步调用推导
-- [ ] Future / await
-- [ ] @supervised 崩溃恢复
-- [ ] persistent state 快照与恢复
+- [x] 线程池管理（@threadpool）
+- [x] @concurrent 模块绑定
+- [x] Future / .await()（含超时机制）
+- [x] @supervised 崩溃恢复
+- [x] persistent state 快照与恢复
+- [x] Chan 通道（有界/无界，send/recv/tryRecv/close）
+- [x] spawn 后台任务
+- [ ] 自动同步/异步调用推导（当前需显式 .async()）
 
-### Phase 4：标准库核心
+### Phase 4：标准库核心（部分完成）
 
 目标：足够日常开发使用的标准库。
 
 - [ ] 完整数字类型（UInt, Natural, Float, Decimal, Byte, Addr）
-- [ ] String 插值
-- [ ] collections（Array, Map, Set）
-- [ ] io/file
-- [ ] http（server + client + WebSocket）
+- [x] String 插值 — `\(expr)` 语法
+- [x] collections — Array（push/pop/map/filter/reduce）, Map（has/keys/values/entries）
+- [ ] Set 集合类型
+- [x] io/file — File.read/write/append/exists/lines/delete
+- [x] http — Http.get/post/put/delete（HTTP only）
+- [ ] http — WebSocket 支持
 - [ ] 内置 test {} 框架
 
-### Phase 5：工具链
+### Phase 5：工具链（部分完成）
 
 目标：完整开发体验。
 
-- [ ] flux-lsp（LSP 实现）
-- [ ] VS Code 插件
+- [ ] flux-lsp（LSP 实现）— 当前仅 TextMate 语法高亮
+- [x] VS Code 插件（语法高亮 + 代码片段 + 折叠）
 - [ ] flux-dbg（DAP 调试器）
-- [ ] flpkg（包管理器）
-- [ ] flux.toml 支持
+- [x] 包管理器（flux.toml、new/add/install/build/publish）
+- [x] REPL（多行支持 + 命令历史）
 - [ ] @profile 性能分析
 
 ### Phase 6：硬件支持
@@ -759,25 +811,42 @@ test {} 块的执行由 `flux-test` 驱动，集成在 `flux dev` 模式中：
 
 - [ ] JIT 编译器（可选，用于高性能场景）
 - [ ] 编译器优化（内联、常量折叠、死代码消除）
-- [ ] 完整枚举（Natural-only 值验证）
+- [x] 完整枚举（`enum` 关键字 + Natural-only 值验证）
+- [x] `conf` 常量声明（运行时只读）
 - [ ] append 扩展机制
 - [ ] 中心包仓库（pkg.flux-lang.org）
 - [ ] 完整文档
+- [ ] 自举编译器（Flux 编译 Flux）
 
 -----
 
-## 附录：关键设计决策记录
+## 附录 A：关键设计决策记录
 
-|决策     |选择                          |原因                   |
-|-------|----------------------------|---------------------|
-|变量声明   |`var` / `conf`，无 `let`      |减少关键字，conf 语义更明确     |
-|热更新强制覆盖|移除 `!var`，保留旧值              |安全默认，避免状态意外重置        |
-|错误处理   |`default {}` 替代 `nil` + `??`|让失败处理在函数内部完成，调用方无感知  |
-|泛型     |不暴露 `<T>` 语法                |通过类型推断支持，降低语言复杂度     |
-|并发     |线程池 + Actor，无显式锁            |消除竞态条件，调用语义由拓扑自动决定   |
-|接口检查时机 |执行前检查（不是编译期）                |配合热更新：失败时拒绝更新，继续运行旧代码|
-|枚举值类型  |只允许 Natural                 |避免负数/小数枚举带来的歧义       |
-|HTTP   |内置命名空间，无需 import            |降低常见场景的使用门槛          |
+|决策     |选择                              |原因                   |
+|-------|--------------------------------|---------------------|
+|变量声明   |`var` / `conf`，无 `let`          |减少关键字，conf 语义更明确     |
+|热更新强制覆盖|移除 `!var`，保留旧值                  |安全默认，避免状态意外重置        |
+|错误处理   |`default {}` 替代 `nil` + `??`    |让失败处理在函数内部完成，调用方无感知  |
+|泛型     |不暴露 `<T>` 语法                    |通过类型推断支持，降低语言复杂度     |
+|并发     |线程池 + Actor，无显式锁                |消除竞态条件，调用语义由拓扑自动决定   |
+|接口检查时机 |执行前检查（不是编译期）                    |配合热更新：失败时拒绝更新，继续运行旧代码|
+|枚举值类型  |只允许 Natural                     |避免负数/小数枚举带来的歧义       |
+|HTTP   |内置命名空间，无需 import                |降低常见场景的使用门槛          |
+|日志     |内置 `log` 命名空间                   |零配置日志，格式统一含时间戳       |
+|常量     |`conf` 关键字                      |语义清晰，与 `var` 对称       |
+|枚举     |`enum` + 自动递增 + 执行前验证           |安全默认，值必须为非负整数        |
+
+## 附录 B：原型与生产实现差异
+
+|维度     |原型（C++17）                      |生产目标（Rust）                  |
+|-------|-------------------------------|----------------------------|
+|编译流水线  |Lexer → Parser → AST → 树遍历      |Lexer → Parser → HIR → MIR → 优化 → 字节码|
+|类型推断   |基础推断 + Any 降级                   |Hindley-Milner 变体，单向推断       |
+|热更新    |全量重编译 + 文件监听                    |增量编译 + 差量输出 + 版本哈希          |
+|内存模型   |C++ RAII（shared_ptr）            |RC + 循环检测 / 手动 alloc/free   |
+|字节码 VM |28 条指令，解释执行                     |完整指令集 + 可选 JIT               |
+|并发     |GIL + std::thread               |无 GIL，真正并行执行                |
+|包格式    |源码级 .flux 包                     |.fluz 字节码包 + manifest.json   |
 
 -----
 

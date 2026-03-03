@@ -384,6 +384,7 @@ static void printHelp() {
         << "  flux                        Start interactive REPL\n"
         << "  flux repl                   Start interactive REPL (explicit)\n"
         << "  flux <file.flux>            Run file with hot-reload (watch mode)\n"
+        << "  flux dev   <file.flux>      Dev mode — hot-reload + file watcher\n"
         << "  flux run   <file.flux>      Run file once, no file watcher\n"
         << "  flux check <file.flux>      Type-check file, do not execute\n"
         << "  flux fmt   <file.flux>      Format file to stdout\n"
@@ -432,6 +433,16 @@ int main(int argc, char* argv[]) {
     // ── flux repl ────────────────────────────────────────
     if (sub == "repl") {
         cmdRepl();
+        return 0;
+    }
+
+    // ── flux dev <file> — 开发模式（热更新 + 文件监听）──
+    if (sub == "dev") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux dev <file.flux>\n";
+            return 1;
+        }
+        runFile(argv[2]);
         return 0;
     }
 

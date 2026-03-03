@@ -2,6 +2,7 @@
 // 通过 Interpreter::registerStdlib() 注册到解释器
 #include "interpreter.h"
 
+#include <iostream>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -523,10 +524,52 @@ static std::unordered_map<std::string, StdlibFn> makeChanModule() {
     return m;
 }
 
+// ═══════════════════════════════════════════════════════════
+// log 模块 — 内置结构化日志
+// ═══════════════════════════════════════════════════════════
+// 格式: [LEVEL] HH:MM:SS  {消息}
+static std::string logTimestamp() {
+    auto now = std::time(nullptr);
+    struct tm* tm_info = std::localtime(&now);
+    char buf[16];
+    std::strftime(buf, sizeof(buf), "%H:%M:%S", tm_info);
+    return buf;
+}
+
+static Value logAtLevel(const std::string& level, const std::string& color,
+                        const std::vector<Value>& args) {
+    std::string msg;
+    for (size_t i = 0; i < args.size(); i++) {
+        if (i > 0) msg += " ";
+        msg += args[i].toString();
+    }
+    std::cout << color << "[" << level << "] " << logTimestamp()
+              << "  " << msg << "\033[0m\n";
+    return Value::Nil();
+}
+
+static std::unordered_map<std::string, StdlibFn> makeLogModule() {
+    return {
+        {"info", [](std::vector<Value> args) -> Value {
+            return logAtLevel("INFO", "\033[32m", args);
+        }},
+        {"warn", [](std::vector<Value> args) -> Value {
+            return logAtLevel("WARN", "\033[33m", args);
+        }},
+        {"error", [](std::vector<Value> args) -> Value {
+            return logAtLevel("ERROR", "\033[31m", args);
+        }},
+        {"debug", [](std::vector<Value> args) -> Value {
+            return logAtLevel("DEBUG", "\033[90m", args);
+        }},
+    };
+}
+
 void Interpreter::registerStdlib() {
     registerStdlibModule("File", makeFileModule());
     registerStdlibModule("Json", makeJsonModule());
     registerStdlibModule("Http", makeHttpModule());
     registerStdlibModule("Time", makeTimeModule());
     registerStdlibModule("Chan", makeChanModule());
+    registerStdlibModule("log",  makeLogModule());
 }

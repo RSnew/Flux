@@ -3,6 +3,7 @@
 
 const std::unordered_map<std::string, TokenType> Lexer::keywords_ = {
     {"var",        TokenType::VAR},
+    {"conf",       TokenType::CONF},      // 常量声明
     {"fn",         TokenType::FN},
     {"func",       TokenType::FUNC},      // Spec v1.0: alias for fn
     {"return",     TokenType::RETURN},
@@ -14,6 +15,7 @@ const std::unordered_map<std::string, TokenType> Lexer::keywords_ = {
     {"nil",        TokenType::NIL},
     {"for",        TokenType::FOR},
     {"in",         TokenType::IN},
+    {"enum",       TokenType::ENUM},
     {"persistent", TokenType::PERSISTENT},
     {"state",      TokenType::STATE},
     {"module",     TokenType::MODULE},

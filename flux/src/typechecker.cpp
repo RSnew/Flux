@@ -48,6 +48,41 @@ std::vector<TypeError> TypeChecker::check(Program* program) {
         }
     }
 
+    // 第三遍：接口完整性检查 —— 实现接口的结构体必须包含所有方法
+    std::unordered_map<std::string, InterfaceLit*> interfaces;
+    std::vector<std::pair<VarDecl*, StructLit*>> structs;
+
+    for (auto& stmt : program->statements) {
+        if (auto* vd = dynamic_cast<VarDecl*>(stmt.get())) {
+            if (vd->isInterface) {
+                if (auto* iface = dynamic_cast<InterfaceLit*>(vd->initializer.get()))
+                    interfaces[vd->name] = iface;
+            } else if (auto* sl = dynamic_cast<StructLit*>(vd->initializer.get())) {
+                if (!sl->interfaceName.empty())
+                    structs.push_back({vd, sl});
+            }
+        }
+    }
+
+    for (auto& [vd, sl] : structs) {
+        auto it = interfaces.find(sl->interfaceName);
+        if (it == interfaces.end()) continue;
+        auto* iface = it->second;
+        for (auto& reqMethod : iface->methods) {
+            bool found = false;
+            for (auto& m : sl->methods) {
+                if (m.name == reqMethod.name) { found = true; break; }
+            }
+            if (!found) {
+                std::ostringstream oss;
+                oss << "interface error: struct '" << vd->name
+                    << "' implements '" << sl->interfaceName
+                    << "' but missing method '" << reqMethod.name << "()'";
+                error(oss.str());
+            }
+        }
+    }
+
     return errors_;
 }
 
@@ -156,6 +191,41 @@ void TypeChecker::checkStmt(ASTNode* node, std::shared_ptr<TypeEnv> env) {
         } else {
             env->define(n->name, initType); // 推断类型
         }
+        return;
+    }
+
+    // ── conf 常量声明 ───────────────────────────────────────
+    if (auto* n = dynamic_cast<ConfDecl*>(node)) {
+        FluxType initType = n->initializer
+            ? inferExpr(n->initializer.get(), env)
+            : FluxType::Nil();
+        if (!n->typeAnnotation.empty()) {
+            FluxType declared = parseTypeName(n->typeAnnotation);
+            if (!initType.compatibleWith(declared)) {
+                std::ostringstream oss;
+                oss << "type error: conf '" << n->name << "' declared as "
+                    << declared.name() << " but initialized with " << initType.name();
+                error(oss.str());
+            }
+            env->define(n->name, declared);
+        } else {
+            env->define(n->name, initType);
+        }
+        return;
+    }
+
+    // ── enum 枚举声明 ─────────────────────────────────────
+    if (auto* n = dynamic_cast<EnumDecl*>(node)) {
+        // 验证所有值为 Natural（非负整数）
+        for (auto& v : n->variants) {
+            if (v.value < 0) {
+                std::ostringstream oss;
+                oss << "type error: enum '" << n->name << "' variant '"
+                    << v.name << "' must be Natural (non-negative), got " << v.value;
+                error(oss.str());
+            }
+        }
+        env->define(n->name, FluxType::Any());
         return;
     }
 
