@@ -1,5 +1,7 @@
 # Flux Language
 
+[简体中文](README.zh-CN.md)
+
 A hot-reload-first scripting language with persistent state, module isolation,
 supervised crash recovery, and an optional bytecode VM.
 
