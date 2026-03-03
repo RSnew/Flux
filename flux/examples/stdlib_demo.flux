@@ -5,18 +5,18 @@
 // ══════════════════════════════════════════════════════════
 print("=== 1. File 模块 ===")
 
-let path = "/tmp/flux_stdlib_test.txt"
+var path = "/tmp/flux_stdlib_test.txt"
 
 // 写入
 File.write(path, "Hello, Flux!\nLine 2\nLine 3\n")
 print("exists:", File.exists(path))
 
 // 读取整个文件
-let content = File.read(path)
+var content = File.read(path)
 print("content:", content)
 
 // 逐行读取
-let lines = File.lines(path)
+var lines = File.lines(path)
 print("line count:", lines.len())
 for line in lines {
     print("  |", line)
@@ -37,8 +37,8 @@ print("")
 print("=== 2. Json 模块 ===")
 
 // 解析 JSON 字符串（对象 → Map）
-let raw = "{\"name\": \"Flux\", \"version\": 4, \"active\": true, \"tags\": [\"fast\", \"hot-reload\"]}"
-let obj = Json.parse(raw)
+var raw = "{\"name\": \"Flux\", \"version\": 4, \"active\": true, \"tags\": [\"fast\", \"hot-reload\"]}"
+var obj = Json.parse(raw)
 
 print("name:", obj["name"])
 print("version:", obj["version"])
@@ -61,7 +61,7 @@ print("pretty:")
 print(Json.pretty(obj))
 
 // 用 Map() 创建空 Map 并填充
-let m = Map()
+var m = Map()
 m["x"] = 10
 m["y"] = 20
 print("Map:", m)
@@ -77,7 +77,7 @@ for key in m {
 // ══════════════════════════════════════════════════════════
 // print("")
 // print("=== 3. Http 模块 ===")
-// let body = Http.get("http://httpbin.org/get")
+// var body = Http.get("http://httpbin.org/get")
 // print("GET response:", body)
-// let posted = Http.post("http://httpbin.org/post", Json.stringify(m))
+// var posted = Http.post("http://httpbin.org/post", Json.stringify(m))
 // print("POST response:", posted)

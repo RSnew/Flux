@@ -53,15 +53,14 @@ struct CallExpr : ASTNode {
 
 // ── 语句节点 ──────────────────────────────────────────────
 struct VarDecl : ASTNode {
-    bool        immutable;
-    bool        forceOverride = false;  // !var / !let: always overwrite on hot-reload
+    bool        forceOverride = false;  // !var: always overwrite on hot-reload
     bool        isInterface   = false;  // var S: interface = { ... }
     std::string name;
     std::string typeAnnotation; // 可选，如 "Int" "String"
     NodePtr     initializer;
-    VarDecl(bool imm, std::string n, std::string ta, NodePtr init,
+    VarDecl(std::string n, std::string ta, NodePtr init,
             bool fo = false, bool iface = false)
-        : immutable(imm), forceOverride(fo), isInterface(iface)
+        : forceOverride(fo), isInterface(iface)
         , name(std::move(n))
         , typeAnnotation(std::move(ta)), initializer(std::move(init)) {}
 };

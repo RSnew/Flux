@@ -6,6 +6,6 @@ fn triple(n: Int) -> Int {
     return n * 3
 }
 
-let x: Int = 10
+var x: Int = 10
 print("double=" + str(double(x)) + "  triple=" + str(triple(x)))
 print("v3 running - types fixed!")

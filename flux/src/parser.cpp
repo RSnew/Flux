@@ -132,15 +132,13 @@ NodePtr Parser::parseTopLevel() {
 
     // func / fn (both introduce function declarations)
     if (check(TokenType::FN) || check(TokenType::FUNC))  return parseFnDecl();
-    if (check(TokenType::LET))        return parseVarDecl(true);
-    if (check(TokenType::VAR))        return parseVarDecl(false);
+    if (check(TokenType::VAR))        return parseVarDecl();
     if (check(TokenType::PERSISTENT)) return parsePersistentBlock();
     if (check(TokenType::MODULE))     return parseModuleDecl();
-    // !var / !let / !func — 热更新强制覆盖 (NOT token followed by var/let/func/fn)
+    // !var / !func — 热更新强制覆盖 (NOT token followed by var/func/fn)
     if (check(TokenType::NOT)) {
         auto& nx = peek();
-        if (nx.type == TokenType::VAR)  { consume(); return parseVarDecl(false, true); }
-        if (nx.type == TokenType::LET)  { consume(); return parseVarDecl(true, true); }
+        if (nx.type == TokenType::VAR)  { consume(); return parseVarDecl(true); }
         if (nx.type == TokenType::FN || nx.type == TokenType::FUNC)
             { consume(); return parseFnDecl(true); }
     }
@@ -187,8 +185,7 @@ NodePtr Parser::parseModuleDecl(RestartPolicy rp, int maxRetries,
         if      (check(TokenType::FN) || check(TokenType::FUNC)) body.push_back(parseFnDecl());
         else if (check(TokenType::PERSISTENT)) body.push_back(parsePersistentBlock());
         else if (check(TokenType::MIGRATE))    body.push_back(parseMigrateBlock());
-        else if (check(TokenType::LET))        body.push_back(parseVarDecl(true));
-        else if (check(TokenType::VAR))        body.push_back(parseVarDecl(false));
+        else if (check(TokenType::VAR))        body.push_back(parseVarDecl());
         else                                   body.push_back(parseStatement());
         skipNewlines();
     }
@@ -252,19 +249,17 @@ std::unique_ptr<FnDecl> Parser::parseFnDecl(bool forceOverride) {
 // ── 语句 ──────────────────────────────────────────────────
 NodePtr Parser::parseStatement() {
     skipNewlines();
-    if (check(TokenType::LET))    return parseVarDecl(true);
-    if (check(TokenType::VAR))    return parseVarDecl(false);
+    if (check(TokenType::VAR))    return parseVarDecl();
     if (check(TokenType::FN) || check(TokenType::FUNC)) return parseFnDecl();
     if (check(TokenType::IF))     return parseIf();
     if (check(TokenType::WHILE))  return parseWhile();
     if (check(TokenType::FOR))    return parseForIn();
     if (check(TokenType::RETURN)) return parseReturn();
     if (check(TokenType::SPAWN))  return parseSpawn();
-    // !var / !let / !func in statement context
+    // !var / !func in statement context
     if (check(TokenType::NOT)) {
         auto& nx = peek();
-        if (nx.type == TokenType::VAR)  { consume(); return parseVarDecl(false, true); }
-        if (nx.type == TokenType::LET)  { consume(); return parseVarDecl(true, true); }
+        if (nx.type == TokenType::VAR)  { consume(); return parseVarDecl(true); }
         if (nx.type == TokenType::FN || nx.type == TokenType::FUNC)
             { consume(); return parseFnDecl(true); }
     }
@@ -303,8 +298,8 @@ NodePtr Parser::parseStatement() {
     return std::make_unique<ExprStmt>(std::move(expr));
 }
 
-NodePtr Parser::parseVarDecl(bool immutable, bool forceOverride) {
-    consume(); // let / var
+NodePtr Parser::parseVarDecl(bool forceOverride) {
+    consume(); // var
     std::string name = expect(TokenType::IDENTIFIER, "expected variable name").value;
     std::string typeAnnotation;
     bool        isInterface = false;
@@ -330,7 +325,7 @@ NodePtr Parser::parseVarDecl(bool immutable, bool forceOverride) {
         init = parseExpr();
     }
     while (match(TokenType::NEWLINE)) {}
-    return std::make_unique<VarDecl>(immutable, name, typeAnnotation, std::move(init),
+    return std::make_unique<VarDecl>(name, typeAnnotation, std::move(init),
                                      forceOverride, isInterface);
 }
 

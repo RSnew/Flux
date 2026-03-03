@@ -58,7 +58,7 @@ Counter.decrement()
 Logger.log("after decrement: " + str(Counter.getValue()))
 
 // 修改这行触发热更新，观察 logs 和 total 的变化
-let note = "first run"
+var note = "first run"
 Logger.log("note: " + note)
 
 Logger.log("total log count: " + str(Logger.getLogs()))

@@ -2,7 +2,6 @@
 #include <stdexcept>
 
 const std::unordered_map<std::string, TokenType> Lexer::keywords_ = {
-    {"let",        TokenType::LET},
     {"var",        TokenType::VAR},
     {"fn",         TokenType::FN},
     {"func",       TokenType::FUNC},      // Spec v1.0: alias for fn

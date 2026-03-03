@@ -41,7 +41,7 @@ private:
 
     // 语句
     NodePtr      parseStatement();
-    NodePtr      parseVarDecl(bool immutable, bool forceOverride = false);
+    NodePtr      parseVarDecl(bool forceOverride = false);
     NodePtr      parseIf();
     NodePtr      parseWhile();
     NodePtr      parseForIn();

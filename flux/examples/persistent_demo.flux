@@ -9,7 +9,7 @@ persistent {
 var resetOnReload = 0
 
 fn add(a, b) {
-    let result = a + b
+    var result = a + b
     state.totalAdded = state.totalAdded + result
     return result
 }
@@ -23,7 +23,7 @@ print("visits (persistent): " + str(state.visits))
 print("resetOnReload (var):  " + str(resetOnReload))
 print("totalAdded:           " + str(state.totalAdded))
 
-let r = add(10, 5)
+var r = add(10, 5)
 print("add(10, 5) =          " + str(r))
 print("totalAdded after:     " + str(state.totalAdded))
 print("=================================")

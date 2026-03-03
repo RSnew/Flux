@@ -171,9 +171,7 @@ private:
 
         // ── 变量声明 ────────────────────────────────────────
         if (auto* n = dynamic_cast<VarDecl*>(node)) {
-            std::string kw = n->forceOverride
-                ? (n->immutable ? "!let " : "!var ")
-                : (n->immutable ? "let "  : "var ");
+            std::string kw = n->forceOverride ? "!var " : "var ";
             std::string s = ind() + kw + n->name;
             if (n->isInterface) s += ": interface";
             if (!n->typeAnnotation.empty()) s += ": " + n->typeAnnotation;
