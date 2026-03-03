@@ -47,15 +47,15 @@ cmake .. && cmake --build . -j$(nproc)
 
 ```swift
 // ── Variables & types ──────────────────────────────────────
-let name  = "Flux"          // inferred String
-let count: Int = 0          // annotated
+var name  = "Flux"          // inferred String
+var count: Int = 0          // annotated
 var x = 3.14                // mutable
 
 // ── String interpolation ───────────────────────────────────
 print("Hello, \(name)!  x = \(x * 2)")
 
 // ── Arrays & for-in ───────────────────────────────────────
-let nums = [1, 2, 3, 4, 5]
+var nums = [1, 2, 3, 4, 5]
 for n in nums { print(n * n) }
 
 // ── Functions ──────────────────────────────────────────────
@@ -92,20 +92,20 @@ module PaymentService {
 
 // ── Standard library ───────────────────────────────────────
 File.write("/tmp/out.txt", "hello\n")
-let lines = File.lines("/tmp/out.txt")
+var lines = File.lines("/tmp/out.txt")
 
-let obj = Json.parse("{\"x\": 1, \"y\": [2, 3]}")
+var obj = Json.parse("{\"x\": 1, \"y\": [2, 3]}")
 print(obj["x"], Json.pretty(obj))
 
-let t0 = Time.now()
+var t0 = Time.now()
 Time.sleep(10)
 print("elapsed: \(Time.diff(t0, Time.now())} s")
 
 // Http (requires HTTP server; HTTPS needs libcurl):
-// let resp = Http.get("http://api.example.com/data")
+// var resp = Http.get("http://api.example.com/data")
 
 // ── Map type ───────────────────────────────────────────────
-let m = Map()
+var m = Map()
 m["key"] = "value"
 for k in m { print(k, "→", m[k]) }
 print(Json.stringify(m))
@@ -116,13 +116,13 @@ var Circle = Shape {
     radius: 1,
     func area() { return 3.14159 * self.radius * self.radius }
 }
-let c = Circle(radius: 5)
+var c = Circle(radius: 5)
 print(c.area())   // → 78.54
 
 // ── Spec v1.0: Interval loops & nil-coalescing ─────────────
 for i in [1, 5]  { print(i) }   // 1 2 3 4 5 (closed)
 for i in [1, 5)  { print(i) }   // 1 2 3 4   (half-open)
-let name = nil ?? "Guest"        // "Guest"
+var name = nil ?? "Guest"        // "Guest"
 
 // ── Spec v1.0: exception descriptions ──────────────────────
 exception divide { "Denominator must be non-zero" }
@@ -234,9 +234,9 @@ module MyService { ... }
 
 **跨 pool 异步调用** — `.async()` 方法语法：
 ```flux
-let f = ImageProcessor.resize.async(1920, 1080)   // 提交到 cpu-pool，立即返回 Future
-let result = f.await()                             // 等待结果
-let result = f.await(500)                          // 带 500ms 超时
+var f = ImageProcessor.resize.async(1920, 1080)   // 提交到 cpu-pool，立即返回 Future
+var result = f.await()                             // 等待结果
+var result = f.await(500)                          // 带 500ms 超时
 ```
 
 **溢出策略**：
@@ -322,7 +322,7 @@ func greet(name) { return "Hello, " + name + "!" }
 
 **`??` nil-coalescing operator** — returns left if non-nil, else right:
 ```flux
-let display = username ?? "Guest"
+var display = username ?? "Guest"
 ```
 
 **`!var` / `!func` hot-reload force override** — always re-initialize on reload:
@@ -339,7 +339,7 @@ var Point = {
     func dist() { return self.x * self.x + self.y * self.y },
     func move(dx, dy) { self.x = self.x + dx; self.y = self.y + dy }
 }
-let p = Point(x: 3, y: 4)   // named-arg construction
+var p = Point(x: 3, y: 4)   // named-arg construction
 print(p.dist())              // → 25
 p.move(1, 2)                 // mutates p.x and p.y via self
 ```
@@ -355,7 +355,7 @@ var Circle = Shape {         // must implement all Shape methods
     func area()      { return 3.14159 * self.radius * self.radius },
     func perimeter() { return 2 * 3.14159 * self.radius }
 }
-let c = Circle(radius: 5)
+var c = Circle(radius: 5)
 print(c.area())              // → 78.54
 ```
 
@@ -367,7 +367,7 @@ for i in [1, 5)  { print(i) }  // half-open: 1 2 3 4
 
 **`struct(s)` — iterate struct field names**:
 ```flux
-let fields = struct(p)   // → ["x", "y"]
+var fields = struct(p)   // → ["x", "y"]
 for f in fields { print(f, "=", p.x) }
 ```
 
