@@ -142,7 +142,7 @@ flux publish            # publish to local registry
 | J  | Toolchain | `check` / `fmt` / `run` / REPL / VSCode extension | Done |
 | K  | Concurrency | Thread pools, `@concurrent`, `.async()` / `.await()`, channels | Done |
 | L  | Package Manager | `flux.toml`, dependency resolution, local registry | Done |
-| v1 | Spec v1.0 | Structs, interfaces, `??`, `func`, `!var`, intervals, `exception` | Done |
+| v1 | Spec v1.0 | Structs, interfaces, `func`, `!var`, intervals, `exception` | Done |
 | M  | Self-hosting | Flux compiles Flux | Planned |
 
 ## Project Structure
