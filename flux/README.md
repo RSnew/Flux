@@ -1,0 +1,458 @@
+# Flux Language 🔥
+
+A hot-reload-first scripting language with persistent state, module isolation,
+supervised crash recovery, and an optional bytecode VM.
+
+---
+
+## Quick Start
+
+```bash
+# Build (C++17, ~5,500 lines)
+cd flux && mkdir -p build && cd build
+cmake .. && cmake --build . -j$(nproc)
+
+# Run once (no file watcher)
+./flux run examples/hello.flux
+
+# Run with hot-reload (watch mode)
+./flux examples/hello.flux
+
+# Run with bytecode VM (Feature G)
+./flux --vm examples/language_demo.flux
+
+# Type-check only
+./flux check examples/module_demo.flux
+
+# Format source to stdout
+./flux fmt examples/hello.flux
+
+# Format in-place
+./flux fmt -w examples/hello.flux
+
+# REPL (multi-line, history)
+./flux
+./flux repl
+
+# Package manager (Feature L)
+./flux new myapp        # create project
+./flux add mathlib      # add dependency
+./flux install          # install deps
+./flux build            # build & run
+```
+
+---
+
+## Syntax Overview
+
+```swift
+// ── Variables & types ──────────────────────────────────────
+let name  = "Flux"          // inferred String
+let count: Int = 0          // annotated
+var x = 3.14                // mutable
+
+// ── String interpolation ───────────────────────────────────
+print("Hello, \(name)!  x = \(x * 2)")
+
+// ── Arrays & for-in ───────────────────────────────────────
+let nums = [1, 2, 3, 4, 5]
+for n in nums { print(n * n) }
+
+// ── Functions ──────────────────────────────────────────────
+fn add(a: Int, b: Int) -> Int { return a + b }
+fn greet(who) { print("Hi, \(who)!") }
+
+// ── Persistent state (survives hot reload) ─────────────────
+persistent { visits: 0 }
+state.visits = state.visits + 1
+print("Visit #\(state.visits)")
+
+// ── Modules with isolated state ────────────────────────────
+module Counter {
+    persistent { count: 0 }
+    fn increment()       { state.count = state.count + 1 }
+    fn getValue() -> Int { return state.count }
+}
+Counter.increment()
+print(Counter.getValue())
+
+// ── Schema migration (hot reload safety) ───────────────────
+module Analytics {
+    persistent { pageViews: 0, errors: 0 }
+    migrate    { errors: 0 }   // required when adding new fields
+}
+
+// ── Supervised crash isolation ─────────────────────────────
+@supervised(restart: .always, maxRetries: 3)
+module PaymentService {
+    fn charge(amount) {
+        if amount < 0 { panic("negative amount") }
+    }
+}
+
+// ── Standard library ───────────────────────────────────────
+File.write("/tmp/out.txt", "hello\n")
+let lines = File.lines("/tmp/out.txt")
+
+let obj = Json.parse("{\"x\": 1, \"y\": [2, 3]}")
+print(obj["x"], Json.pretty(obj))
+
+let t0 = Time.now()
+Time.sleep(10)
+print("elapsed: \(Time.diff(t0, Time.now())} s")
+
+// Http (requires HTTP server; HTTPS needs libcurl):
+// let resp = Http.get("http://api.example.com/data")
+
+// ── Map type ───────────────────────────────────────────────
+let m = Map()
+m["key"] = "value"
+for k in m { print(k, "→", m[k]) }
+print(Json.stringify(m))
+
+// ── Spec v1.0: Structs & Interfaces ────────────────────────
+var Shape: interface = { func area() }
+var Circle = Shape {
+    radius: 1,
+    func area() { return 3.14159 * self.radius * self.radius }
+}
+let c = Circle(radius: 5)
+print(c.area())   // → 78.54
+
+// ── Spec v1.0: Interval loops & nil-coalescing ─────────────
+for i in [1, 5]  { print(i) }   // 1 2 3 4 5 (closed)
+for i in [1, 5)  { print(i) }   // 1 2 3 4   (half-open)
+let name = nil ?? "Guest"        // "Guest"
+
+// ── Spec v1.0: exception descriptions ──────────────────────
+exception divide { "Denominator must be non-zero" }
+func divide(a, b) { if b == 0 { panic("div0") }; return a / b }
+```
+
+---
+
+## Feature Status
+
+| ID | Feature | 描述 | Status |
+|----|---------|------|--------|
+| H  | 语言完善 | Arrays, string interpolation `\()`, for-in, method calls | ✅ Done |
+| I  | 标准库   | File IO, JSON (zero-dep parser), HTTP (POSIX socket), Time | ✅ Done |
+| G  | 字节码VM | Stack-based bytecode VM + compiler; `--vm` flag; modules via tree-walker | ✅ Done |
+| J  | 工具链   | `flux check`, `flux fmt`, `flux run`, improved REPL, VSCode extension | ✅ Done |
+| K  | 并发模型 | `async`/`await`, GIL-based threads, `Chan` channels, `spawn` | ✅ Done |
+| L  | 包管理器 | `flux.toml`, dep resolution, local registry, `flux new/add/install/build` | ✅ Done |
+| v1 | Spec v1.0 | Structs, interfaces, `??`, `func`, `!var`, interval loops, `exception` | ✅ Done |
+| M  | 自举编译器 | Flux compiles Flux (self-hosting) | 🔭 Future |
+
+---
+
+## Roadmap Details
+
+### ✅ Feature H — 语言完善 (Language Completion)
+- **Arrays**: literals `[1,2,3]`, indexing `arr[i]`, methods `push/pop/join/contains/reverse`
+- **String interpolation**: `"value = \(expr)"` (lexer-level expansion)
+- **for-in loops**: over `Array`, `String` (chars), `Map` (keys), `range(n)`
+- **Method calls**: `obj.method(args)` for Array, String, Map types
+- **Negative indexing**: `arr[-1]` → last element
+
+### ✅ Feature I — 标准库 (Standard Library)
+
+| Module | Functions |
+|--------|-----------|
+| `File` | `read`, `write`, `append`, `exists`, `lines`, `delete` |
+| `Json` | `parse`, `stringify`, `pretty` |
+| `Http` | `get`, `post`, `put`, `delete` (HTTP only; HTTPS needs libcurl) |
+| `Time` | `now`, `clock`, `sleep`, `format`, `diff` |
+
+Also adds **`Map` type** (`Map()` builtin, `m[key]`, `m.keys()`, `m.values()`, `m.entries()`).
+
+### ✅ Feature G — 字节码VM (Bytecode VM)
+
+A stack-based bytecode virtual machine replacing the tree-walking interpreter for
+non-module top-level code.
+
+**Architecture:**
+- `Chunk` — instruction sequence + constant pool + name pool
+- `Compiler` — walks AST, emits `OpCode` instructions
+- `VM` — single-threaded dispatch loop; delegates builtins/modules to `Interpreter`
+
+**Instruction set (28 opcodes):**
+`PUSH_NIL` `PUSH_TRUE` `PUSH_FALSE` `PUSH_CONST` `LOAD` `STORE` `DEFINE`
+`LOAD_STATE` `STORE_STATE` `ADD` `SUB` `MUL` `DIV` `MOD` `NEG` `NOT`
+`EQ` `NEQ` `LT` `GT` `LEQ` `GEQ`
+`PUSH_SCOPE` `POP_SCOPE` `POP` `JUMP` `JUMP_IF_FALSE` `JUMP_IF_TRUE`
+`CALL` `CALL_MODULE` `CALL_METHOD` `RETURN` `RETURN_NIL`
+`MAKE_ARRAY` `MAKE_MAP` `INDEX_GET` `INDEX_SET`
+
+**Short-circuit `&&` / `||`** — compiled with patch-back jumps.
+**`for-in`** — expanded to index loop with hidden `__iter_N` / `__idx_N` variables.
+**Modules** — still handled by the tree-walking interpreter (`initProgram()` phase).
+
+### ✅ Feature J — 工具链 (Toolchain)
+
+| Command | Description |
+|---------|-------------|
+| `flux run <file>` | Run file once (no file watcher) |
+| `flux check <file>` | Type-check without executing; exit 0 = clean |
+| `flux fmt <file>` | Format source to stdout (canonical style) |
+| `flux fmt -w <file>` | Format in-place (overwrite) |
+| `flux repl` | Multi-line REPL with history (`.history`, `.clear`, `.help`) |
+
+**Formatter** (`src/formatter.h`) — AST-to-source pretty-printer:
+- 4-space indentation
+- Opening `{` on same line as keyword
+- Operator spacing normalized
+- Correct parenthesization via precedence-aware recursive descent
+
+**REPL improvements** over the original:
+- Multi-line block support (brace depth counting)
+- Session history (`.history` command)
+- State preserved across inputs: variables, functions, persistent blocks
+- `.clear` resets interpreter; `.help` lists commands
+
+**VSCode Extension** (`vscode-flux/`):
+- Syntax highlighting via TextMate grammar (`flux.tmLanguage.json`)
+- Bracket matching and auto-closing
+- Code folding on `{` blocks
+- Snippets: `fn`, `module`, `if`, `while`, `for`, `persistent`, …
+
+### ✅ Feature K — 并发模型 (Concurrency Model) v2
+
+**线程池声明** — 用户显式控制，语言保证安全：
+```flux
+@threadpool(name: "io-pool", size: 4)    // 声明 IO 线程池
+@threadpool(name: "cpu-pool", size: 2)   // 声明 CPU 线程池
+```
+
+**模块绑定** — 一行注解绑定到对应线程池：
+```flux
+@concurrent(pool: "io-pool")                                       // 默认: overflow: .block
+@concurrent(pool: "io-pool", queue: 32, overflow: .drop)           // 日志/采样
+@concurrent(pool: "order-pool", queue: 10000, overflow: .error)    // 金融关键路径
+module MyService { ... }
+```
+
+**跨 pool 异步调用** — `.async()` 方法语法：
+```flux
+let f = ImageProcessor.resize.async(1920, 1080)   // 提交到 cpu-pool，立即返回 Future
+let result = f.await()                             // 等待结果
+let result = f.await(500)                          // 带 500ms 超时
+```
+
+**溢出策略**：
+| 策略 | 说明 |
+|------|------|
+| `.block` (默认) | 阻塞发送方直到有空位，不丢数据 |
+| `.drop` | 静默丢弃（适合日志/采样） |
+| `.error` | 抛出异常（适合金融关键路径） |
+
+**Channels & 向后兼容**：
+- `Chan.make()` / `Chan.make(cap)` — 无界/有界线程安全通道
+- `ch.send(v)`, `ch.recv()`, `ch.tryRecv()`, `ch.close()`
+- `async fn(args)` / `await future` 关键字语法（向后兼容保留）
+- `spawn { ... }` — 独立后台任务
+- `nil` — 一等公民字面量（用于通道关闭检测）
+- `fut.isReady()` — Future 状态轮询
+- Example: `examples/concurrency_demo.flux`
+
+### ✅ Feature L — 包管理器 (Package Manager)
+
+**Project manifest** (`flux.toml`):
+```toml
+[package]
+name    = "myapp"
+version = "0.1.0"
+flux    = "1.0"
+
+[dependencies]
+mathlib = "1.0.0"
+locallib = { path = "../locallib" }
+
+[scripts]
+run  = "src/main.flux"
+test = "tests/test.flux"
+```
+
+**CLI commands**:
+
+| Command | Description |
+|---------|-------------|
+| `flux new <name>` | Create new project with `flux.toml`, `src/main.flux`, `tests/test.flux` |
+| `flux build [script]` | Concatenate deps + entry file, then execute (default script: `run`) |
+| `flux add <pkg>[@ver]` | Add registry dependency to `flux.toml` |
+| `flux add <pkg> path=../lib` | Add local path dependency |
+| `flux remove <pkg>` | Remove dependency from manifest and `flux_packages/` |
+| `flux install` | Install all deps from `flux.toml` into `./flux_packages/` |
+| `flux publish` | Publish current package to local registry (`~/.flux/packages/`) |
+| `flux search [query]` | Search local registry |
+| `flux info <pkg>` | Show package details from registry |
+| `flux list` | List project dependencies and scripts |
+
+**How `flux build` works**:
+1. Reads `flux.toml` to find the entry script (e.g., `src/main.flux`)
+2. For each installed package in `flux_packages/`, reads its `flux.toml` to find its entry file
+3. Concatenates all package source files as a preamble (so their modules/functions are defined first)
+4. Appends the main entry file
+5. Runs the combined source through the interpreter
+
+**Registry layout** (`~/.flux/packages/`):
+```
+~/.flux/packages/
+├── mathlib-1.0.0/
+│   ├── flux.toml
+│   └── src/main.flux
+└── utils-0.2.1/
+    ├── flux.toml
+    └── src/main.flux
+```
+
+**Implementation files**:
+- `src/toml.h` — zero-dependency header-only TOML parser (sections, strings, inline tables)
+- `src/pkgmgr.h` — `Manifest`, `BuildResult` structs; command declarations
+- `src/pkgmgr.cpp` — full package manager implementation (~300 lines)
+
+### ✅ Spec v1.0 — Language Specification v1.0
+
+New language constructs added by the formal spec:
+
+**`func` keyword** — alias for `fn`:
+```flux
+func greet(name) { return "Hello, " + name + "!" }
+```
+
+**`??` nil-coalescing operator** — returns left if non-nil, else right:
+```flux
+let display = username ?? "Guest"
+```
+
+**`!var` / `!func` hot-reload force override** — always re-initialize on reload:
+```flux
+!var config = loadConfig()   // re-read config on every hot reload
+!func handler(req) { ... }   // always replace handler definition
+```
+
+**Struct literals with fields and methods**:
+```flux
+var Point = {
+    x: 0,
+    y: 0,
+    func dist() { return self.x * self.x + self.y * self.y },
+    func move(dx, dy) { self.x = self.x + dx; self.y = self.y + dy }
+}
+let p = Point(x: 3, y: 4)   // named-arg construction
+print(p.dist())              // → 25
+p.move(1, 2)                 // mutates p.x and p.y via self
+```
+
+**Interface declarations and conformance**:
+```flux
+var Shape: interface = {
+    func area()
+    func perimeter()
+}
+var Circle = Shape {         // must implement all Shape methods
+    radius: 1,
+    func area()      { return 3.14159 * self.radius * self.radius },
+    func perimeter() { return 2 * 3.14159 * self.radius }
+}
+let c = Circle(radius: 5)
+print(c.area())              // → 78.54
+```
+
+**Math interval loops**:
+```flux
+for i in [1, 5]  { print(i) }  // closed:    1 2 3 4 5
+for i in [1, 5)  { print(i) }  // half-open: 1 2 3 4
+```
+
+**`struct(s)` — iterate struct field names**:
+```flux
+let fields = struct(p)   // → ["x", "y"]
+for f in fields { print(f, "=", p.x) }
+```
+
+**`exception` — error descriptions** (documentation attached to functions):
+```flux
+exception divide { "Division by zero is not allowed" }
+func divide(a, b) { if b == 0 { panic("div by zero") }; return a / b }
+
+exception Point:move { "dx and dy must be finite numbers" }
+```
+
+**`self.field = value`** — struct field mutation inside methods (uses `FieldAssign` AST node).
+
+### 🔭 Feature M — 自举编译器 (Self-hosting Compiler)
+- Flux compiles Flux
+- Replaces the C++ compiler/VM with a Flux-written backend
+- Milestone: first self-hosted release
+
+---
+
+## Project Structure
+
+```
+flux/
+├── CMakeLists.txt
+├── README.md
+├── src/
+│   ├── token.h          Token types
+│   ├── lexer.h/.cpp     Lexer (string interpolation, all token types)
+│   ├── ast.h            AST node definitions (33 node types, incl. Spec v1.0)
+│   ├── parser.h/.cpp    Recursive-descent parser
+│   ├── typechecker.h/.cpp  Type inference + annotation checking
+│   ├── concurrency.h    GIL + GILGuard + GILRelease (Feature K)
+│   ├── threadpool.h     ThreadPool with overflow policies (Feature K v2)
+│   ├── interpreter.h/.cpp  Tree-walking interpreter (hot reload, modules, async/await/spawn)
+│   ├── stdlib.cpp       Standard library (File, Json, Http, Time, Chan)
+│   ├── compiler.h/.cpp  AST → bytecode compiler (Feature G)
+│   ├── vm.h/.cpp        Stack-based bytecode VM (Feature G)
+│   ├── formatter.h      AST → source code formatter (Feature J)
+│   ├── watcher.h/.cpp   inotify file watcher (hot reload)
+│   ├── toml.h           Zero-dep header-only TOML parser (Feature L)
+│   ├── pkgmgr.h/.cpp    Package manager: flux.toml, registry, deps (Feature L)
+│   └── main.cpp         CLI: run/check/fmt/repl/--vm + pkg commands
+├── vscode-flux/         VSCode extension (Feature J)
+│   ├── package.json
+│   ├── language-configuration.json
+│   ├── syntaxes/flux.tmLanguage.json
+│   ├── snippets/flux.json
+│   └── extension.js
+└── examples/
+    ├── hello.flux
+    ├── language_demo.flux
+    ├── module_demo.flux
+    ├── persistent_demo.flux
+    ├── migrate_demo.flux
+    ├── supervisor_demo.flux
+    ├── stdlib_demo.flux
+    ├── concurrency_demo.flux
+    ├── spec_v1_demo.flux
+    └── test_array_interp_forin.flux
+
+# Package manager creates projects like:
+myapp/
+├── flux.toml
+├── flux_packages/       # installed (gitignored)
+│   └── mathlib/         # full package directory
+├── src/main.flux
+└── tests/test.flux
+```
+
+## Lines of Code
+
+```
+src/interpreter.cpp   ~960
+src/stdlib.cpp        ~510
+src/pkgmgr.cpp        ~320
+src/vm.cpp            ~420
+src/compiler.cpp      ~310
+src/parser.cpp        ~450
+src/typechecker.cpp   ~430
+src/formatter.h       ~220
+src/vm.h              ~130
+src/toml.h            ~180
+src/main.cpp          ~480
+other headers/files   ~450
+─────────────────────────
+Total                ~4,860 lines of C++17
+```

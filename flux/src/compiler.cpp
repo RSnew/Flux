@@ -1,0 +1,340 @@
+// compiler.cpp — Flux AST → 字节码编译器实现
+#include "compiler.h"
+#include <stdexcept>
+#include <string>
+
+Compiler::Compiler(Chunk& chunk, Interpreter& interp)
+    : chunk_(chunk), interp_(interp) {}
+
+// ═══════════════════════════════════════════════════════════
+// 顶层入口：两遍编译
+// ═══════════════════════════════════════════════════════════
+void Compiler::compile(Program* program) {
+    // 假设 initProgram() 已提前执行（注册函数、初始化 persistent、执行模块声明）
+    // 这里只编译常规顶层语句（跳过 FnDecl / PersistentBlock / MigrateBlock / ModuleDecl）
+    for (auto& stmt : program->statements) {
+        if (dynamic_cast<FnDecl*>(stmt.get()))          continue;
+        if (dynamic_cast<PersistentBlock*>(stmt.get())) continue;
+        if (dynamic_cast<MigrateBlock*>(stmt.get()))    continue;
+        if (dynamic_cast<ModuleDecl*>(stmt.get()))      continue;
+        compileNode(stmt.get());
+    }
+    chunk_.emit(OpCode::RETURN_NIL);
+}
+
+// ═══════════════════════════════════════════════════════════
+// 节点分发
+// ═══════════════════════════════════════════════════════════
+void Compiler::compileNode(ASTNode* node) {
+
+    // ── 字面量 ──────────────────────────────────────────
+    if (auto* n = dynamic_cast<NumberLit*>(node)) {
+        chunk_.emit(OpCode::PUSH_CONST, chunk_.addConst(Value::Num(n->value)));
+        return;
+    }
+    if (auto* n = dynamic_cast<StringLit*>(node)) {
+        chunk_.emit(OpCode::PUSH_CONST, chunk_.addConst(Value::Str(n->value)));
+        return;
+    }
+    if (auto* n = dynamic_cast<BoolLit*>(node)) {
+        chunk_.emit(n->value ? OpCode::PUSH_TRUE : OpCode::PUSH_FALSE);
+        return;
+    }
+    if (dynamic_cast<NilLit*>(node)) {
+        chunk_.emit(OpCode::PUSH_NIL);
+        return;
+    }
+
+    // ── 变量 ────────────────────────────────────────────
+    if (auto* n = dynamic_cast<Identifier*>(node)) {
+        chunk_.emit(OpCode::LOAD, chunk_.addName(n->name));
+        return;
+    }
+    if (auto* n = dynamic_cast<VarDecl*>(node)) {
+        if (n->initializer) compileNode(n->initializer.get());
+        else                chunk_.emit(OpCode::PUSH_NIL);
+        chunk_.emit(OpCode::DEFINE, chunk_.addName(n->name));
+        return;
+    }
+    if (auto* n = dynamic_cast<Assign*>(node)) {
+        compileNode(n->value.get());
+        chunk_.emit(OpCode::STORE, chunk_.addName(n->name));
+        return;
+    }
+
+    // ── 持久状态 ────────────────────────────────────────
+    if (auto* n = dynamic_cast<StateAccess*>(node)) {
+        chunk_.emit(OpCode::LOAD_STATE, chunk_.addName(n->field));
+        return;
+    }
+    if (auto* n = dynamic_cast<StateAssign*>(node)) {
+        compileNode(n->value.get());
+        chunk_.emit(OpCode::STORE_STATE, chunk_.addName(n->field));
+        return;
+    }
+
+    // ── 数组字面量 ──────────────────────────────────────
+    if (auto* n = dynamic_cast<ArrayLit*>(node)) {
+        for (auto& e : n->elements) compileNode(e.get());
+        chunk_.emit(OpCode::MAKE_ARRAY, 0, (int)n->elements.size());
+        return;
+    }
+
+    // ── 下标访问 arr[i] ─────────────────────────────────
+    if (auto* n = dynamic_cast<IndexExpr*>(node)) {
+        compileNode(n->object.get());
+        compileNode(n->index.get());
+        chunk_.emit(OpCode::INDEX_GET);
+        return;
+    }
+
+    // ── 下标赋值 arr[i] = v ─────────────────────────────
+    if (auto* n = dynamic_cast<IndexAssign*>(node)) {
+        compileNode(n->object.get());
+        compileNode(n->index.get());
+        compileNode(n->value.get());
+        chunk_.emit(OpCode::INDEX_SET);
+        return;
+    }
+
+    // ── 方法调用 obj.method(args) ────────────────────────
+    if (auto* n = dynamic_cast<MethodCall*>(node)) {
+        compileMethodCall(n);
+        return;
+    }
+
+    // ── 二元表达式 ──────────────────────────────────────
+    if (auto* n = dynamic_cast<BinaryExpr*>(node)) {
+        compileBinary(n);
+        return;
+    }
+
+    // ── 一元表达式 ──────────────────────────────────────
+    if (auto* n = dynamic_cast<UnaryExpr*>(node)) {
+        compileNode(n->operand.get());
+        if (n->op == "!")  chunk_.emit(OpCode::NOT);
+        else if (n->op == "-") chunk_.emit(OpCode::NEG);
+        else throw std::runtime_error("Compiler: unknown unary op: " + n->op);
+        return;
+    }
+
+    // ── 函数调用 fn(args) ───────────────────────────────
+    if (auto* n = dynamic_cast<CallExpr*>(node)) {
+        for (auto& a : n->args) compileNode(a.get());
+        chunk_.emit(OpCode::CALL, chunk_.addName(n->name), (int)n->args.size());
+        return;
+    }
+
+    // ── 跨模块 / 方法回退调用 Module.fn(args) ────────────
+    if (auto* n = dynamic_cast<ModuleCall*>(node)) {
+        compileModuleCall(n);
+        return;
+    }
+
+    // ── if ──────────────────────────────────────────────
+    if (auto* n = dynamic_cast<IfStmt*>(node)) {
+        compileIf(n);
+        return;
+    }
+
+    // ── while ───────────────────────────────────────────
+    if (auto* n = dynamic_cast<WhileStmt*>(node)) {
+        compileWhile(n);
+        return;
+    }
+
+    // ── for-in ──────────────────────────────────────────
+    if (auto* n = dynamic_cast<ForIn*>(node)) {
+        compileForIn(n);
+        return;
+    }
+
+    // ── return ──────────────────────────────────────────
+    if (auto* n = dynamic_cast<ReturnStmt*>(node)) {
+        if (n->value) { compileNode(n->value.get()); chunk_.emit(OpCode::RETURN); }
+        else            chunk_.emit(OpCode::RETURN_NIL);
+        return;
+    }
+
+    // ── 表达式语句（丢弃返回值）──────────────────────────
+    if (auto* n = dynamic_cast<ExprStmt*>(node)) {
+        compileNode(n->expr.get());
+        chunk_.emit(OpCode::POP);
+        return;
+    }
+
+    // ── 顶层跳过节点 ────────────────────────────────────
+    if (dynamic_cast<FnDecl*>(node))          return;
+    if (dynamic_cast<PersistentBlock*>(node)) return;
+    if (dynamic_cast<MigrateBlock*>(node))    return;
+
+    throw std::runtime_error("Compiler: unhandled AST node type");
+}
+
+// ── 别名，供 compileBlock 用 ─────────────────────────────
+void Compiler::compileExpr(ASTNode* node) { compileNode(node); }
+
+// ── 语句块（可选作用域）─────────────────────────────────
+void Compiler::compileBlock(const std::vector<NodePtr>& stmts, bool ownScope) {
+    if (ownScope) chunk_.emit(OpCode::PUSH_SCOPE);
+    for (auto& s : stmts) compileNode(s.get());
+    if (ownScope) chunk_.emit(OpCode::POP_SCOPE);
+}
+
+// ═══════════════════════════════════════════════════════════
+// 二元表达式（含短路 && / ||）
+// ═══════════════════════════════════════════════════════════
+void Compiler::compileBinary(BinaryExpr* n) {
+    const std::string& op = n->op;
+
+    // 短路 &&
+    if (op == "&&") {
+        compileNode(n->left.get());
+        int jf = chunk_.emitJump(OpCode::JUMP_IF_FALSE);   // 若 false 跳走
+        chunk_.emit(OpCode::POP);                           // 弹掉 true 的左值
+        compileNode(n->right.get());
+        int jend = chunk_.emitJump(OpCode::JUMP);
+        chunk_.patchJump(jf, chunk_.here());
+        chunk_.emit(OpCode::PUSH_FALSE);
+        chunk_.patchJump(jend, chunk_.here());
+        return;
+    }
+    // 短路 ||
+    if (op == "||") {
+        compileNode(n->left.get());
+        int jt = chunk_.emitJump(OpCode::JUMP_IF_TRUE);    // 若 true 跳走
+        chunk_.emit(OpCode::POP);
+        compileNode(n->right.get());
+        int jend = chunk_.emitJump(OpCode::JUMP);
+        chunk_.patchJump(jt, chunk_.here());
+        chunk_.emit(OpCode::PUSH_TRUE);
+        chunk_.patchJump(jend, chunk_.here());
+        return;
+    }
+
+    // 普通双目：先算两个操作数，再发指令
+    compileNode(n->left.get());
+    compileNode(n->right.get());
+
+    if      (op == "+")  chunk_.emit(OpCode::ADD);
+    else if (op == "-")  chunk_.emit(OpCode::SUB);
+    else if (op == "*")  chunk_.emit(OpCode::MUL);
+    else if (op == "/")  chunk_.emit(OpCode::DIV);
+    else if (op == "%")  chunk_.emit(OpCode::MOD);
+    else if (op == "==") chunk_.emit(OpCode::EQ);
+    else if (op == "!=") chunk_.emit(OpCode::NEQ);
+    else if (op == "<")  chunk_.emit(OpCode::LT);
+    else if (op == ">")  chunk_.emit(OpCode::GT);
+    else if (op == "<=") chunk_.emit(OpCode::LEQ);
+    else if (op == ">=") chunk_.emit(OpCode::GEQ);
+    else throw std::runtime_error("Compiler: unknown binary op: " + op);
+}
+
+// ═══════════════════════════════════════════════════════════
+// if / else
+// ═══════════════════════════════════════════════════════════
+void Compiler::compileIf(IfStmt* n) {
+    compileNode(n->condition.get());
+    int jf = chunk_.emitJump(OpCode::JUMP_IF_FALSE);
+
+    compileBlock(n->thenBlock, true);
+
+    if (!n->elseBlock.empty()) {
+        int jend = chunk_.emitJump(OpCode::JUMP);
+        chunk_.patchJump(jf, chunk_.here());
+        compileBlock(n->elseBlock, true);
+        chunk_.patchJump(jend, chunk_.here());
+    } else {
+        chunk_.patchJump(jf, chunk_.here());
+    }
+}
+
+// ═══════════════════════════════════════════════════════════
+// while
+// ═══════════════════════════════════════════════════════════
+void Compiler::compileWhile(WhileStmt* n) {
+    int loopStart = chunk_.here();
+    compileNode(n->condition.get());
+    int jf = chunk_.emitJump(OpCode::JUMP_IF_FALSE);
+    compileBlock(n->body, true);
+    chunk_.emit(OpCode::JUMP, loopStart);
+    chunk_.patchJump(jf, chunk_.here());
+}
+
+// ═══════════════════════════════════════════════════════════
+// for-in → 展开为基于索引的 while 循环
+// ═══════════════════════════════════════════════════════════
+void Compiler::compileForIn(ForIn* n) {
+    int id = iterNonce_++;
+    std::string iterName = "__iter_" + std::to_string(id);
+    std::string idxName  = "__idx_"  + std::to_string(id);
+
+    // 1. 求迭代对象（Array / String / Map → 统一转 Array）
+    //    使用 CALL_MODULE "$$toArray" 的方式会很复杂，
+    //    这里直接 emit MAKE_ARRAY 0（即空数组占位），
+    //    在 VM 中用特殊处理：将 iterable 转为 key 列表
+    //    ── 实际：直接压入 iterable，VM 中 DEFINE_ITER 识别
+    compileNode(n->iterable.get());
+    // 转换为可迭代数组（VM 端特殊处理 DEFINE 前的 iterable）
+    // 我们用一个特殊标记名字 "$$iter" 让 VM 知道需要转换
+    chunk_.emit(OpCode::DEFINE, chunk_.addName(iterName));
+
+    // 2. 索引 = 0
+    chunk_.emit(OpCode::PUSH_CONST, chunk_.addConst(Value::Num(0)));
+    chunk_.emit(OpCode::DEFINE, chunk_.addName(idxName));
+
+    // 3. 循环头：检查 idx < iter.len()
+    int loopStart = chunk_.here();
+    chunk_.emit(OpCode::LOAD, chunk_.addName(idxName));
+    chunk_.emit(OpCode::LOAD, chunk_.addName(iterName));
+    // 调用 iter.len()
+    chunk_.emit(OpCode::CALL_METHOD, chunk_.addName("len"), 0);
+    chunk_.emit(OpCode::LT);
+    int jf = chunk_.emitJump(OpCode::JUMP_IF_FALSE);
+
+    // 4. 循环体（新作用域）
+    chunk_.emit(OpCode::PUSH_SCOPE);
+
+    //    取 iter[idx] → 定义循环变量
+    chunk_.emit(OpCode::LOAD, chunk_.addName(iterName));
+    chunk_.emit(OpCode::LOAD, chunk_.addName(idxName));
+    chunk_.emit(OpCode::INDEX_GET);
+    chunk_.emit(OpCode::DEFINE, chunk_.addName(n->var));
+
+    for (auto& s : n->body) compileNode(s.get());
+
+    chunk_.emit(OpCode::POP_SCOPE);
+
+    // 5. idx = idx + 1
+    chunk_.emit(OpCode::LOAD,  chunk_.addName(idxName));
+    chunk_.emit(OpCode::PUSH_CONST, chunk_.addConst(Value::Num(1)));
+    chunk_.emit(OpCode::ADD);
+    chunk_.emit(OpCode::STORE, chunk_.addName(idxName));
+
+    // 6. 回到循环头
+    chunk_.emit(OpCode::JUMP, loopStart);
+    chunk_.patchJump(jf, chunk_.here());
+}
+
+// ═══════════════════════════════════════════════════════════
+// ModuleCall: Module.fn(args) 或变量方法回退
+// ═══════════════════════════════════════════════════════════
+void Compiler::compileModuleCall(ModuleCall* n) {
+    for (auto& a : n->args) compileNode(a.get());
+    // "Module.fn" 作为组合名字存入 names 池
+    std::string combined = n->module + "." + n->fn;
+    chunk_.emit(OpCode::CALL_MODULE,
+                chunk_.addName(combined),
+                (int)n->args.size());
+}
+
+// ═══════════════════════════════════════════════════════════
+// MethodCall: obj.method(args)
+// ═══════════════════════════════════════════════════════════
+void Compiler::compileMethodCall(MethodCall* n) {
+    compileNode(n->object.get());                       // 对象压栈
+    for (auto& a : n->args) compileNode(a.get());      // 参数压栈
+    chunk_.emit(OpCode::CALL_METHOD,
+                chunk_.addName(n->method),
+                (int)n->args.size());
+}

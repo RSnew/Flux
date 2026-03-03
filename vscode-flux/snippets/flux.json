@@ -1,0 +1,121 @@
+{
+    "Function declaration": {
+        "prefix": "fn",
+        "body": [
+            "fn ${1:name}(${2:params}) -> ${3:ReturnType} {",
+            "    ${0}",
+            "}"
+        ],
+        "description": "Declare a Flux function"
+    },
+    "Function declaration (no return)": {
+        "prefix": "fnv",
+        "body": [
+            "fn ${1:name}(${2:params}) {",
+            "    ${0}",
+            "}"
+        ],
+        "description": "Declare a Flux function with no return type"
+    },
+    "Module declaration": {
+        "prefix": "module",
+        "body": [
+            "module ${1:Name} {",
+            "    ${0}",
+            "}"
+        ],
+        "description": "Declare a Flux module"
+    },
+    "Supervised module": {
+        "prefix": "supervised",
+        "body": [
+            "@supervised(restart: .always, maxRetries: ${1:3})",
+            "module ${2:Name} {",
+            "    ${0}",
+            "}"
+        ],
+        "description": "Declare a supervised Flux module"
+    },
+    "Persistent block": {
+        "prefix": "persistent",
+        "body": [
+            "persistent {",
+            "    ${1:field}: ${2:0}",
+            "}"
+        ],
+        "description": "Declare a persistent state block"
+    },
+    "If statement": {
+        "prefix": "if",
+        "body": [
+            "if ${1:condition} {",
+            "    ${0}",
+            "}"
+        ],
+        "description": "If statement"
+    },
+    "If-else statement": {
+        "prefix": "ife",
+        "body": [
+            "if ${1:condition} {",
+            "    ${2}",
+            "} else {",
+            "    ${0}",
+            "}"
+        ],
+        "description": "If-else statement"
+    },
+    "While loop": {
+        "prefix": "while",
+        "body": [
+            "while ${1:condition} {",
+            "    ${0}",
+            "}"
+        ],
+        "description": "While loop"
+    },
+    "For-in loop": {
+        "prefix": "for",
+        "body": [
+            "for ${1:item} in ${2:collection} {",
+            "    ${0}",
+            "}"
+        ],
+        "description": "For-in loop"
+    },
+    "Let variable": {
+        "prefix": "let",
+        "body": "let ${1:name} = ${0}",
+        "description": "Declare an immutable variable"
+    },
+    "Var variable": {
+        "prefix": "var",
+        "body": "var ${1:name} = ${0}",
+        "description": "Declare a mutable variable"
+    },
+    "Print": {
+        "prefix": "print",
+        "body": "print(${0})",
+        "description": "Print to stdout"
+    },
+    "File read": {
+        "prefix": "fread",
+        "body": "let ${1:content} = File.read(\"${2:path}\")",
+        "description": "Read a file"
+    },
+    "File write": {
+        "prefix": "fwrite",
+        "body": "File.write(\"${1:path}\", ${2:content})",
+        "description": "Write a file"
+    },
+    "Json parse": {
+        "prefix": "jparse",
+        "body": "let ${1:obj} = Json.parse(${2:jsonString})",
+        "description": "Parse JSON"
+    },
+    "Json stringify": {
+        "prefix": "jstr",
+        "body": "let ${1:s} = Json.stringify(${2:obj})",
+        "description": "Stringify to JSON"
+    }
+}
