@@ -304,10 +304,10 @@ NodePtr Parser::parseVarDecl(bool forceOverride) {
     std::string typeAnnotation;
     bool        isInterface = false;
     if (match(TokenType::COLON)) {
-        // Check for `interface` type annotation (not a keyword, just identifier)
-        if (check(TokenType::IDENTIFIER) && current().value == "interface") {
+        // Check for `interface` type annotation
+        if (check(TokenType::INTERFACE)) {
             isInterface = true;
-            consume(); // "interface"
+            consume(); // interface
         } else {
             typeAnnotation = expect(TokenType::IDENTIFIER, "expected type").value;
         }
@@ -543,15 +543,57 @@ NodePtr Parser::parsePrimary() {
         return parseStructLit("");
     }
 
-    // func(s) — 迭代结构体方法（func 是关键字，特殊处理）
+    // func — 匿名函数 func(params) { body } 或 func(s) 迭代器
     if (check(TokenType::FUNC) && peek().type == TokenType::LPAREN) {
+        // 向前扫描：找到匹配的 ) 后如果紧跟 { 或 ->，就是匿名函数
+        size_t savedPos = pos_;
         consume(); // func
         consume(); // (
-        std::vector<NodePtr> args;
-        auto arg = parseExpr();
-        args.push_back(std::move(arg));
-        expect(TokenType::RPAREN, "expected ')'");
-        return std::make_unique<CallExpr>("__func_iter__", std::move(args));
+        int depth = 1;
+        while (depth > 0 && !check(TokenType::EOF_TOKEN)) {
+            if (check(TokenType::LPAREN)) depth++;
+            if (check(TokenType::RPAREN)) depth--;
+            if (depth > 0) consume();
+        }
+        // 现在 current() 应该是 )
+        bool isAnonFunc = false;
+        if (check(TokenType::RPAREN)) {
+            // 看 ) 后面是不是 { 或 ->
+            auto& after = peek();
+            if (after.type == TokenType::LBRACE || after.type == TokenType::ARROW)
+                isAnonFunc = true;
+        }
+        pos_ = savedPos;  // 回退
+
+        if (isAnonFunc) {
+            // 匿名函数：func(params) { body }
+            consume(); // func
+            expect(TokenType::LPAREN, "expected '('");
+            std::vector<Param> params;
+            while (!check(TokenType::RPAREN) && !check(TokenType::EOF_TOKEN)) {
+                Param p;
+                p.name = expect(TokenType::IDENTIFIER, "expected parameter name").value;
+                if (match(TokenType::COLON))
+                    p.type = expect(TokenType::IDENTIFIER, "expected type").value;
+                params.push_back(std::move(p));
+                if (!match(TokenType::COMMA)) break;
+            }
+            expect(TokenType::RPAREN, "expected ')'");
+            std::string retType;
+            if (match(TokenType::ARROW))
+                retType = expect(TokenType::IDENTIFIER, "expected return type").value;
+            auto body = parseBlock();
+            return std::make_unique<FuncExpr>(std::move(params), retType, std::move(body));
+        } else {
+            // func(s) — 迭代结构体方法
+            consume(); // func
+            consume(); // (
+            std::vector<NodePtr> args;
+            auto arg = parseExpr();
+            args.push_back(std::move(arg));
+            expect(TokenType::RPAREN, "expected ')'");
+            return std::make_unique<CallExpr>("__func_iter__", std::move(args));
+        }
     }
 
     // 标识符 or 函数调用 or state.field or Module.fn() or arr[i] or arr.method()
@@ -617,10 +659,15 @@ NodePtr Parser::parsePrimary() {
                 else throw ParseError("expected member name after '.'", current().line);
 
                 if (check(TokenType::LPAREN)) {
-                    // .method(...) 调用
+                    // .method(...) 调用（支持具名参数 name: value，值按位置使用）
                     consume();
                     std::vector<NodePtr> args;
                     while (!check(TokenType::RPAREN) && !check(TokenType::EOF_TOKEN)) {
+                        // 具名参数：跳过 "name:" 前缀，仅取值
+                        if (check(TokenType::IDENTIFIER) && peek().type == TokenType::COLON) {
+                            consume(); // name
+                            consume(); // :
+                        }
                         args.push_back(parseExpr());
                         if (!match(TokenType::COMMA)) break;
                     }
@@ -699,7 +746,9 @@ NodePtr Parser::parseStructLit(std::string interfaceName) {
             expect(TokenType::RPAREN, "expected ')'");
             if (match(TokenType::ARROW))
                 m.returnType = expect(TokenType::IDENTIFIER, "expected return type").value;
-            m.body = parseBlock();
+            // 方法体可选：有 { → 完整方法, 无 → 纯签名（接口自动推断）
+            if (check(TokenType::LBRACE))
+                m.body = parseBlock();
             s->methods.push_back(std::move(m));
         } else if (check(TokenType::IDENTIFIER)) {
             // struct field: name: default_value

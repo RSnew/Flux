@@ -247,7 +247,10 @@ void Interpreter::execute(Program* program) {
         if (dynamic_cast<PersistentBlock*>(stmt.get())) continue;
         try {
             evalNode(stmt.get(), globalEnv_);
-        } catch (ReturnSignal&) {}
+        } catch (ReturnSignal&) {
+        } catch (PanicSignal& p) {
+            throw std::runtime_error(p.message);
+        }
     }
 }
 
@@ -275,7 +278,10 @@ void Interpreter::executeRepl(Program* program) {
         if (dynamic_cast<PersistentBlock*>(stmt.get())) continue;
         try {
             evalNode(stmt.get(), globalEnv_);
-        } catch (ReturnSignal&) {}
+        } catch (ReturnSignal&) {
+        } catch (PanicSignal& p) {
+            throw std::runtime_error(p.message);
+        }
     }
 }
 
@@ -538,7 +544,7 @@ Value Interpreter::callFunction(const std::string& name,
         if (fit != functions_.end()) fn = fit->second;
     }
     if (!fn) {
-        // Check if name is a struct type in globalEnv_
+        // Check if name resolves to a value (struct type or function value)
         try {
             Value v = globalEnv_->get(name);
             if (v.type == Value::Type::StructType && v.structType) {
@@ -548,6 +554,8 @@ Value Interpreter::callFunction(const std::string& name,
                     initFields.push_back({v.structType->fields[i].name, args[i]});
                 return createStructInst(v.structType, initFields, globalEnv_, mod);
             }
+            if (v.type == Value::Type::Function && v.func)
+                return callFuncVal(v.func, std::move(args), mod);
         } catch (...) {}
         throw std::runtime_error("undefined function: " + name);
     }
@@ -561,8 +569,62 @@ Value Interpreter::callFunction(const std::string& name,
             evalNode(stmt.get(), fnEnv, mod);
     } catch (ReturnSignal& ret) {
         return ret.value;
+    } catch (PanicSignal& p) {
+        // 合并 exception 描述到错误信息（全局 + 内联）
+        std::string merged = "[自动] " + p.message;
+        bool hasDesc = false;
+        auto dit = exceptionDescs_.find(name);
+        if (dit != exceptionDescs_.end())
+            for (auto& d : dit->second) { merged += "\n[描述] " + d; hasDesc = true; }
+        for (auto& d : lastInlineExceptionDescs_) { merged += "\n[描述] " + d; hasDesc = true; }
+        lastInlineExceptionDescs_.clear();
+        if (hasDesc) throw PanicSignal{merged};
+        throw;
+    } catch (std::runtime_error& e) {
+        std::string merged = "[自动] " + std::string(e.what());
+        bool hasDesc = false;
+        auto dit = exceptionDescs_.find(name);
+        if (dit != exceptionDescs_.end())
+            for (auto& d : dit->second) { merged += "\n[描述] " + d; hasDesc = true; }
+        for (auto& d : lastInlineExceptionDescs_) { merged += "\n[描述] " + d; hasDesc = true; }
+        lastInlineExceptionDescs_.clear();
+        if (hasDesc) throw std::runtime_error(merged);
+        throw;
     }
-    // PanicSignal 不在这里捕获，让它传播到 callModuleFunction 的边界
+    return Value::Nil();
+}
+
+// ── 调用函数值（匿名函数 / 闭包 / 具名函数引用）──────────
+Value Interpreter::callFuncVal(std::shared_ptr<FuncVal> fv, std::vector<Value> args,
+                                ModuleRuntime* mod) {
+    // 具名函数引用：委托回 callFunction
+    if (fv->fnDecl) {
+        auto fnEnv = std::make_shared<Environment>(fv->closure ? fv->closure : globalEnv_);
+        for (size_t i = 0; i < fv->fnDecl->params.size(); i++)
+            fnEnv->set(fv->fnDecl->params[i].name, i < args.size() ? args[i] : Value::Nil());
+        try {
+            for (auto& stmt : fv->fnDecl->body)
+                evalNode(stmt.get(), fnEnv, mod);
+        } catch (ReturnSignal& ret) {
+            return ret.value;
+        }
+        return Value::Nil();
+    }
+    // 内置函数引用
+    if (!fv->name.empty() && fv->ownedBody.empty()) {
+        auto bit = builtins_.find(fv->name);
+        if (bit != builtins_.end()) return bit->second(std::move(args));
+    }
+    // 匿名函数 / 闭包
+    auto fnEnv = std::make_shared<Environment>(fv->closure ? fv->closure : globalEnv_);
+    for (size_t i = 0; i < fv->params.size(); i++)
+        fnEnv->set(fv->params[i].name, i < args.size() ? args[i] : Value::Nil());
+    try {
+        for (auto& s : fv->ownedBody)
+            evalNode(s.get(), fnEnv, mod);
+    } catch (ReturnSignal& ret) {
+        return ret.value;
+    }
     return Value::Nil();
 }
 
@@ -1182,8 +1244,27 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
     if (auto* n = dynamic_cast<BoolLit*>(node))    return Value::Bool(n->value);
     if (dynamic_cast<NilLit*>(node))               return Value::Nil();
 
-    // ── 变量 ──
-    if (auto* n = dynamic_cast<Identifier*>(node)) return env->get(n->name);
+    // ── 变量（含函数引用）──
+    if (auto* n = dynamic_cast<Identifier*>(node)) {
+        // 先查环境变量
+        if (env->has(n->name)) return env->get(n->name);
+        // 再查具名函数表 → 返回函数值
+        auto fit = functions_.find(n->name);
+        if (fit != functions_.end()) {
+            auto fv = std::make_shared<FuncVal>();
+            fv->name   = fit->second->name;
+            fv->params = fit->second->params;
+            fv->fnDecl = fit->second;
+            return Value::FuncV(std::move(fv));
+        }
+        // 再查内置函数
+        if (builtins_.count(n->name)) {
+            auto fv = std::make_shared<FuncVal>();
+            fv->name = n->name;
+            return Value::FuncV(std::move(fv));
+        }
+        return env->get(n->name);  // 抛出 undefined variable
+    }
 
     // ── 声明 ──
     if (auto* n = dynamic_cast<VarDecl*>(node)) {
@@ -1229,6 +1310,14 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
     if (auto* n = dynamic_cast<CallExpr*>(node)) {
         std::vector<Value> args;
         for (auto& a : n->args) args.push_back(evalNode(a.get(), env, mod));
+        // 先检查局部变量中是否存在同名函数值
+        if (env->has(n->name)) {
+            try {
+                Value v = env->get(n->name);
+                if (v.type == Value::Type::Function && v.func)
+                    return callFuncVal(v.func, std::move(args), mod);
+            } catch (...) {}
+        }
         return callFunction(n->name, std::move(args), mod);
     }
 
@@ -1353,7 +1442,25 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
     // ══════════════════════════════════════════════════════
 
     // ── 结构体字面量 { field: val, ..., func method() {} } ──
+    // 自动推断：无字段 + 所有方法均无函数体 → 接口
     if (auto* n = dynamic_cast<StructLit*>(node)) {
+        if (n->interfaceName.empty() && n->fields.empty() && !n->methods.empty()) {
+            bool allSignatures = true;
+            for (auto& m : n->methods)
+                if (!m.body.empty()) { allSignatures = false; break; }
+            if (allSignatures) {
+                // 自动推断为接口
+                auto iface = std::make_shared<InterfaceInfo>();
+                for (auto& m : n->methods) {
+                    InterfaceInfo::MethodSig sig;
+                    sig.name   = m.name;
+                    sig.params = m.params;
+                    iface->methods.push_back(std::move(sig));
+                }
+                return Value::InterfaceV(std::move(iface));
+            }
+        }
+
         auto typeInfo = std::make_shared<StructTypeInfo>();
         typeInfo->interfaceName = n->interfaceName;
 
@@ -1424,14 +1531,56 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
         return createStructInst(typeVal.structType, initFields, env, mod);
     }
 
+    // ── 匿名函数表达式 func(params) { body } ────────────────
+    if (auto* n = dynamic_cast<FuncExpr*>(node)) {
+        auto fv = std::make_shared<FuncVal>();
+        fv->params  = n->params;
+        fv->closure = env;  // 捕获当前作用域（闭包）
+        for (auto& s : n->body)
+            fv->ownedBody.push_back(std::shared_ptr<ASTNode>(s.get(), [](ASTNode*){}));
+        return Value::FuncV(std::move(fv));
+    }
+
     // ── exception 描述声明 ─────────────────────────────────
     if (auto* n = dynamic_cast<ExceptionDecl*>(node)) {
         if (!n->target.empty()) {
+            // 执行前检查：target 函数/方法必须存在
+            auto colonPos = n->target.find(':');
+            if (colonPos != std::string::npos) {
+                // exception Type:method — 检查结构体类型及方法
+                std::string typeName   = n->target.substr(0, colonPos);
+                std::string methodName = n->target.substr(colonPos + 1);
+                bool found = false;
+                if (env->has(typeName)) {
+                    try {
+                        Value tv = env->get(typeName);
+                        if (tv.type == Value::Type::StructType && tv.structType)
+                            found = tv.structType->findMethod(methodName) != nullptr;
+                    } catch (...) {}
+                }
+                if (!found)
+                    throw std::runtime_error("exception target not found: " + n->target
+                        + " (struct type or method does not exist)");
+            } else {
+                // exception funcName — 检查全局函数或内置函数
+                bool found = functions_.count(n->target) || builtins_.count(n->target);
+                if (!found && env->has(n->target)) {
+                    try {
+                        Value tv = env->get(n->target);
+                        if (tv.type == Value::Type::Function) found = true;
+                    } catch (...) {}
+                }
+                if (!found)
+                    throw std::runtime_error("exception target not found: " + n->target
+                        + " (function does not exist)");
+            }
             // 全局/方法描述：存入 exceptionDescs_
             auto& descs = exceptionDescs_[n->target];
             descs.insert(descs.end(), n->messages.begin(), n->messages.end());
+        } else {
+            // 内联 exception：存储当前描述（下次错误时合并输出）
+            lastInlineExceptionDescs_ = n->messages;
         }
-        // 内联 exception: no-op for now (IDE/tooling metadata)
         return Value::Nil();
     }
 

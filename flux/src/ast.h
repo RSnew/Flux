@@ -333,6 +333,15 @@ struct IntervalRange : ASTNode {
         : start(std::move(s)), end(std::move(e)), inclusive(inc) {}
 };
 
+// ── 匿名函数表达式 func(params) { body } ─────────────────
+struct FuncExpr : ASTNode {
+    std::vector<Param>   params;
+    std::string          returnType;
+    std::vector<NodePtr> body;
+    FuncExpr(std::vector<Param> p, std::string rt, std::vector<NodePtr> b)
+        : params(std::move(p)), returnType(std::move(rt)), body(std::move(b)) {}
+};
+
 // ── exception 错误描述 ────────────────────────────────────
 // 顶层：exception divide { "描述" }   target = "divide"
 // 方法：exception Point:move { "描述" } target = "Point:move"

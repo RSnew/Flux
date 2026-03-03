@@ -25,6 +25,7 @@ struct ChanVal;
 struct StructTypeInfo;
 struct StructInstInfo;
 struct InterfaceInfo;
+struct FuncVal;
 using ValueArray      = std::shared_ptr<std::vector<Value>>;
 using ValueMap        = std::shared_ptr<std::unordered_map<std::string, Value>>;
 using ValueFuture     = std::shared_ptr<FutureVal>;
@@ -32,10 +33,11 @@ using ValueChan       = std::shared_ptr<ChanVal>;
 using ValueStructType = std::shared_ptr<StructTypeInfo>;
 using ValueStructInst = std::shared_ptr<StructInstInfo>;
 using ValueInterface  = std::shared_ptr<InterfaceInfo>;
+using ValueFunc       = std::shared_ptr<FuncVal>;
 
 struct Value {
     enum class Type { Nil, Number, String, Bool, Array, Map, Future, Chan,
-                      StructType, StructInst, Interface };
+                      StructType, StructInst, Interface, Function };
     Type type = Type::Nil;
 
     double      number  = 0;
@@ -48,6 +50,7 @@ struct Value {
     ValueStructType structType;  // StructType（结构体定义）
     ValueStructInst structInst;  // StructInst（结构体实例）
     ValueInterface  iface;       // Interface（接口定义）
+    ValueFunc       func;        // Function（一等公民函数值）
 
     static Value Nil()    { return {}; }
     static Value Num(double n)       { Value v; v.type = Type::Number; v.number = n; return v; }
@@ -82,6 +85,9 @@ struct Value {
     static Value InterfaceV(ValueInterface i) {
         Value v; v.type = Type::Interface; v.iface = std::move(i); return v;
     }
+    static Value FuncV(ValueFunc f) {
+        Value v; v.type = Type::Function; v.func = std::move(f); return v;
+    }
 
     bool isTruthy() const {
         if (type == Type::Nil)    return false;
@@ -95,6 +101,7 @@ struct Value {
         if (type == Type::StructType) return structType != nullptr;
         if (type == Type::StructInst) return structInst != nullptr;
         if (type == Type::Interface)  return iface      != nullptr;
+        if (type == Type::Function)  return func       != nullptr;
         return false;
     }
 
@@ -135,6 +142,7 @@ struct Value {
         if (type == Type::StructType) return "<StructType>";
         if (type == Type::StructInst) return "<StructInst>";
         if (type == Type::Interface)  return "<Interface>";
+        if (type == Type::Function)  return "<Function>";
         return "nil";
     }
 
@@ -282,6 +290,16 @@ private:
     std::shared_ptr<Environment>            parent_;
 };
 
+// ── 函数值（一等公民函数 / 匿名函数 / 闭包）──────────────
+struct FuncVal {
+    std::string        name;     // 具名函数名，匿名则为 ""
+    std::vector<Param> params;
+    // 函数体：匿名函数 → 拥有 AST（owned），具名引用 → 借用（borrowed）
+    std::vector<std::shared_ptr<ASTNode>> ownedBody;  // 匿名函数拥有的 body
+    FnDecl*                               fnDecl = nullptr; // 具名函数引用
+    std::shared_ptr<Environment>          closure;     // 闭包捕获的环境
+};
+
 // ── 内置函数类型 ──────────────────────────────────────────
 using BuiltinFn = std::function<Value(std::vector<Value>)>;
 using StdlibFn  = std::function<Value(std::vector<Value>)>;
@@ -367,6 +385,8 @@ private:
     // ── Spec v1.0 新增 ────────────────────────────────────
     // exception 描述表：target → [message1, message2, ...]
     std::unordered_map<std::string, std::vector<std::string>> exceptionDescs_;
+    // 内联 exception 描述（当前作用域中最后遇到的描述）
+    std::vector<std::string> lastInlineExceptionDescs_;
 
     // ── !var / !func 灰度切换（Spec v1.0）─────────────────
     // 热更新期间将新值/新函数体存入 pending 表；
@@ -380,4 +400,8 @@ private:
     Value createStructInst(std::shared_ptr<StructTypeInfo> type,
                            const std::vector<std::pair<std::string,Value>>& initFields,
                            std::shared_ptr<Environment> env, ModuleRuntime* mod);
+
+    // 调用函数值（匿名函数 / 闭包 / 具名函数引用）
+    Value callFuncVal(std::shared_ptr<FuncVal> fv, std::vector<Value> args,
+                      ModuleRuntime* mod = nullptr);
 };

@@ -16,6 +16,7 @@ enum class TokenType {
     THREADPOOL, CONCURRENT,
     DOT_BLOCK, DOT_DROP, DOT_ERROR,
     // 新关键字 (Spec v1.0)
+    INTERFACE,      // interface declaration keyword
     EXCEPTION,      // exception error-description keyword
     // 运算符
     PLUS, MINUS, STAR, SLASH, PERCENT,

@@ -27,6 +27,7 @@ const std::unordered_map<std::string, TokenType> Lexer::keywords_ = {
     {"threadpool", TokenType::THREADPOOL},
     {"concurrent", TokenType::CONCURRENT},
     // Spec v1.0 新关键字
+    {"interface",  TokenType::INTERFACE},
     {"exception",  TokenType::EXCEPTION},
 };
 
