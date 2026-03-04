@@ -22,6 +22,10 @@
 #include <netdb.h>
 #include <unistd.h>
 
+// OpenSSL（HTTPS 支持）
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+
 // ═══════════════════════════════════════════════════════════
 // JSON 解析器（手写递归下降）
 // ═══════════════════════════════════════════════════════════
@@ -260,15 +264,23 @@ static UrlParts parseUrl(const std::string& url) {
     return p;
 }
 
+// RAII 清理助手
+struct SockGuard {
+    int fd; SSL* ssl;
+    SockGuard(int f, SSL* s = nullptr) : fd(f), ssl(s) {}
+    ~SockGuard() {
+        if (ssl) { SSL_shutdown(ssl); SSL_free(ssl); }
+        if (fd >= 0) ::close(fd);
+    }
+};
+
 static std::string httpDoRequest(const std::string& method,
                                   const std::string& url,
                                   const std::string& body,
                                   const std::string& contentType) {
     auto p = parseUrl(url);
-    if (p.https)
-        throw std::runtime_error(
-            "Http: HTTPS is not supported without libcurl. Use http:// instead.");
 
+    // ── DNS 解析 + TCP 连接 ──────────────────────────────
     struct addrinfo hints{}, *res = nullptr;
     hints.ai_family   = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
@@ -286,7 +298,7 @@ static std::string httpDoRequest(const std::string& method,
     }
     freeaddrinfo(res);
 
-    // 构建 HTTP/1.1 请求
+    // ── 构建 HTTP/1.1 请求 ──────────────────────────────
     std::string req = method + " " + p.path + " HTTP/1.1\r\n"
                       "Host: " + p.host + "\r\n"
                       "Connection: close\r\n"
@@ -298,20 +310,67 @@ static std::string httpDoRequest(const std::string& method,
     req += "\r\n";
     if (!body.empty()) req += body;
 
-    if (::send(sock, req.c_str(), req.size(), 0) < 0) {
-        ::close(sock);
-        throw std::runtime_error("Http: send() failed");
-    }
-
-    // 读取完整响应
     std::string response;
     char buf[8192];
-    ssize_t n;
-    while ((n = ::recv(sock, buf, sizeof(buf), 0)) > 0)
-        response.append(buf, (size_t)n);
-    ::close(sock);
 
-    // 去掉 HTTP 头，返回 body
+    if (p.https) {
+        // ── HTTPS: OpenSSL TLS ──────────────────────────
+        static bool ssl_inited = false;
+        if (!ssl_inited) {
+            SSL_library_init();
+            SSL_load_error_strings();
+            OpenSSL_add_all_algorithms();
+            ssl_inited = true;
+        }
+
+        const SSL_METHOD* meth = TLS_client_method();
+        SSL_CTX* ctx = SSL_CTX_new(meth);
+        if (!ctx) {
+            ::close(sock);
+            throw std::runtime_error("Http: SSL_CTX_new() failed");
+        }
+        // 加载系统 CA 证书
+        SSL_CTX_set_default_verify_paths(ctx);
+
+        SSL* ssl = SSL_new(ctx);
+        SSL_set_fd(ssl, sock);
+        // SNI（Server Name Indication）— 很多 HTTPS 站点需要
+        SSL_set_tlsext_host_name(ssl, p.host.c_str());
+
+        SockGuard guard(sock, ssl);
+
+        if (SSL_connect(ssl) <= 0) {
+            SSL_CTX_free(ctx);
+            throw std::runtime_error("Http." + method + ": TLS handshake failed with " + p.host);
+        }
+
+        // 发送
+        if (SSL_write(ssl, req.c_str(), (int)req.size()) <= 0) {
+            SSL_CTX_free(ctx);
+            throw std::runtime_error("Http: SSL_write() failed");
+        }
+
+        // 接收
+        int n;
+        while ((n = SSL_read(ssl, buf, sizeof(buf))) > 0)
+            response.append(buf, (size_t)n);
+
+        SSL_CTX_free(ctx);
+    } else {
+        // ── HTTP: 纯 TCP ────────────────────────────────
+        SockGuard guard(sock, nullptr);
+
+        if (::send(sock, req.c_str(), req.size(), 0) < 0)
+            throw std::runtime_error("Http: send() failed");
+
+        ssize_t n;
+        while ((n = ::recv(sock, buf, sizeof(buf), 0)) > 0)
+            response.append(buf, (size_t)n);
+
+        // SockGuard 析构时关闭 sock，不要再手动 close
+    }
+
+    // ── 去掉 HTTP 头，返回 body ─────────────────────────
     size_t header_end = response.find("\r\n\r\n");
     if (header_end != std::string::npos)
         return response.substr(header_end + 4);
