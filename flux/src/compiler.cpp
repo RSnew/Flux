@@ -208,13 +208,14 @@ void Compiler::compileNode(ASTNode* node) {
         return;
     }
 
-    // ── 结构体/接口/exception/匿名函数 → EVAL_AST ──────
+    // ── 结构体/接口/exception/匿名函数/default → EVAL_AST ──
     if (dynamic_cast<StructLit*>(node)     ||
         dynamic_cast<InterfaceLit*>(node)  ||
         dynamic_cast<StructCreate*>(node)  ||
         dynamic_cast<FuncExpr*>(node)      ||
         dynamic_cast<ExceptionDecl*>(node) ||
-        dynamic_cast<IntervalRange*>(node)) {
+        dynamic_cast<IntervalRange*>(node) ||
+        dynamic_cast<DefaultExpr*>(node)) {
         chunk_.emit(OpCode::EVAL_AST, chunk_.addASTNode(node));
         return;
     }

@@ -288,6 +288,12 @@ void TypeChecker::checkStmt(ASTNode* node, std::shared_ptr<TypeEnv> env) {
     if (dynamic_cast<FreeStmt*>(node)) return;
     // ── asm ─────────────────────────────────────────────
     if (dynamic_cast<AsmBlock*>(node)) return;
+    // ── default {} 错误恢复 ─────────────────────────────
+    if (auto* n = dynamic_cast<DefaultExpr*>(node)) {
+        checkStmt(n->tryExpr.get(), env);
+        for (auto& s : n->fallback) checkStmt(s.get(), env);
+        return;
+    }
 
     // ── 其他节点（PersistentBlock, MigrateBlock 等）跳过 ──
 }
@@ -472,6 +478,9 @@ FluxType TypeChecker::inferExpr(ASTNode* node, std::shared_ptr<TypeEnv> env) {
 
     // ── alloc() → Addr ─────────────────────────────────
     if (dynamic_cast<AllocExpr*>(node)) return FluxType::Addr();
+
+    // ── default {} → same type as try expr ──────────────
+    if (auto* n = dynamic_cast<DefaultExpr*>(node)) return inferExpr(n->tryExpr.get(), env);
 
     return FluxType::Any();
 }

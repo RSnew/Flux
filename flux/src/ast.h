@@ -405,3 +405,11 @@ struct FreeStmt : ASTNode {
 struct AsmBlock : ASTNode {
     std::vector<std::string> instructions;
 };
+
+// ── expr default { fallback } 错误恢复 ──────────────────
+struct DefaultExpr : ASTNode {
+    NodePtr              tryExpr;    // 可能出错的表达式
+    std::vector<NodePtr> fallback;   // 出错时执行的代码块
+    DefaultExpr(NodePtr e, std::vector<NodePtr> fb)
+        : tryExpr(std::move(e)), fallback(std::move(fb)) {}
+};

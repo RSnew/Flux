@@ -26,6 +26,7 @@ enum class TokenType {
     ALLOC,          // alloc 手动内存分配
     FREE,           // free 手动内存释放
     ASM,            // asm 内联汇编
+    DEFAULT,        // default 错误恢复
     // 运算符
     PLUS, MINUS, STAR, SLASH, PERCENT,
     EQ, NEQ, LT, GT, LEQ, GEQ,

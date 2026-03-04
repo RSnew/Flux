@@ -156,6 +156,11 @@ private:
             return "alloc(" + fmtExpr(n->size.get()) + ")";
         }
 
+        // ── default {} 错误恢复 ─────────────────────────────
+        if (auto* n = dynamic_cast<DefaultExpr*>(node)) {
+            return fmtExpr(n->tryExpr.get()) + " default { ... }";
+        }
+
         return "/* ? */";
     }
 
@@ -450,6 +455,16 @@ private:
         // ── free ─────────────────────────────────────────────
         if (auto* n = dynamic_cast<FreeStmt*>(node)) {
             return ind() + "free(" + fmtExpr(n->ptr.get()) + ")\n";
+        }
+
+        // ── default {} 错误恢复 ─────────────────────────────
+        if (auto* n = dynamic_cast<DefaultExpr*>(node)) {
+            std::string s = ind() + fmtExpr(n->tryExpr.get()) + " default {\n";
+            indent_++;
+            for (auto& stmt : n->fallback) s += fmtStmt(stmt.get());
+            indent_--;
+            s += ind() + "}\n";
+            return s;
         }
 
         // 回退：直接尝试表达式格式化

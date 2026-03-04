@@ -968,7 +968,7 @@ FNV-1a 哈希比较（跳过未变化文件）
 - [x] 字节码 VM v1（41 条指令，含 ASYNC_CALL/AWAIT/EVAL_AST）
 - [x] `flux run` / `flux <file>` 命令
 - [x] 结构体 + 接口的 VM 编译（通过 EVAL_AST 委托 + 方法分发）
-- [ ] `default {}` 错误处理（Spec 中提及，原型中使用 exception）
+- [x] `default {}` 错误处理 — `expr default { fallback }` 捕获 panic/runtime_error 并执行回退块
 
 ### Phase 2：热更新 — ✅ 大部分完成
 

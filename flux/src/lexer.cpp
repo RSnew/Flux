@@ -37,6 +37,7 @@ const std::unordered_map<std::string, TokenType> Lexer::keywords_ = {
     {"alloc",      TokenType::ALLOC},
     {"free",       TokenType::FREE},
     {"asm",        TokenType::ASM},
+    {"default",    TokenType::DEFAULT},
 };
 
 Lexer::Lexer(const std::string& source) : source_(source) {}
