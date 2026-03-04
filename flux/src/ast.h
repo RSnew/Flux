@@ -406,14 +406,6 @@ struct AsmBlock : ASTNode {
     std::vector<std::string> instructions;
 };
 
-// ── expr default { fallback } 表达式级错误恢复 ───────────
-struct DefaultExpr : ASTNode {
-    NodePtr              tryExpr;    // 可能出错的表达式
-    std::vector<NodePtr> fallback;   // 出错时执行的代码块
-    DefaultExpr(NodePtr e, std::vector<NodePtr> fb)
-        : tryExpr(std::move(e)), fallback(std::move(fb)) {}
-};
-
 // ── default { value } 语句级默认值返回 ──────────────────
 // 写在 if 条件分支中，与 exception {} 配合使用
 // 语义：评估块中最后一个表达式，作为函数返回值

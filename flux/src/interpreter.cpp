@@ -1710,24 +1710,6 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
         return Value::Nil();
     }
 
-    // ── expr default { fallback } 表达式级错误恢复 ──────────
-    if (auto* n = dynamic_cast<DefaultExpr*>(node)) {
-        try {
-            return evalNode(n->tryExpr.get(), env, mod);
-        } catch (PanicSignal&) {
-            // panic 被 default 捕获 → 执行 fallback 块
-        } catch (std::runtime_error&) {
-            // runtime_error 被 default 捕获 → 执行 fallback 块
-        }
-        // 执行 fallback 块，返回最后一个表达式的值
-        auto childEnv = std::make_shared<Environment>(env);
-        Value result = Value::Nil();
-        for (auto& stmt : n->fallback) {
-            result = evalNode(stmt.get(), childEnv, mod);
-        }
-        return result;
-    }
-
     // ── default { value } 语句级默认值返回 ──────────────────
     // 与 exception {} 配合，在错误条件分支中返回默认值
     if (auto* n = dynamic_cast<DefaultStmt*>(node)) {

@@ -456,17 +456,8 @@ NodePtr Parser::parseSpawn() {
 
 // ── 表达式（递归下降）─────────────────────────────────────
 // parseExpr → parseOr → ... → parsePrimary
-// 最低优先级：expr default { fallback }
 NodePtr Parser::parseExpr() {
-    auto expr = parseOr();
-    // expr default { fallback_block }
-    if (check(TokenType::DEFAULT)) {
-        consume(); // default
-        skipNewlines();
-        auto fallback = parseBlock();
-        return std::make_unique<DefaultExpr>(std::move(expr), std::move(fallback));
-    }
-    return expr;
+    return parseOr();
 }
 
 NodePtr Parser::parseOr() {

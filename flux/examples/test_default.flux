@@ -93,21 +93,7 @@ assert(safe_index(items, -1) == "N/A", "negative index default")
 print("Test 4c: " + safe_index(items, 99))
 assert(safe_index(items, 99) == "N/A", "overflow index default")
 
-// ── Test 5: 表达式级 default（捕获 panic）───────────────
-func must_positive(x) {
-    if (x <= 0) { panic("must be positive") }
-    return x
-}
-
-var r5 = must_positive(42) default { -1 }
-print("Test 5a: " + str(r5))
-assert(r5 == 42, "no panic → normal value")
-
-var r6 = must_positive(-5) default { -1 }
-print("Test 5b: " + str(r6))
-assert(r6 == -1, "panic → default recovery")
-
-// ── Test 6: exception 方法描述 ──────────────────────────
+// ── Test 5: exception 方法描述 ──────────────────────────
 exception divide {
     "请注意：除数不能为零"
 }

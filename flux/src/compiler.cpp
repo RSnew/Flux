@@ -215,7 +215,6 @@ void Compiler::compileNode(ASTNode* node) {
         dynamic_cast<FuncExpr*>(node)      ||
         dynamic_cast<ExceptionDecl*>(node) ||
         dynamic_cast<IntervalRange*>(node) ||
-        dynamic_cast<DefaultExpr*>(node) ||
         dynamic_cast<DefaultStmt*>(node)) {
         chunk_.emit(OpCode::EVAL_AST, chunk_.addASTNode(node));
         return;
