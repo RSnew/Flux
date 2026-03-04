@@ -44,7 +44,6 @@ private:
 
     // ── 运算符优先级（用于正确插入括号）──────────────────
     static int prec(const std::string& op) {
-        if (op == "??") return 0;  // lowest: nil coalescing
         if (op == "||") return 1;
         if (op == "&&") return 2;
         if (op == "==" || op == "!=") return 3;

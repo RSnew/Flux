@@ -22,7 +22,7 @@ enum class TokenType {
     PLUS, MINUS, STAR, SLASH, PERCENT,
     EQ, NEQ, LT, GT, LEQ, GEQ,
     AND, OR, NOT,
-    QUESTION_QUESTION, // ?? nil-coalescing
+    // QUESTION_QUESTION removed — ?? syntax removed from Flux v1.0
     // 赋值
     ASSIGN, PLUS_ASSIGN, MINUS_ASSIGN,
     // 分隔符

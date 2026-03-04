@@ -199,7 +199,8 @@ std::vector<Token> Lexer::tokenize() {
             case '>': { bool p = peek()=='='; if(p) advance(); tokens.push_back({p ? TokenType::GEQ    : TokenType::GT,     p ? ">=" : ">",  line_}); break; }
             case '&': if (peek()=='&') { advance(); tokens.push_back({TokenType::AND, "&&", line_}); } break;
             case '|': if (peek()=='|') { advance(); tokens.push_back({TokenType::OR,  "||", line_}); } break;
-            case '?': if (peek()=='?') { advance(); tokens.push_back({TokenType::QUESTION_QUESTION, "??", line_}); } break;
+            // '?' — no longer used (??  nil-coalescing removed from Flux v1.0)
+            case '?': break;
             case '(': tokens.push_back({TokenType::LPAREN, "(", line_}); break;
             case ')': tokens.push_back({TokenType::RPAREN, ")", line_}); break;
             case '{': tokens.push_back({TokenType::LBRACE, "{", line_}); break;

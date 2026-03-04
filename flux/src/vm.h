@@ -56,6 +56,14 @@ enum class OpCode : uint8_t {
     MAKE_MAP,        // 从栈顶 2*b 个值创建 Map（key, val 交替）
     INDEX_GET,       // 弹出 idx，弹出 obj，压入 obj[idx]
     INDEX_SET,       // 弹出 val，弹出 idx，弹出 obj，obj[idx]=val，压入 val
+
+    // ── 并发 ──────────────────────────────────────────────
+    ASYNC_CALL,      // 异步调用 names[a]，参数个数 = b，返回 Future
+    ASYNC_MODULE,    // 异步跨 pool 调用 "Module.fn" = names[a]，参数个数 = b
+    AWAIT,           // 弹出 Future，等待并压入结果
+
+    // ── AST 委托（结构体/接口/exception/spawn）──────────
+    EVAL_AST,        // 委托给解释器 evalNode(ast_nodes[a], env)，结果压栈
 };
 
 // ── 单条指令 ──────────────────────────────────────────────
@@ -72,12 +80,19 @@ struct Chunk {
     std::vector<Instruction> code;
     std::vector<Value>       constants;   // 字面量池
     std::vector<std::string> names;       // 名字池（变量、函数、方法名）
+    std::vector<ASTNode*>    ast_nodes;   // AST 节点引用（EVAL_AST 用）
 
     // 向常量池添加值（自动去重数字与字符串）
     int addConst(const Value& v) {
         // 简单追加（不去重，保证正确性；优化可后续加入）
         constants.push_back(v);
         return (int)constants.size() - 1;
+    }
+
+    // 向 AST 节点池添加节点引用（EVAL_AST 委托用）
+    int addASTNode(ASTNode* node) {
+        ast_nodes.push_back(node);
+        return (int)ast_nodes.size() - 1;
     }
 
     // 向名字池添加名字（去重）

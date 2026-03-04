@@ -22,7 +22,7 @@
 
 ## 零、当前原型实现状态
 
-当前原型以 C++17 实现，约 7000 行代码，包含两个执行后端（树遍历解释器 + 字节码 VM），可运行完整的 Flux 程序。
+当前原型以 C++17 实现，约 10,700 行代码，包含两个执行后端（树遍历解释器 + 字节码 VM）、完整工具链（LSP/调试器/包管理器）和 HIR/MIR 中间表示。
 
 ### 0.1 源文件清单
 
@@ -36,14 +36,20 @@
 | `interpreter.cpp` / `interpreter.h` | 1600 | 树遍历解释器（功能最完整的执行后端） |
 | `compiler.cpp` / `compiler.h` | 500 | AST → 字节码编译器 |
 | `vm.cpp` / `vm.h` | 500 | 栈式字节码虚拟机（37 条指令） |
-| `stdlib.cpp` | 600 | 标准库：File / Json / Http / Time / Chan |
+| `stdlib.cpp` | 900 | 标准库：File / Json / Http / Time / Chan / Math / Set / Log / Env / Test / hw |
 | `watcher.cpp` / `watcher.h` | 100 | inotify 文件监听（Linux） |
 | `pkgmgr.cpp` / `pkgmgr.h` | 500 | 包管理器（本地注册表） |
 | `concurrency.h` | ~50 | GIL 互斥锁实现 |
 | `threadpool.h` | ~80 | 线程池实现 |
 | `formatter.h` | ~200 | 代码格式化器 |
 | `toml.h` | ~150 | TOML 配置解析 |
-| `main.cpp` | 400 | CLI 入口、REPL、热重载调度 |
+| `main.cpp` | 800 | CLI 入口、REPL、热重载调度、dev/lsp/debug 命令 |
+| `gc.h` | ~140 | 循环引用检测器（DFS 标记法） |
+| `lsp.h` | ~415 | LSP 语言服务器（诊断/补全/悬停/跳转定义） |
+| `debugger.h` | ~260 | DAP 调试器（断点/单步/变量检查） |
+| `hw.h` | ~200 | 硬件抽象层（GPIO/UART/Platform） |
+| `hir.h` | ~385 | 高层中间表示（AST → HIR 脱糖/名称解析） |
+| `mir.h` | ~360 | 中层中间表示（CFG/SSA/优化 Pass） |
 
 ### 0.2 功能完成度总览
 
@@ -58,19 +64,18 @@
 | 方法分发（Array/String/Map） | ✅ | ✅ | 内置方法 25+ |
 | 模块 + persistent/migrate | ✅ | 🔶 回落 | VM 通过解释器处理 |
 | @supervised 崩溃隔离 | ✅ | 🔶 回落 | 含 .always/.never 重启策略 |
-| @concurrent / @threadpool | ✅ | ⬚ | VM 不编译 |
-| async/await/spawn | ✅ | ⬚ | 含 GIL、Future 超时 |
-| Channel（Chan） | ✅ | ⬚ | 有界/无界，阻塞/非阻塞 |
-| 结构体 + 接口 | ✅ | ⬚ | 含接口一致性检查 |
-| exception 错误描述 | ✅ | ⬚ | 函数级/方法级/内联 |
+| @concurrent / @threadpool | ✅ | 🔶 回落 | VM 通过 EVAL_AST 委托 |
+| async/await/spawn | ✅ | ✅ | ASYNC_CALL/AWAIT opcodes + EVAL_AST |
+| Channel（Chan） | ✅ | 🔶 回落 | VM 方法分发支持 |
+| 结构体 + 接口 | ✅ | 🔶 回落 | VM 通过 EVAL_AST 委托 + 方法分发 |
+| exception 错误描述 | ✅ | 🔶 回落 | VM 通过 EVAL_AST 委托 |
 | !var / !func 灰度更新 | ✅ | 🔶 回落 | 在调用边界应用 |
-| ?? nil 合并 | ✅ | ⬚ | |
-| 类型检查 | ✅ | ✅ | 在两个后端之前统一运行 |
+| 类型检查 | ✅ | ✅ | 在两个后端之前统一运行，含接口一致性 + 异常引用检查 |
 | 热重载（文件监听） | ✅ | ✅ | inotify，保留 persistent state |
 | REPL | ✅ | ⬚ | 仅树遍历模式 |
 | 包管理器 | ✅ | N/A | 本地注册表 + 符号链接 |
 | 代码格式化 | ✅ | N/A | `flux fmt` / `flux fmt -w` |
-| 标准库（5 模块） | ✅ | ✅ | 通过 CALL_MODULE 调用 |
+| 标准库（11 模块） | ✅ | ✅ | File/Json/Http/Time/Chan/Math/Set/Log/Env/Test/hw |
 
 > 图例：✅ 完整实现 · 🔶 通过解释器回落支持 · ⬚ 尚未实现
 
@@ -126,10 +131,10 @@
 | `typechecker` | 渐进类型检查 | ✅ C++ 原型 | 建议 Rust 重写 |
 | `interpreter` | 树遍历执行（全功能） | ✅ C++ 原型 | 生产版用 VM 替代 |
 | `compiler` + `vm` | 字节码编译 + 栈式 VM | ✅ 核心子集 | 建议 Rust 重写 |
-| `flux-lsp` | Language Server Protocol | ⬚ 未实现 | Rust |
-| `flux-dbg` | 调试器（DAP 协议） | ⬚ 未实现 | Rust |
+| `flux-lsp` | Language Server Protocol | ✅ C++ 原型 | 建议 Rust 重写 |
+| `flux-dbg` | 调试器（DAP 协议） | ✅ C++ 原型 | 建议 Rust 重写 |
 | `flpkg` | 包管理器 | ✅ 本地注册表 | 建议 Rust 重写 |
-| `flux-std` | 标准库 | ✅ 5 模块 | Flux + Rust FFI |
+| `flux-std` | 标准库 | ✅ 11 模块 | Flux + Rust FFI |
 
 ### 1.4 设计原则
 
@@ -176,17 +181,17 @@
     │
     ▼
 ┌──────────────┐
-│ HIR Lower    │  AST → 高层中间表示（HIR）                  ⬚
-└──────────────┘
+│ HIR Lower    │  AST → 高层中间表示（HIR）                  ✅ hir.h
+└──────────────┘   名称解析、脱糖、类型标注
     │
     ▼
 ┌──────────────┐
-│ MIR Lower    │  HIR → 中层中间表示（MIR），控制流图         ⬚
-└──────────────┘
+│ MIR Lower    │  HIR → 中层中间表示（MIR），控制流图         ✅ mir.h
+└──────────────┘   SSA 形式、基本块、Phi 节点
     │
     ▼
 ┌──────────────┐
-│  Optimizer   │  内联展开、常量折叠、死代码消除               ⬚
+│  Optimizer   │  常量折叠、死代码消除、不可达块消除           ✅ mir.h
 └──────────────┘
     │
     ▼
@@ -202,7 +207,7 @@
 - 32 个关键字识别：`var`, `fn`, `func`, `return`, `if`, `else`, `while`, `true`, `false`, `nil`, `for`, `in`, `persistent`, `state`, `module`, `migrate`, `supervised`, `async`, `await`, `spawn`, `threadpool`, `concurrent`, `interface`, `exception` 等
 - 33 种 Token 类型（含 `NUMBER`, `STRING`, `IDENTIFIER`, 运算符、分隔符、换行符等）
 - 字符串插值：`"hello \(name)!"` 在词法阶段展开为 `"hello " + str(name) + "!"`（递归词法分析内部表达式）
-- 运算符：`+`, `-`, `*`, `/`, `%`, `+=`, `-=`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `&&`, `||`, `!`, `??`, `->`
+- 运算符：`+`, `-`, `*`, `/`, `%`, `+=`, `-=`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `&&`, `||`, `!`, `->`
 - 点枚举值：`.always`, `.never`, `.block`, `.drop`, `.error`
 - 换行符作为显式 Token（significant whitespace）
 - 单行注释 `//`
@@ -229,15 +234,14 @@
 
 **表达式优先级（从低到高）：**
 
-1. `??` — nil 合并
-2. `||` — 逻辑或
-3. `&&` — 逻辑与
-4. `==`, `!=` — 等式
-5. `<`, `>`, `<=`, `>=` — 比较
-6. `+`, `-` — 加减
-7. `*`, `/`, `%` — 乘除模
-8. `!`, `-`, `async`, `await` — 一元运算
-9. 字面量、标识符、函数调用、数组/Map 字面量、匿名函数、`state.field`、方法调用、索引访问、`Module.fn()`
+1. `||` — 逻辑或
+2. `&&` — 逻辑与
+3. `==`, `!=` — 等式
+4. `<`, `>`, `<=`, `>=` — 比较
+5. `+`, `-` — 加减
+6. `*`, `/`, `%` — 乘除模
+7. `!`, `-`, `async`, `await` — 一元运算
+8. 字面量、标识符、函数调用、数组/Map 字面量、匿名函数、`state.field`、方法调用、索引访问、`Module.fn()`
 
 **特殊语法：**
 - `for x in [a, b]`（闭区间）/ `for x in [a, b)`（半开区间）
@@ -261,10 +265,14 @@
 - 模块作用域函数注册（`Module.fn` 键名）
 - 内置函数签名预注册：`print`, `str`, `num`, `sqrt`, `type`, `panic`, `assert`
 
+**新增检查（v2.1 实现）：**
+
+- ✅ 接口完整性检查（2 遍扫描：收集接口 → 检查结构体方法签名完整性）
+- ✅ exception 引用检查（验证目标函数/方法是否存在于作用域中）
+- ✅ 扩展数字类型（UInt, Natural, Float, Byte, Addr 在类型系统中注册）
+
 **目标检查（待实现）：**
 
-- ⬚ 接口完整性检查（实现结构体是否包含接口所有方法签名）
-- ⬚ exception 引用检查（被引用的函数/方法是否存在）
 - ⬚ 枚举值合法性检查（只允许 Natural）
 - ⬚ 内存静态分析（double free / use after free 警告）
 - ⬚ Hindley-Milner 变体推断（泛型支持，不暴露 `<T>` 语法）
@@ -343,7 +351,7 @@
 
 ### 3.3 字节码设计 ✅
 
-**已实现的指令集（37 条指令）：**
+**已实现的指令集（41 条指令）：**
 
 | 类别 | 指令 | 操作数 | 说明 |
 |------|------|--------|------|
@@ -366,6 +374,10 @@
 | 集合 | `MAKE_ARRAY` | b=元素数 | 创建数组 |
 | | `MAKE_MAP` | b=键值对数 | 创建 Map |
 | | `INDEX_GET`, `INDEX_SET` | — | 索引读写（支持负数索引） |
+| 并发 | `ASYNC_CALL` | a=名字索引, b=参数数 | 异步调用，返回 Future |
+| | `ASYNC_MODULE` | a=名字索引, b=参数数 | 跨 pool 异步调用 "Module.fn" |
+| | `AWAIT` | — | 弹出 Future，等待并压入结果 |
+| 委托 | `EVAL_AST` | a=AST 索引 | 委托给解释器处理复杂节点 |
 
 **指令格式**：每条指令为 `{OpCode op, int32_t a, int32_t b}` 三元组。
 
@@ -380,14 +392,14 @@
 - 函数调用委托给 `Interpreter::callFunction()`（复用解释器的函数注册表和内置函数）
 - `DEFINE` 指令对迭代器变量（`__iter_` 前缀）自动将 String 转为字符数组、Map 转为键数组
 
-**尚未编译到 VM 的节点类型**：async/await/spawn、Channel 操作、结构体字面量、接口声明、exception 声明、nil 合并 `??`。这些在使用 `--vm` 标志时会回落到树遍历解释器。
+**VM 编译策略**：async/await 有直接的 `ASYNC_CALL`/`AWAIT` 指令；结构体、接口、spawn、exception 等复杂节点通过 `EVAL_AST` 委托给树遍历解释器执行。VM 的方法分发（`CALL_METHOD`）新增了 StructInst 方法分发、Future 方法（await/get/isReady）和 Channel 方法（send/recv/tryRecv/close）的支持。
 
 ### 目标指令集扩展（待实现）
 
 | 类别 | 计划指令 | 说明 |
 |------|---------|------|
 | 位运算 | `BAND`, `BOR`, `BXOR`, `BNOT`, `SHL`, `SHR` | ⬚ |
-| 并发 | `SPAWN`, `AWAIT`, `CHAN_MAKE`, `CHAN_SEND`, `CHAN_RECV` | ⬚ |
+| 并发（细化） | `CHAN_MAKE`, `CHAN_SEND`, `CHAN_RECV` | ⬚（当前通过 EVAL_AST 委托） |
 | 元数据 | `VERSION`, `SCHEMA` | ⬚ 热更新支持 |
 
 ### 3.4 @supervised 实现 ✅
@@ -623,7 +635,7 @@ Flux 并发模型无需显式锁的原因：
 
 ## 六、标准库设计
 
-### 6.1 当前实现（5 个 C++ 原生模块）✅
+### 6.1 当前实现（11 个 C++ 原生模块）✅
 
 标准库在 `stdlib.cpp` 中以 C++ 实现，通过 `registerStdlibModule()` 注册到解释器：
 
@@ -671,6 +683,87 @@ Flux 并发模型无需显式锁的原因：
 |------|------|------|
 | `Chan.make` | `(cap?: Number) -> Chan` | 创建通道（cap=0 为无界） |
 
+#### Math 模块 ✅
+
+| 方法 | 签名 | 说明 |
+|------|------|------|
+| `Math.abs` | `(x: Number) -> Number` | 绝对值 |
+| `Math.floor` | `(x: Number) -> Number` | 向下取整 |
+| `Math.ceil` | `(x: Number) -> Number` | 向上取整 |
+| `Math.round` | `(x: Number) -> Number` | 四舍五入 |
+| `Math.min` | `(a: Number, b: Number) -> Number` | 最小值 |
+| `Math.max` | `(a: Number, b: Number) -> Number` | 最大值 |
+| `Math.pow` | `(base: Number, exp: Number) -> Number` | 幂运算 |
+| `Math.log` | `(x: Number) -> Number` | 自然对数 |
+| `Math.sin` | `(x: Number) -> Number` | 正弦 |
+| `Math.cos` | `(x: Number) -> Number` | 余弦 |
+| `Math.random` | `() -> Number` | 随机数 [0, 1) |
+| `Math.PI` | `() -> Number` | π 常量 |
+
+#### Set 模块 ✅
+
+| 方法 | 签名 | 说明 |
+|------|------|------|
+| `Set.new` | `() -> Map` | 创建空集合（Map 后端，键为元素） |
+| `Set.from` | `(arr: Array) -> Map` | 从数组创建集合 |
+| `Set.add` | `(set: Map, value: Any) -> Map` | 添加元素 |
+| `Set.has` | `(set: Map, value: Any) -> Bool` | 检查元素是否存在 |
+| `Set.remove` | `(set: Map, value: Any) -> Bool` | 移除元素 |
+| `Set.size` | `(set: Map) -> Number` | 集合大小 |
+| `Set.toArray` | `(set: Map) -> Array` | 转为数组 |
+| `Set.union` | `(a: Map, b: Map) -> Map` | 并集 |
+| `Set.intersect` | `(a: Map, b: Map) -> Map` | 交集 |
+
+#### Log 模块 ✅
+
+| 方法 | 签名 | 说明 |
+|------|------|------|
+| `Log.info` | `(...args) -> Nil` | 信息日志（绿色） |
+| `Log.warn` | `(...args) -> Nil` | 警告日志（黄色） |
+| `Log.error` | `(...args) -> Nil` | 错误日志（红色） |
+| `Log.debug` | `(...args) -> Nil` | 调试日志（灰色） |
+
+#### Env 模块 ✅
+
+| 方法 | 签名 | 说明 |
+|------|------|------|
+| `Env.get` | `(name: String) -> String\|Nil` | 读取环境变量 |
+
+#### Test 模块 ✅
+
+| 方法 | 签名 | 说明 |
+|------|------|------|
+| `Test.equal` | `(actual, expected, msg?) -> Nil` | 断言相等 |
+| `Test.notEqual` | `(actual, expected, msg?) -> Nil` | 断言不等 |
+| `Test.isTrue` | `(cond, msg?) -> Nil` | 断言为真 |
+| `Test.isFalse` | `(cond, msg?) -> Nil` | 断言为假 |
+| `Test.isNil` | `(val, msg?) -> Nil` | 断言为 nil |
+| `Test.throws` | `(fn, msg?) -> Nil` | 断言抛出异常 |
+
+#### hw (硬件抽象) 模块 ✅
+
+| 方法 | 签名 | 说明 |
+|------|------|------|
+| `hw.gpio_pinMode` | `(pin: Number, mode: String) -> Bool` | 设置引脚模式 |
+| `hw.gpio_write` | `(pin: Number, value: Bool) -> Bool` | 数字输出 |
+| `hw.gpio_read` | `(pin: Number) -> Number` | 数字输入 |
+| `hw.gpio_analogRead` | `(pin: Number) -> Number` | 模拟输入 |
+| `hw.gpio_analogWrite` | `(pin: Number, value: Number) -> Bool` | PWM 输出 |
+| `hw.uart_open` | `(port: String, baud: Number) -> Number` | 打开 UART |
+| `hw.uart_write` | `(fd: Number, data: String) -> Bool` | UART 写入 |
+| `hw.uart_read` | `(fd: Number, bytes: Number) -> String` | UART 读取 |
+| `hw.uart_close` | `(fd: Number) -> Nil` | 关闭 UART |
+| `hw.platform_name` | `() -> String` | 获取平台名称 |
+| `hw.platform_isGeneric` | `() -> Bool` | 是否为通用平台 |
+
+> 当前使用 `GenericDriver`（模拟/桩驱动），支持 `HardwareDriver` 接口扩展到 Raspberry Pi、ESP32、STM32、RISC-V 等平台。
+
+#### Http.serve ✅
+
+| 方法 | 签名 | 说明 |
+|------|------|------|
+| `Http.serve` | `(port: Number, routes: Map) -> Nil` | 启动 HTTP 服务器，routes 为路径→处理函数映射 |
+
 ### 6.2 内置函数 ✅
 
 | 函数 | 签名 | 说明 |
@@ -704,20 +797,25 @@ flux-std/
 │   ├── types.flux  # Int, UInt, Float, Decimal, Natural, Byte, Addr
 │   ├── ops.flux    # 基础运算符
 │   └── convert.flux # 类型转换
-├── collections/    # ⬚ Set 待实现（Array/Map 已有）
+├── collections/    # ✅ Set（Map 后端）、Array、Map
 │   └── set.flux
 ├── io/             # ⬚ 网络 I/O 待实现
 │   └── net.flux
-├── http/           # ⬚ HTTP Server + WebSocket 待实现
-│   ├── server.flux
-│   └── ws.flux
-├── hw/             # ⬚ 硬件访问层
-│   ├── gpio.flux
-│   ├── uart.flux
-│   └── ...
-├── log/            # ⬚ 结构化日志
+├── http/           # ✅ HTTP Client + Server，⬚ WebSocket 待实现
+│   ├── client.flux # ✅ get/post/put/delete
+│   ├── server.flux # ✅ serve（路由映射）
+│   └── ws.flux     # ⬚
+├── hw/             # ✅ 硬件访问层（GenericDriver 桩实现）
+│   ├── gpio.flux   # ✅ pinMode/write/read/analogRead/analogWrite
+│   ├── uart.flux   # ✅ open/write/read/close
+│   └── platform.flux # ✅ name/isGeneric
+├── math/           # ✅ abs/floor/ceil/round/min/max/pow/log/sin/cos/random/PI
+│   └── math.flux
+├── log/            # ✅ 彩色日志（info/warn/error/debug）
 │   └── logger.flux
-└── test/           # ⬚ 内置测试框架
+├── env/            # ✅ 环境变量（get）
+│   └── env.flux
+└── test/           # ✅ 测试框架（equal/notEqual/isTrue/isFalse/isNil/throws）
     └── runner.flux
 ```
 
@@ -753,11 +851,18 @@ flux-std/
 
 **REPL 特性**：多行输入（花括号深度追踪）、`.clear`（重置状态）、`.history`（历史记录）、`.help`、AST 生命周期管理（`keepAlive` 向量防止悬空指针）
 
+**新增命令（v2.1 实现）：**
+
+| 命令 | 说明 | 状态 |
+|------|------|------|
+| `flux dev <file.flux>` | 开发模式（热更新 + 增量编译 + 自动测试） | ✅ |
+| `flux lsp` | 启动 LSP 语言服务器 | ✅ |
+| `flux debug <file.flux>` | 交互式调试器 | ✅ |
+
 **待实现命令：**
 
 | 命令 | 说明 | 状态 |
 |------|------|------|
-| `flux dev <file.flux>` | 开发模式（热更新 + 自动测试） | ⬚ |
 | `flux pack <file> -o app.fluz` | 发布打包（排除 test 块） | ⬚ |
 | `flux profile report` | 性能分析报告 | ⬚ |
 
@@ -792,51 +897,60 @@ test = "tests/test.flux"
 - ⬚ SemVer 冲突解析
 - ⬚ 远程包下载
 
-### 7.3 VS Code 插件 ✅ 基础
+### 7.3 VS Code 插件 + LSP ✅
 
-项目中包含 `vscode-flux/` 目录，实现了基础语法高亮。
+项目中包含 `vscode-flux/` 目录（基础语法高亮）和 `lsp.h`（LSP 服务器实现）。
+
+**LSP 已实现功能（`flux lsp` 命令）：**
+
+- ✅ 实时诊断（类型检查错误和解析错误）
+- ✅ 自动补全（关键字、内置函数、标准库模块方法、文件内变量/函数）
+- ✅ 悬停提示（内置函数签名、关键字文档、exception 描述）
+- ✅ 跳转定义（函数和变量声明位置）
+- ✅ JSON-RPC 消息处理（initialize/shutdown/textDocument 协议）
 
 **待实现：**
-- ⬚ flux-lsp（Language Server Protocol 实现）
-- ⬚ 自动补全、悬停提示、跳转定义、查找引用
-- ⬚ exception 描述集成为 Hover 文档
-- ⬚ 实时诊断（执行前检查错误和警告）
+- ⬚ 查找引用（find references）
+- ⬚ 重命名符号
 - ⬚ 热更新状态显示
 
-### 7.4 调试器 ⬚
+### 7.4 调试器 ✅
 
-flux-dbg 目标实现 Debug Adapter Protocol（DAP），支持：
+`flux debug <file>` 启动交互式调试器（`debugger.h`），已实现：
 
-- 断点（行断点、条件断点）
-- 单步执行（step over / step into / step out）
-- 变量检查（包括 persistent state）
-- 热更新状态追踪
-- 并发模块状态查看
+- ✅ 断点管理（添加/删除/启用/禁用，支持条件断点）
+- ✅ 单步执行（step over / step into / step out / continue / pause）
+- ✅ 变量检查（包括 persistent state、数组/Map/结构体递归展开）
+- ✅ 调用栈查看
+- ✅ 表达式求值（`p <expr>` 命令）
+- ✅ 循环引用检测（`gc` 命令）
 
-### 7.5 测试运行器 ⬚
+**调试器命令：** `b <line>`, `d <id>`, `bl`, `r/run`, `c/continue`, `n/next`, `s/step`, `out`, `bt`, `p <expr>`, `state`, `gc`, `q/quit`
 
-test {} 块的执行由内置测试框架驱动，目标集成在 `flux dev` 模式中：
+### 7.5 测试运行器 ✅
+
+测试框架通过 `Test` 标准库模块 + `flux dev` 自动测试集成：
+
+- ✅ `Test.equal`, `Test.notEqual`, `Test.isTrue`, `Test.isFalse`, `Test.isNil`, `Test.throws`
+- ✅ `flux dev` 自动发现测试文件（`file_test.flux` 或 `tests/test.flux`）
+- ✅ FNV-1a 哈希增量编译（源码未变时跳过）
+- ✅ 编译和测试耗时输出
 
 ```
 保存文件
   │
   ▼
-增量编译受影响的单元
+FNV-1a 哈希比较（跳过未变化文件）
   │
   ▼
-识别受影响的 test {} 块（依赖分析）
+类型检查 → 执行
   │
   ▼
-并行运行受影响的测试
+自动发现并运行测试文件
   │
   ▼
-实时输出结果
-
-✅  add 基础功能       2/2 passed  (0.2ms)
-✅  divide 默认值      2/2 passed  (0.1ms)
-❌  multiply 溢出      1/2 failed  (0.3ms)
-     assert multiply(999999, 999999) == 999998000001
-     got: overflow (Int max exceeded)
+🧪 Running tests: demo_test.flux
+✅ All tests passed (3ms)
 ```
 
 -----
@@ -851,12 +965,12 @@ test {} 块的执行由内置测试框架驱动，目标集成在 `flux dev` 模
 - [x] 基础类型系统（Number, String, Bool, Array, Map）
 - [x] 函数（具名、匿名、闭包、一等公民）
 - [x] 树遍历解释器（全功能执行后端）
-- [x] 字节码 VM v1（37 条指令，核心语言子集）
+- [x] 字节码 VM v1（41 条指令，含 ASYNC_CALL/AWAIT/EVAL_AST）
 - [x] `flux run` / `flux <file>` 命令
-- [ ] 结构体 + 接口的 VM 编译（当前仅解释器支持）
+- [x] 结构体 + 接口的 VM 编译（通过 EVAL_AST 委托 + 方法分发）
 - [ ] `default {}` 错误处理（Spec 中提及，原型中使用 exception）
 
-### Phase 2：热更新 — ✅ 基础完成，⬚ 增量编译待实现
+### Phase 2：热更新 — ✅ 大部分完成
 
 目标：实现核心差异化功能。
 
@@ -864,10 +978,10 @@ test {} 块的执行由内置测试框架驱动，目标集成在 `flux dev` 模
 - [x] 热重载引擎（保存即重执行，persistent state 保留）
 - [x] !var / !func 灰度更新（调用边界应用）
 - [x] persistent / migrate 状态迁移
-- [ ] 增量编译器（当前为全量重编译）
-- [ ] 版本哈希 + 差量替换
-- [ ] 执行前检查完善（接口完整性、exception 引用、枚举合法性）
-- [ ] `flux dev` 命令（热更新 + 自动测试）
+- [x] `flux dev` 命令（热更新 + FNV-1a 增量编译 + 自动测试）
+- [x] 执行前检查完善（接口完整性、exception 引用检查）
+- [ ] 版本哈希 + 差量替换（单元级增量）
+- [ ] 枚举合法性检查
 
 ### Phase 3：并发 — ✅ 完成
 
@@ -883,7 +997,7 @@ test {} 块的执行由内置测试框架驱动，目标集成在 `flux dev` 模
 - [x] @supervised 崩溃恢复（.always 重试 / .never 永久停止）
 - [x] persistent state 跨崩溃保留
 
-### Phase 4：标准库核心 — ✅ 基础完成，⬚ 扩展待实现
+### Phase 4：标准库核心 — ✅ 大部分完成
 
 目标：足够日常开发使用的标准库。
 
@@ -893,18 +1007,21 @@ test {} 块的执行由内置测试框架驱动，目标集成在 `flux dev` 模
 - [x] String 内置方法（len/upper/lower/split/contains/trim）
 - [x] File 模块（read/write/append/exists/lines/delete）
 - [x] Json 模块（parse/stringify/pretty）
-- [x] Http 模块（get/post/put/delete — 仅 HTTP，无 HTTPS）
+- [x] Http 模块（get/post/put/delete + serve 路由映射）
 - [x] Time 模块（now/clock/sleep/format/diff）
 - [x] Chan 模块（make）
-- [ ] 完整数字类型（UInt, Natural, Float, Decimal, Byte, Addr）
-- [ ] Set 集合
+- [x] Math 模块（abs/floor/ceil/round/min/max/pow/log/sin/cos/random/PI）
+- [x] Set 集合（Map 后端：new/from/add/has/remove/size/toArray/union/intersect）
+- [x] Log 模块（info/warn/error/debug，彩色输出）
+- [x] Env 模块（get 环境变量）
+- [x] Test 模块（equal/notEqual/isTrue/isFalse/isNil/throws）
+- [x] hw 硬件抽象模块（GPIO/UART/Platform）
+- [x] 扩展数字类型（类型系统支持 UInt, Natural, Float, Byte, Addr）
 - [ ] HTTPS 支持
-- [ ] HTTP Server（http.serve / 路由 / 中间件）
 - [ ] WebSocket
-- [ ] 内置 test {} 框架
-- [ ] 内置 log 模块
+- [ ] HTTP 中间件
 
-### Phase 5：工具链 — 🔶 部分完成
+### Phase 5：工具链 — ✅ 大部分完成
 
 目标：完整开发体验。
 
@@ -913,32 +1030,35 @@ test {} 块的执行由内置测试框架驱动，目标集成在 `flux dev` 模
 - [x] flux.toml + 依赖解析 + flux.lock
 - [x] 代码格式化（flux fmt / flux fmt -w）
 - [x] REPL（多行输入、.clear/.history/.help）
-- [ ] flux-lsp（LSP 实现）
-- [ ] flux-dbg（DAP 调试器）
+- [x] flux-lsp（LSP 实现：诊断/补全/悬停/跳转定义）
+- [x] flux-dbg（交互式调试器：断点/单步/变量检查/栈帧）
+- [x] flux dev（开发模式：热更新 + 增量编译 + 自动测试）
 - [ ] 中心包仓库（pkg.flux-lang.org）
 - [ ] @profile 性能分析
 
-### Phase 6：硬件支持 — ⬚ 未开始
+### Phase 6：硬件支持 — 🔶 基础完成
 
 目标：支持嵌入式场景。
 
+- [x] hw.* 命名空间（PAL 层：GPIO/UART/Platform 抽象 + GenericDriver 桩实现）
+- [x] HardwareDriver 接口（可扩展到 RaspberryPi/ESP32/STM32/RISC-V）
 - [ ] @platform 声明与检查
-- [ ] hw.* 命名空间（PAL 层）
 - [ ] ARM / RISC-V 代码生成后端
 - [ ] alloc / free 手动内存管理
 - [ ] 内联汇编（asm {}）
 
-### Phase 7：优化与稳定 — ⬚ 未开始
+### Phase 7：优化与稳定 — 🔶 基础完成
 
 目标：生产可用。
 
+- [x] HIR 中间表示（hir.h：AST → 脱糖/名称解析/类型标注）
+- [x] MIR 中间表示（mir.h：CFG/SSA/基本块/Phi 节点）
+- [x] MIR 优化 Pass（常量折叠、死代码消除、不可达块消除）
+- [x] 循环引用检测（gc.h：DFS 标记法扫描 Value 图）
 - [ ] JIT 编译器（可选，用于高性能场景）
-- [ ] HIR / MIR 中间表示
-- [ ] 编译器优化（内联、常量折叠、死代码消除）
 - [ ] 完整枚举（Natural-only 值验证）
 - [ ] append 扩展机制
 - [ ] 中心包仓库（pkg.flux-lang.org）
-- [ ] 循环引用检测（GC）
 - [ ] 完整文档
 
 -----
@@ -952,7 +1072,7 @@ C++ 原型验证了以下关键设计：
 1. **热重载可行性**：文件监听 → 重执行 → persistent state 保留，证明了"保存即更新"的开发体验
 2. **并发模型**：GIL + async/await + Channel + @supervised 的完整并发模型运行正常
 3. **语言语义**：所有 Spec v1.0 语法（结构体、接口、exception、灰度更新）在树遍历解释器中完整实现
-4. **字节码 VM 可行性**：37 条指令覆盖核心语言，验证了栈式 VM 设计的正确性
+4. **字节码 VM 可行性**：41 条指令覆盖核心语言 + 并发原语，验证了栈式 VM 设计的正确性
 5. **包管理流程**：从 `flux new` 到 `flux publish` 的完整工作流
 
 ### 9.2 需要重新设计的部分
@@ -960,9 +1080,9 @@ C++ 原型验证了以下关键设计：
 | 领域 | 原型状态 | 生产需求 |
 |------|---------|---------|
 | 类型系统 | 渐进类型，Number 统一双精度 | 完整数字类型层级，Hindley-Milner 推断 |
-| VM 覆盖度 | 37 条指令，不含并发/结构体 | 完整指令集，所有语言特性编译到 VM |
+| VM 覆盖度 | 41 条指令，含并发/结构体（EVAL_AST 委托） | 原生指令替代 EVAL_AST 委托 |
 | 热更新 | 全量重执行 | 增量编译 + 版本哈希 + 差量替换 |
-| 内存管理 | shared_ptr 引用计数 | RC + 循环检测，可选手动模式 |
+| 内存管理 | shared_ptr + DFS 循环检测（gc.h） | 优化 RC + 可选手动模式 |
 | HTTP | 原始 POSIX socket，无 HTTPS | 完整 HTTP/HTTPS + Server + WebSocket |
 | 并发调度 | GIL 串行化 | 轻量级协程或 M:N 调度 |
 | 错误恢复 | runtime_error + PanicSignal | 结构化错误类型 + default {} |
@@ -970,11 +1090,11 @@ C++ 原型验证了以下关键设计：
 ### 9.3 建议迁移顺序
 
 1. **Rust 重写 Lexer/Parser**：直接移植，Token 和 AST 定义已稳定
-2. **实现 HIR/MIR**：在 Parser 和 CodeGen 之间插入优化层
-3. **完善 VM 指令集**：将并发、结构体、接口编译到 VM
+2. **移植 HIR/MIR**：C++ 原型已实现基础 HIR/MIR（hir.h/mir.h），含 3 个优化 Pass
+3. **完善 VM 指令集**：将 EVAL_AST 委托替换为原生指令
 4. **替换 GIL**：实现轻量级任务调度（无全局锁）
-5. **增量编译**：基于文件哈希的变化检测 + 单元级编译缓存
-6. **LSP + 调试器**：复用编译前端，实现 IDE 集成
+5. **增量编译**：基于文件哈希的变化检测（已在 `flux dev` 中原型验证）+ 单元级编译缓存
+6. **移植 LSP + 调试器**：C++ 原型已实现核心功能，Rust 重写可复用协议逻辑
 
 -----
 
@@ -995,4 +1115,4 @@ C++ 原型验证了以下关键设计：
 
 -----
 
-*Flux Language Implementation Plan v2.0 · 2026 · Based on C++ Prototype Audit*
+*Flux Language Implementation Plan v2.1 · 2026-03 · Based on C++ Prototype Audit + Implementation Phase*

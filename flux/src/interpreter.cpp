@@ -1620,13 +1620,6 @@ Value Interpreter::evalBinary(BinaryExpr* node, std::shared_ptr<Environment> env
         if (l.isTruthy()) return Value::Bool(true);
         return Value::Bool(evalNode(node->right.get(), env, mod).isTruthy());
     }
-    // ?? nil coalescing: return left if not nil, else right
-    if (node->op == "??") {
-        Value l = evalNode(node->left.get(), env, mod);
-        if (l.type != Value::Type::Nil) return l;
-        return evalNode(node->right.get(), env, mod);
-    }
-
     Value l = evalNode(node->left.get(), env, mod);
     Value r = evalNode(node->right.get(), env, mod);
     const std::string& op = node->op;

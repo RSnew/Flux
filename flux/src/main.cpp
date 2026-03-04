@@ -7,6 +7,11 @@
 #include "formatter.h"
 #include "watcher.h"
 #include "pkgmgr.h"
+#include "lsp.h"
+#include "debugger.h"
+#include "gc.h"
+#include "hir.h"
+#include "mir.h"
 
 #include <iostream>
 #include <fstream>
@@ -15,6 +20,7 @@
 #include <vector>
 #include <mutex>
 #include <chrono>
+#include <functional>
 
 // ── ANSI 颜色 ─────────────────────────────────────────────
 #define CLR_RESET  "\033[0m"
@@ -376,6 +382,336 @@ static void runFile(const std::string& filepath) {
     while (true) std::this_thread::sleep_for(std::chrono::seconds(1));
 }
 
+// ═══════════════════════════════════════════════════════════
+// flux dev <file> — 开发模式：热更新 + 增量编译 + 自动测试
+// ═══════════════════════════════════════════════════════════
+static std::string g_lastSourceHash;
+
+static std::string hashSource(const std::string& src) {
+    // Simple FNV-1a hash for change detection
+    uint64_t hash = 14695981039346656037ULL;
+    for (unsigned char c : src) {
+        hash ^= c;
+        hash *= 1099511628211ULL;
+    }
+    return std::to_string(hash);
+}
+
+// Run tests from a test file if it exists
+static void runTestFile(const std::string& mainFile, Interpreter& interp) {
+    // Look for corresponding test file
+    std::string testFile;
+    auto dot = mainFile.rfind('.');
+    if (dot != std::string::npos)
+        testFile = mainFile.substr(0, dot) + "_test" + mainFile.substr(dot);
+    else
+        testFile = mainFile + "_test";
+
+    // Also check tests/ directory
+    std::string testsDir;
+    auto slash = mainFile.rfind('/');
+    if (slash != std::string::npos) {
+        testsDir = mainFile.substr(0, slash) + "/tests/test.flux";
+    } else {
+        testsDir = "tests/test.flux";
+    }
+
+    std::string testSrc;
+    bool foundTest = false;
+    std::string testPath;
+
+    // Try test file variants
+    for (auto& path : {testFile, testsDir}) {
+        std::ifstream f(path);
+        if (f.good()) {
+            testSrc = std::string(std::istreambuf_iterator<char>(f), {});
+            foundTest = true;
+            testPath = path;
+            break;
+        }
+    }
+
+    if (!foundTest) return;
+
+    std::cout << CLR_GRAY << "\n🧪 Running tests: " << testPath << CLR_RESET << "\n";
+
+    auto start = std::chrono::high_resolution_clock::now();
+    try {
+        Lexer  lexer(testSrc);
+        auto   tokens = lexer.tokenize();
+        Parser parser(std::move(tokens));
+        auto   program = parser.parse();
+
+        interp.execute(program.get());
+
+        auto end = std::chrono::high_resolution_clock::now();
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+        std::cout << CLR_GREEN << "✅ All tests passed (" << ms << "ms)" << CLR_RESET << "\n";
+
+    } catch (const PanicSignal& p) {
+        auto end = std::chrono::high_resolution_clock::now();
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+        std::cerr << CLR_RED << "❌ Test failed (" << ms << "ms): "
+                  << p.message << CLR_RESET << "\n";
+    } catch (const std::exception& e) {
+        std::cerr << CLR_RED << "❌ Test error: " << e.what() << CLR_RESET << "\n";
+    }
+}
+
+static void runDevSource(const std::string& source, const std::string& filepath,
+                          Interpreter& interp, bool isReload) {
+    // Incremental compilation: skip if source hasn't changed
+    std::string newHash = hashSource(source);
+    if (isReload && newHash == g_lastSourceHash) {
+        std::cout << CLR_GRAY << "  (no changes detected, skipping)" << CLR_RESET << "\n";
+        return;
+    }
+    g_lastSourceHash = newHash;
+
+    auto compileStart = std::chrono::high_resolution_clock::now();
+
+    try {
+        Lexer  lexer(source);
+        auto   tokens = lexer.tokenize();
+        Parser parser(std::move(tokens));
+        auto   program = parser.parse();
+
+        // Type check
+        TypeChecker checker;
+        auto typeErrors = checker.check(program.get());
+        if (!typeErrors.empty()) {
+            std::cerr << CLR_RED CLR_BOLD
+                      << "\n🔴 Type errors — execution blocked:\n"
+                      << CLR_RESET;
+            for (auto& e : typeErrors) {
+                std::cerr << CLR_RED << "   ";
+                if (e.line > 0) std::cerr << "line " << e.line << ": ";
+                std::cerr << e.message << CLR_RESET << "\n";
+            }
+            return;
+        }
+
+        auto compileEnd = std::chrono::high_resolution_clock::now();
+        auto compileMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            compileEnd - compileStart).count();
+
+        if (isReload) {
+            std::cout << CLR_YELLOW << "\n🔄 Hot reload detected..."
+                      << CLR_GRAY << " (compiled in " << compileMs << "ms)"
+                      << CLR_RESET << "\n";
+            std::cout << CLR_GRAY << "─────────────────────────────\n" << CLR_RESET;
+        }
+
+        // Execute
+        interp.execute(program.get());
+
+        if (isReload)
+            std::cout << CLR_GREEN << "✅ Hot reload complete" << CLR_RESET << "\n";
+
+        // Auto-run tests
+        runTestFile(filepath, interp);
+
+    } catch (const ParseError& e) {
+        std::cerr << CLR_RED << "\n❌ Parse error at line " << e.line
+                  << ": " << e.what() << CLR_RESET << "\n";
+    } catch (const std::exception& e) {
+        std::cerr << CLR_RED << "\n❌ Runtime error: " << e.what() << CLR_RESET << "\n";
+    }
+}
+
+static void cmdDev(const std::string& filepath) {
+    Interpreter interp;
+
+    std::cout << CLR_BOLD CLR_CYAN
+              << "╔══════════════════════════════════════╗\n"
+              << "║       Flux Dev Mode                  ║\n"
+              << "║       Hot Reload + Auto Test  🔥     ║\n"
+              << "╚══════════════════════════════════════╝\n"
+              << CLR_RESET;
+    std::cout << CLR_GRAY << "  Watching: " << filepath << CLR_RESET << "\n\n";
+
+    // Initial run
+    try {
+        runDevSource(readFile(filepath), filepath, interp, false);
+    } catch (const std::exception& e) {
+        std::cerr << CLR_RED << "Error reading file: " << e.what() << CLR_RESET << "\n";
+        return;
+    }
+
+    // Watch for changes
+    std::mutex reloadMutex;
+    FileWatcher watcher(filepath, [&](const std::string& path) {
+        std::lock_guard<std::mutex> lock(reloadMutex);
+        try {
+            runDevSource(readFile(path), path, interp, true);
+        } catch (const std::exception& e) {
+            std::cerr << CLR_RED << "File read error: " << e.what() << CLR_RESET << "\n";
+        }
+    });
+
+    watcher.start();
+    std::cout << CLR_GRAY << "\n[Dev mode active — Ctrl+C to exit]\n" << CLR_RESET;
+
+    while (true) std::this_thread::sleep_for(std::chrono::seconds(1));
+}
+
+// ═══════════════════════════════════════════════════════════
+// flux lsp — LSP 语言服务器
+// ═══════════════════════════════════════════════════════════
+static void cmdLsp() {
+    FluxLSP lsp;
+    lsp.run();
+}
+
+// ═══════════════════════════════════════════════════════════
+// flux debug <file> — 交互式调试器
+// ═══════════════════════════════════════════════════════════
+static int cmdDebug(const std::string& filepath) {
+    Interpreter interp;
+    Debugger debugger;
+
+    std::cout << CLR_BOLD CLR_CYAN
+              << "Flux Debugger  (type 'help' for commands)\n"
+              << CLR_RESET;
+    std::cout << CLR_GRAY << "  File: " << filepath << CLR_RESET << "\n\n";
+
+    try {
+        std::string src = readFile(filepath);
+        Lexer  lexer(src);
+        auto   tokens = lexer.tokenize();
+        Parser parser(std::move(tokens));
+        auto   program = parser.parse();
+
+        // Type check first
+        TypeChecker checker;
+        auto typeErrors = checker.check(program.get());
+        if (!typeErrors.empty()) {
+            for (auto& e : typeErrors) {
+                std::cerr << CLR_RED << "  ";
+                if (e.line > 0) std::cerr << "line " << e.line << ": ";
+                std::cerr << e.message << CLR_RESET << "\n";
+            }
+            return 1;
+        }
+
+        // Interactive debugger loop
+        std::string cmd;
+        while (true) {
+            std::cout << CLR_CYAN << "debug> " << CLR_RESET;
+            std::cout.flush();
+            if (!std::getline(std::cin, cmd)) break;
+
+            if (cmd == "quit" || cmd == "q") break;
+            if (cmd == "help" || cmd == "h") {
+                std::cout
+                    << "  b <line>     — set breakpoint at line\n"
+                    << "  d <id>       — delete breakpoint\n"
+                    << "  bl           — list breakpoints\n"
+                    << "  r / run      — run program\n"
+                    << "  c / continue — continue execution\n"
+                    << "  n / next     — step over\n"
+                    << "  s / step     — step into\n"
+                    << "  out          — step out\n"
+                    << "  bt           — show call stack\n"
+                    << "  p <expr>     — evaluate expression\n"
+                    << "  state        — show persistent state\n"
+                    << "  gc           — run cycle detection\n"
+                    << "  q / quit     — exit debugger\n";
+                continue;
+            }
+            if (cmd.substr(0, 2) == "b ") {
+                int line = std::stoi(cmd.substr(2));
+                int id = debugger.addBreakpoint(filepath, line);
+                std::cout << CLR_GREEN << "Breakpoint " << id
+                          << " set at line " << line << CLR_RESET << "\n";
+                continue;
+            }
+            if (cmd.substr(0, 2) == "d ") {
+                int id = std::stoi(cmd.substr(2));
+                if (debugger.removeBreakpoint(id))
+                    std::cout << CLR_GRAY << "Breakpoint " << id << " removed\n" << CLR_RESET;
+                else
+                    std::cout << CLR_RED << "No breakpoint with id " << id << "\n" << CLR_RESET;
+                continue;
+            }
+            if (cmd == "bl") {
+                auto bps = debugger.getBreakpoints();
+                if (bps.empty()) {
+                    std::cout << CLR_GRAY << "(no breakpoints)\n" << CLR_RESET;
+                } else {
+                    for (auto& bp : bps)
+                        std::cout << "  [" << bp.id << "] line " << bp.line
+                                  << (bp.enabled ? "" : " (disabled)") << "\n";
+                }
+                continue;
+            }
+            if (cmd == "r" || cmd == "run") {
+                debugger.setStepMode(StepMode::Continue);
+                try {
+                    interp.execute(program.get());
+                    std::cout << CLR_GREEN << "Program finished\n" << CLR_RESET;
+                } catch (const std::exception& e) {
+                    std::cerr << CLR_RED << "Runtime error: " << e.what() << CLR_RESET << "\n";
+                }
+                continue;
+            }
+            if (cmd == "state") {
+                auto vars = debugger.getPersistentState(interp.persistentStore_);
+                if (vars.empty()) {
+                    std::cout << CLR_GRAY << "(no persistent state)\n" << CLR_RESET;
+                } else {
+                    for (auto& v : vars)
+                        std::cout << "  " << v.name << " = " << v.value
+                                  << " : " << v.type << "\n";
+                }
+                continue;
+            }
+            if (cmd == "gc") {
+                CycleDetector detector;
+                auto cycles = detector.detect(interp.globalEnv_);
+                if (cycles.empty()) {
+                    std::cout << CLR_GREEN << "No cycles detected\n" << CLR_RESET;
+                } else {
+                    for (auto& c : cycles)
+                        std::cout << CLR_YELLOW << "  " << c.description
+                                  << " (refcount=" << c.refCount << ")\n" << CLR_RESET;
+                }
+                continue;
+            }
+            if (cmd == "bt") {
+                auto stack = debugger.getCallStack();
+                if (stack.empty()) {
+                    std::cout << CLR_GRAY << "(no active call stack)\n" << CLR_RESET;
+                } else {
+                    for (auto& f : stack)
+                        std::cout << "  #" << f.id << " " << f.name
+                                  << " at " << f.file << ":" << f.line << "\n";
+                }
+                continue;
+            }
+            if (cmd.substr(0, 2) == "p ") {
+                std::string expr = cmd.substr(2);
+                try {
+                    Lexer  lex(expr);
+                    auto   toks = lex.tokenize();
+                    Parser par(std::move(toks));
+                    auto   prog = par.parse();
+                    interp.executeRepl(prog.get());
+                } catch (const std::exception& e) {
+                    std::cerr << CLR_RED << e.what() << CLR_RESET << "\n";
+                }
+                continue;
+            }
+            std::cout << CLR_GRAY << "Unknown command. Type 'help'.\n" << CLR_RESET;
+        }
+        return 0;
+
+    } catch (const std::exception& e) {
+        std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+        return 1;
+    }
+}
+
 // ── 帮助信息 ──────────────────────────────────────────────
 static void printHelp() {
     std::cout
@@ -386,9 +722,12 @@ static void printHelp() {
         << "  flux <file.flux>            Run file with hot-reload (watch mode)\n"
         << "  flux run   <file.flux>      Run file once, no file watcher\n"
         << "  flux check <file.flux>      Type-check file, do not execute\n"
+        << "  flux dev   <file.flux>      Dev mode (hot reload + auto test)\n"
         << "  flux fmt   <file.flux>      Format file to stdout\n"
         << "  flux fmt   -w <file.flux>   Format file in-place (overwrite)\n"
         << "  flux --vm  <file.flux>      Run file with bytecode VM (Feature G)\n"
+        << "  flux lsp                    Start Language Server Protocol server\n"
+        << "  flux debug <file.flux>      Start interactive debugger\n"
         << "  flux --help                 Show this help\n"
         << "\n"
         << CLR_BOLD << "Package Manager (Feature L):\n" << CLR_RESET
@@ -442,6 +781,31 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         return cmdRun(argv[2]);
+    }
+
+    // ── flux dev <file> — 开发模式 ─────────────────────────
+    if (sub == "dev") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux dev <file.flux>\n";
+            return 1;
+        }
+        cmdDev(argv[2]);
+        return 0;
+    }
+
+    // ── flux lsp — 语言服务器 ────────────────────────────
+    if (sub == "lsp") {
+        cmdLsp();
+        return 0;
+    }
+
+    // ── flux debug <file> — 交互式调试器 ─────────────────
+    if (sub == "debug") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux debug <file.flux>\n";
+            return 1;
+        }
+        return cmdDebug(argv[2]);
     }
 
     // ── flux check <file> ────────────────────────────────

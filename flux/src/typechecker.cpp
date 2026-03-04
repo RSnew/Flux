@@ -48,6 +48,12 @@ std::vector<TypeError> TypeChecker::check(Program* program) {
         }
     }
 
+    // 第三遍：接口一致性检查
+    checkInterfaceConformance(program, globalEnv);
+
+    // 第四遍：exception 引用检查
+    checkExceptionRefs(program, globalEnv);
+
     return errors_;
 }
 
@@ -426,4 +432,107 @@ FluxType TypeChecker::inferExpr(ASTNode* node, std::shared_ptr<TypeEnv> env) {
     }
 
     return FluxType::Any();
+}
+
+// ─────────────────────────────────────────────────────────
+// 接口一致性检查
+// 扫描所有 VarDecl：若初始值是 InterfaceLit，注册接口；
+// 若初始值是 StructLit 且 interfaceName 非空，检查方法完整性
+// ─────────────────────────────────────────────────────────
+void TypeChecker::checkInterfaceConformance(Program* program, std::shared_ptr<TypeEnv> /*env*/) {
+    // Pass 1: collect interfaces
+    for (auto& stmt : program->statements) {
+        auto* vd = dynamic_cast<VarDecl*>(stmt.get());
+        if (!vd || !vd->initializer) continue;
+
+        if (auto* iface = dynamic_cast<InterfaceLit*>(vd->initializer.get())) {
+            std::vector<std::string> methods;
+            for (auto& m : iface->methods)
+                methods.push_back(m.name);
+            interfaces_[vd->name] = std::move(methods);
+        }
+    }
+
+    // Pass 2: check struct conformance
+    for (auto& stmt : program->statements) {
+        auto* vd = dynamic_cast<VarDecl*>(stmt.get());
+        if (!vd || !vd->initializer) continue;
+
+        if (auto* sl = dynamic_cast<StructLit*>(vd->initializer.get())) {
+            if (sl->interfaceName.empty()) continue;
+
+            auto it = interfaces_.find(sl->interfaceName);
+            if (it == interfaces_.end()) {
+                error("type error: struct '" + vd->name + "' implements unknown interface '"
+                      + sl->interfaceName + "'");
+                continue;
+            }
+
+            // Collect struct methods
+            std::vector<std::string> structMethods;
+            for (auto& m : sl->methods)
+                structMethods.push_back(m.name);
+            structTypes_[vd->name] = structMethods;
+            structToIface_[vd->name] = sl->interfaceName;
+
+            // Check each interface method is present in the struct
+            for (auto& required : it->second) {
+                bool found = false;
+                for (auto& m : sl->methods) {
+                    if (m.name == required) { found = true; break; }
+                }
+                if (!found) {
+                    error("type error: struct '" + vd->name + "' missing method '"
+                          + required + "' required by interface '" + sl->interfaceName + "'");
+                }
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────
+// exception 引用检查
+// 确保 exception funcName { ... } 中的 funcName 实际存在
+// ─────────────────────────────────────────────────────────
+void TypeChecker::checkExceptionRefs(Program* program, std::shared_ptr<TypeEnv> /*env*/) {
+    // Collect all exception declarations from top-level and inside modules
+    auto checkExcInStmts = [&](const std::vector<NodePtr>& stmts) {
+        for (auto& stmt : stmts) {
+            auto* ed = dynamic_cast<ExceptionDecl*>(stmt.get());
+            if (!ed || ed->target.empty()) continue;
+
+            auto colonPos = ed->target.find(':');
+            if (colonPos != std::string::npos) {
+                // exception Type:method — check struct type and method
+                std::string typeName   = ed->target.substr(0, colonPos);
+                std::string methodName = ed->target.substr(colonPos + 1);
+                auto sit = structTypes_.find(typeName);
+                if (sit == structTypes_.end()) {
+                    error("type error: exception target '" + ed->target
+                          + "' references unknown struct type '" + typeName + "'");
+                } else {
+                    bool found = false;
+                    for (auto& m : sit->second)
+                        if (m == methodName) { found = true; break; }
+                    if (!found)
+                        error("type error: exception target '" + ed->target
+                              + "' references unknown method '" + methodName
+                              + "' on type '" + typeName + "'");
+                }
+            } else {
+                // exception funcName — check function exists
+                if (globalFns_.find(ed->target) == globalFns_.end() &&
+                    builtins_.find(ed->target) == builtins_.end()) {
+                    error("type error: exception target '" + ed->target
+                          + "' references unknown function");
+                }
+            }
+        }
+    };
+
+    checkExcInStmts(program->statements);
+    for (auto& stmt : program->statements) {
+        if (auto* mod = dynamic_cast<ModuleDecl*>(stmt.get()))
+            checkExcInStmts(mod->body);
+    }
 }

@@ -410,18 +410,8 @@ NodePtr Parser::parseSpawn() {
 }
 
 // ── 表达式（递归下降）─────────────────────────────────────
-// parseExpr → parseNilCoalesce → parseOr → ... → parsePrimary
-NodePtr Parser::parseExpr()       { return parseNilCoalesce(); }
-
-// ?? 空合并运算符（最低优先级）: a ?? b  →  a if a != nil else b
-NodePtr Parser::parseNilCoalesce() {
-    auto left = parseOr();
-    while (check(TokenType::QUESTION_QUESTION)) {
-        consume();
-        left = std::make_unique<BinaryExpr>("??", std::move(left), parseOr());
-    }
-    return left;
-}
+// parseExpr → parseOr → ... → parsePrimary
+NodePtr Parser::parseExpr()       { return parseOr(); }
 
 NodePtr Parser::parseOr() {
     auto left = parseAnd();
