@@ -457,11 +457,21 @@ private:
             return ind() + "free(" + fmtExpr(n->ptr.get()) + ")\n";
         }
 
-        // ── default {} 错误恢复 ─────────────────────────────
+        // ── default {} 错误恢复（表达式级）─────────────────────
         if (auto* n = dynamic_cast<DefaultExpr*>(node)) {
             std::string s = ind() + fmtExpr(n->tryExpr.get()) + " default {\n";
             indent_++;
             for (auto& stmt : n->fallback) s += fmtStmt(stmt.get());
+            indent_--;
+            s += ind() + "}\n";
+            return s;
+        }
+
+        // ── default {} 默认值返回（语句级）─────────────────────
+        if (auto* n = dynamic_cast<DefaultStmt*>(node)) {
+            std::string s = ind() + "default {\n";
+            indent_++;
+            for (auto& stmt : n->body) s += fmtStmt(stmt.get());
             indent_--;
             s += ind() + "}\n";
             return s;

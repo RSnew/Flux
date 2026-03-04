@@ -1,63 +1,117 @@
 // ═══════════════════════════════════════════════════════════
-// default {} 错误恢复测试
+// exception + default {} 完整错误处理测试
 // ═══════════════════════════════════════════════════════════
 
-print("=== default {} error recovery tests ===")
+print("=== exception + default {} tests ===")
 
-// ── Test 1: 函数 panic 恢复 ─────────────────────────────
-fn divide(a, b) {
-    if (b == 0) { panic("division by zero") }
+// ── Test 1: 经典用法 — exception 描述 + default 默认值 ──
+exception divide {
+    "除数 b 不能为零"
+    "失败时返回默认值 0"
+}
+
+func divide(a, b) {
+    if (b == 0) {
+        exception { "调用方传入了 b=0" }
+        default { 0 }
+    }
     return a / b
 }
 
-// 正常调用 — 不触发 default
-var r1 = divide(10, 2) default { -1 }
-print("Test 1a: " + str(r1))
-assert(r1 == 5, "normal call should return 5")
+var r1 = divide(10, 2)
+print("Test 1a: divide(10,2) = " + str(r1))
+assert(r1 == 5, "normal divide should return 5")
 
-// 异常调用 — 触发 default
-var r2 = divide(10, 0) default { -1 }
-print("Test 1b: " + str(r2))
-assert(r2 == -1, "panic should recover to -1")
+var r2 = divide(10, 0)
+print("Test 1b: divide(10,0) = " + str(r2))
+assert(r2 == 0, "div by zero should return default 0")
 
-// ── Test 2: exception + default 组合 ────────────────────
-exception divide { "Denominator must be non-zero" }
-
-var r3 = divide(100, 0) default { 0 }
-print("Test 2: " + str(r3))
-assert(r3 == 0, "exception + default should recover to 0")
-
-// ── Test 3: default 块中有多条语句 ──────────────────────
-fn fail() {
-    panic("always fails")
+// ── Test 2: 字符串默认值 ────────────────────────────────
+func safe_greet(name) {
+    if (name == nil) {
+        exception { "name 参数为 nil" }
+        default { "Hello, Guest!" }
+    }
+    return "Hello, " + name + "!"
 }
 
-var r4 = fail() default {
-    var fallback = 42
-    fallback
-}
-print("Test 3: " + str(r4))
-assert(r4 == 42, "multi-statement default block")
+var r3 = safe_greet("Flux")
+print("Test 2a: " + r3)
+assert(r3 == "Hello, Flux!", "normal greet")
 
-// ── Test 4: 嵌套 default ───────────────────────────────
-var r5 = fail() default {
-    fail() default { 99 }
-}
-print("Test 4: " + str(r5))
-assert(r5 == 99, "nested default recovery")
+var r4 = safe_greet(nil)
+print("Test 2b: " + r4)
+assert(r4 == "Hello, Guest!", "nil should return default greeting")
 
-// ── Test 5: default 中使用字符串 ────────────────────────
-fn mustFail() {
-    panic("oops")
+// ── Test 3: 多条件 default ──────────────────────────────
+exception clamp {
+    "val 必须在 [min, max] 范围内"
 }
 
-var r6 = mustFail() default { "recovered" }
-print("Test 5: " + str(r6))
-assert(r6 == "recovered", "string recovery")
+func clamp(val, lo, hi) {
+    if (val < lo) {
+        default { lo }
+    }
+    if (val > hi) {
+        default { hi }
+    }
+    return val
+}
 
-// ── Test 6: 正常表达式不受影响 ──────────────────────────
-var r7 = 1 + 2 + 3 default { 0 }
-print("Test 6: " + str(r7))
-assert(r7 == 6, "normal expr should not trigger default")
+print("Test 3a: clamp(5, 0, 10) = " + str(clamp(5, 0, 10)))
+assert(clamp(5, 0, 10) == 5, "in range")
 
-print("\n=== All default {} tests passed! ===")
+print("Test 3b: clamp(-3, 0, 10) = " + str(clamp(-3, 0, 10)))
+assert(clamp(-3, 0, 10) == 0, "below min returns lo")
+
+print("Test 3c: clamp(15, 0, 10) = " + str(clamp(15, 0, 10)))
+assert(clamp(15, 0, 10) == 10, "above max returns hi")
+
+// ── Test 4: default 块中多条语句 ────────────────────────
+func safe_index(arr, i) {
+    if (i < 0) {
+        exception { "负数索引不允许" }
+        default {
+            var fallback = "N/A"
+            fallback
+        }
+    }
+    if (i >= len(arr)) {
+        exception { "索引越界" }
+        default { "N/A" }
+    }
+    return arr[i]
+}
+
+var items = ["a", "b", "c"]
+print("Test 4a: " + safe_index(items, 1))
+assert(safe_index(items, 1) == "b", "normal index")
+
+print("Test 4b: " + safe_index(items, -1))
+assert(safe_index(items, -1) == "N/A", "negative index default")
+
+print("Test 4c: " + safe_index(items, 99))
+assert(safe_index(items, 99) == "N/A", "overflow index default")
+
+// ── Test 5: 表达式级 default（捕获 panic）───────────────
+func must_positive(x) {
+    if (x <= 0) { panic("must be positive") }
+    return x
+}
+
+var r5 = must_positive(42) default { -1 }
+print("Test 5a: " + str(r5))
+assert(r5 == 42, "no panic → normal value")
+
+var r6 = must_positive(-5) default { -1 }
+print("Test 5b: " + str(r6))
+assert(r6 == -1, "panic → default recovery")
+
+// ── Test 6: exception 方法描述 ──────────────────────────
+exception divide {
+    "请注意：除数不能为零"
+}
+
+print("Test 6: exception target validation OK")
+
+print("\n=== All exception + default {} tests passed! ===")

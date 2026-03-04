@@ -295,6 +295,13 @@ NodePtr Parser::parseStatement() {
         expect(TokenType::RPAREN, "expected ')'");
         return std::make_unique<FreeStmt>(std::move(ptr));
     }
+    // default { value } — 语句级默认值返回（与 exception {} 配合）
+    if (check(TokenType::DEFAULT)) {
+        consume(); // default
+        skipNewlines();
+        auto body = parseBlock();
+        return std::make_unique<DefaultStmt>(std::move(body));
+    }
 
     // 赋值 or 表达式语句
     auto expr = parseExpr();

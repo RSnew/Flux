@@ -288,10 +288,15 @@ void TypeChecker::checkStmt(ASTNode* node, std::shared_ptr<TypeEnv> env) {
     if (dynamic_cast<FreeStmt*>(node)) return;
     // ── asm ─────────────────────────────────────────────
     if (dynamic_cast<AsmBlock*>(node)) return;
-    // ── default {} 错误恢复 ─────────────────────────────
+    // ── default {} 错误恢复（表达式级）─────────────────────
     if (auto* n = dynamic_cast<DefaultExpr*>(node)) {
         checkStmt(n->tryExpr.get(), env);
         for (auto& s : n->fallback) checkStmt(s.get(), env);
+        return;
+    }
+    // ── default {} 默认值返回（语句级）─────────────────────
+    if (auto* n = dynamic_cast<DefaultStmt*>(node)) {
+        for (auto& s : n->body) checkStmt(s.get(), env);
         return;
     }
 

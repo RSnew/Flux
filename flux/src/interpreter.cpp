@@ -1710,7 +1710,7 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
         return Value::Nil();
     }
 
-    // ── default {} 错误恢复 ─────────────────────────────────
+    // ── expr default { fallback } 表达式级错误恢复 ──────────
     if (auto* n = dynamic_cast<DefaultExpr*>(node)) {
         try {
             return evalNode(n->tryExpr.get(), env, mod);
@@ -1726,6 +1726,18 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
             result = evalNode(stmt.get(), childEnv, mod);
         }
         return result;
+    }
+
+    // ── default { value } 语句级默认值返回 ──────────────────
+    // 与 exception {} 配合，在错误条件分支中返回默认值
+    if (auto* n = dynamic_cast<DefaultStmt*>(node)) {
+        auto childEnv = std::make_shared<Environment>(env);
+        Value result = Value::Nil();
+        for (auto& stmt : n->body) {
+            result = evalNode(stmt.get(), childEnv, mod);
+        }
+        // 像 return 一样退出当前函数
+        throw ReturnSignal{result};
     }
 
     throw std::runtime_error("unknown AST node");
