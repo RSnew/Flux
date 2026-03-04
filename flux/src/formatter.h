@@ -151,6 +151,11 @@ private:
                    (n->inclusive ? "]" : ")");
         }
 
+        // ── alloc(size) ─────────────────────────────────────
+        if (auto* n = dynamic_cast<AllocExpr*>(node)) {
+            return "alloc(" + fmtExpr(n->size.get()) + ")";
+        }
+
         return "/* ? */";
     }
 
@@ -382,6 +387,69 @@ private:
             }
             indent_--;
             return s + ind() + "}\n";
+        }
+
+        // ── @profile fn ──────────────────────────────────────
+        if (auto* n = dynamic_cast<ProfiledFnDecl*>(node)) {
+            return ind() + "@profile\n" + fmtStmt(n->fnDecl.get());
+        }
+
+        // ── @platform ────────────────────────────────────────
+        if (auto* n = dynamic_cast<PlatformDecl*>(node)) {
+            std::string s = ind() + "@platform(\"" + n->target + "\") {\n";
+            indent_++;
+            for (auto& st : n->body) s += fmtStmt(st.get());
+            indent_--;
+            return s + ind() + "}\n";
+        }
+
+        // ── enum ─────────────────────────────────────────────
+        if (auto* n = dynamic_cast<EnumDecl*>(node)) {
+            std::string s = ind() + "enum " + n->name + " {\n";
+            indent_++;
+            for (auto& v : n->variants) {
+                s += ind() + v.name;
+                if (v.value) s += " = " + fmtExpr(v.value.get());
+                s += "\n";
+            }
+            indent_--;
+            return s + ind() + "}\n";
+        }
+
+        // ── append ──────────────────────────────────────────
+        if (auto* n = dynamic_cast<AppendDecl*>(node)) {
+            std::string s = ind() + "append " + n->typeName + " {\n";
+            indent_++;
+            for (auto& m : n->methods) {
+                s += ind() + "func " + m.name + "(";
+                for (size_t i = 0; i < m.params.size(); ++i) {
+                    if (i > 0) s += ", ";
+                    s += m.params[i].name;
+                    if (!m.params[i].type.empty()) s += ": " + m.params[i].type;
+                }
+                s += ") {\n";
+                indent_++;
+                for (auto& st : m.body) s += fmtStmt(st.get());
+                indent_--;
+                s += ind() + "}\n";
+            }
+            indent_--;
+            return s + ind() + "}\n";
+        }
+
+        // ── asm ─────────────────────────────────────────────
+        if (auto* n = dynamic_cast<AsmBlock*>(node)) {
+            std::string s = ind() + "asm {\n";
+            indent_++;
+            for (auto& inst : n->instructions)
+                s += ind() + "\"" + inst + "\"\n";
+            indent_--;
+            return s + ind() + "}\n";
+        }
+
+        // ── free ─────────────────────────────────────────────
+        if (auto* n = dynamic_cast<FreeStmt*>(node)) {
+            return ind() + "free(" + fmtExpr(n->ptr.get()) + ")\n";
         }
 
         // 回退：直接尝试表达式格式化

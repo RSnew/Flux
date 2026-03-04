@@ -38,6 +38,11 @@ private:
                              std::string poolOverflow = "block");
     NodePtr parseThreadPoolDecl();
     NodePtr parseExceptionDecl();   // exception 关键字
+    // Phase 5-7 新语法
+    NodePtr parseEnumDecl();        // enum 声明
+    NodePtr parseAppendDecl();      // append 扩展
+    NodePtr parseAsmBlock();        // asm {} 内联汇编
+    NodePtr parsePlatformDecl();    // @platform 声明
 
     // 语句
     NodePtr      parseStatement();

@@ -1017,7 +1017,7 @@ FNV-1a 哈希比较（跳过未变化文件）
 - [x] Test 模块（equal/notEqual/isTrue/isFalse/isNil/throws）
 - [x] hw 硬件抽象模块（GPIO/UART/Platform）
 - [x] 扩展数字类型（类型系统支持 UInt, Natural, Float, Byte, Addr）
-- [ ] HTTPS 支持
+- [x] HTTPS 支持（OpenSSL 原生实现，TLS 1.2/1.3 + SNI + 系统 CA）
 - [ ] WebSocket
 - [ ] HTTP 中间件
 
@@ -1033,21 +1033,21 @@ FNV-1a 哈希比较（跳过未变化文件）
 - [x] flux-lsp（LSP 实现：诊断/补全/悬停/跳转定义）
 - [x] flux-dbg（交互式调试器：断点/单步/变量检查/栈帧）
 - [x] flux dev（开发模式：热更新 + 增量编译 + 自动测试）
-- [ ] 中心包仓库（pkg.flux-lang.org）
-- [ ] @profile 性能分析
+- [x] 中心包仓库（pkg.flux-lang.org）— CLI 支持 `flux registry [url]`
+- [x] @profile 性能分析（函数级耗时/调用次数/最大最小值报告）
 
-### Phase 6：硬件支持 — 🔶 基础完成
+### Phase 6：硬件支持 — ✅ 完成
 
 目标：支持嵌入式场景。
 
 - [x] hw.* 命名空间（PAL 层：GPIO/UART/Platform 抽象 + GenericDriver 桩实现）
 - [x] HardwareDriver 接口（可扩展到 RaspberryPi/ESP32/STM32/RISC-V）
-- [ ] @platform 声明与检查
-- [ ] ARM / RISC-V 代码生成后端
-- [ ] alloc / free 手动内存管理
-- [ ] 内联汇编（asm {}）
+- [x] @platform 声明与检查（编译期条件编译：x86_64/arm64/riscv64/generic）
+- [x] ARM / RISC-V 代码生成后端（MIR → ARM64/RISC-V64 汇编输出，`flux codegen`）
+- [x] alloc / free 手动内存管理（calloc/free 原生绑定）
+- [x] 内联汇编（asm { "指令" }，解释器中 stderr 输出，编译后端直通）
 
-### Phase 7：优化与稳定 — 🔶 基础完成
+### Phase 7：优化与稳定 — ✅ 完成
 
 目标：生产可用。
 
@@ -1055,11 +1055,11 @@ FNV-1a 哈希比较（跳过未变化文件）
 - [x] MIR 中间表示（mir.h：CFG/SSA/基本块/Phi 节点）
 - [x] MIR 优化 Pass（常量折叠、死代码消除、不可达块消除）
 - [x] 循环引用检测（gc.h：DFS 标记法扫描 Value 图）
-- [ ] JIT 编译器（可选，用于高性能场景）
-- [ ] 完整枚举（Natural-only 值验证）
-- [ ] append 扩展机制
-- [ ] 中心包仓库（pkg.flux-lang.org）
-- [ ] 完整文档
+- [x] JIT 编译器（x86-64 纯数值函数 JIT，`flux jit`，mmap 可执行内存）
+- [x] 完整枚举（enum 声明 + Natural-only 值验证，类型检查器负值报错）
+- [x] append 扩展机制（运行时为现有 struct 类型注入新方法）
+- [x] 中心包仓库（pkg.flux-lang.org）— `flux registry` CLI
+- [x] 完整文档（实现方案 + 代码内注释 + CLI --help）
 
 -----
 
@@ -1083,7 +1083,7 @@ C++ 原型验证了以下关键设计：
 | VM 覆盖度 | 41 条指令，含并发/结构体（EVAL_AST 委托） | 原生指令替代 EVAL_AST 委托 |
 | 热更新 | 全量重执行 | 增量编译 + 版本哈希 + 差量替换 |
 | 内存管理 | shared_ptr + DFS 循环检测（gc.h） | 优化 RC + 可选手动模式 |
-| HTTP | 原始 POSIX socket，无 HTTPS | 完整 HTTP/HTTPS + Server + WebSocket |
+| HTTP | POSIX socket + OpenSSL HTTPS | 完整 HTTP/HTTPS + Server + WebSocket |
 | 并发调度 | GIL 串行化 | 轻量级协程或 M:N 调度 |
 | 错误恢复 | runtime_error + PanicSignal | 结构化错误类型 + default {} |
 

@@ -250,6 +250,45 @@ void TypeChecker::checkStmt(ASTNode* node, std::shared_ptr<TypeEnv> env) {
         return;
     }
 
+    // ── @profile fn ──────────────────────────────────────
+    if (auto* n = dynamic_cast<ProfiledFnDecl*>(node)) {
+        if (n->fnDecl) checkStmt(n->fnDecl.get(), env);
+        return;
+    }
+
+    // ── enum 声明 ────────────────────────────────────────
+    if (auto* n = dynamic_cast<EnumDecl*>(node)) {
+        env->define(n->name, FluxType::MapT());
+        // Natural 验证：枚举值必须 >= 0
+        for (auto& v : n->variants) {
+            if (v.value) {
+                FluxType vt = inferExpr(v.value.get(), env);
+                if (vt.kind == TypeKind::Int || vt.kind == TypeKind::Float ||
+                    vt.kind == TypeKind::Any) {
+                    // 如果是 NumberLit，检查 >= 0
+                    if (auto* num = dynamic_cast<NumberLit*>(v.value.get())) {
+                        if (num->value < 0) {
+                            error("enum '" + n->name + "': variant '" + v.name
+                                  + "' has negative value " + std::to_string((int)num->value)
+                                  + " (Natural values must be >= 0)");
+                        }
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    // ── append 扩展 ─────────────────────────────────────
+    if (dynamic_cast<AppendDecl*>(node)) return;
+    // ── @platform ────────────────────────────────────────
+    if (dynamic_cast<PlatformDecl*>(node)) return;
+    // ── alloc/free ──────────────────────────────────────
+    if (dynamic_cast<AllocExpr*>(node)) return;
+    if (dynamic_cast<FreeStmt*>(node)) return;
+    // ── asm ─────────────────────────────────────────────
+    if (dynamic_cast<AsmBlock*>(node)) return;
+
     // ── 其他节点（PersistentBlock, MigrateBlock 等）跳过 ──
 }
 
@@ -430,6 +469,9 @@ FluxType TypeChecker::inferExpr(ASTNode* node, std::shared_ptr<TypeEnv> env) {
         }
         return FluxType::Any();
     }
+
+    // ── alloc() → Addr ─────────────────────────────────
+    if (dynamic_cast<AllocExpr*>(node)) return FluxType::Addr();
 
     return FluxType::Any();
 }

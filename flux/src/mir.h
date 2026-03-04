@@ -132,15 +132,21 @@ public:
     MIRProgram build(const HIRProgram& hir) {
         MIRProgram prog;
 
+        // 预分配足够空间避免 vector reallocation 使指针失效
+        prog.functions.reserve(hir.decls.size() + 4);
+
         // 创建 main 函数用于顶层语句
         prog.functions.push_back({"__main__", {}, HIRType::make(HIRType::Nil), {}, 0, 0});
-        prog.mainFn = &prog.functions.back();
+        prog.mainFn = &prog.functions[0];
         currentFn_ = prog.mainFn;
         currentBlock_ = currentFn_->addBlock("entry");
 
         for (auto& decl : hir.decls) {
             if (auto* fn = dynamic_cast<HIRFnDecl*>(decl.get())) {
                 buildFunction(prog, fn);
+                // 恢复 mainFn 指针（push_back 后可能失效）
+                prog.mainFn = &prog.functions[0];
+                currentFn_ = prog.mainFn;
             } else {
                 buildNode(decl.get());
             }

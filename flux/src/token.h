@@ -18,6 +18,14 @@ enum class TokenType {
     // 新关键字 (Spec v1.0)
     INTERFACE,      // interface declaration keyword
     EXCEPTION,      // exception error-description keyword
+    // Phase 5-7 新关键字
+    PROFILE,        // @profile 性能分析装饰器
+    PLATFORM,       // @platform 平台声明
+    ENUM,           // enum 枚举关键字
+    APPEND,         // append 扩展机制
+    ALLOC,          // alloc 手动内存分配
+    FREE,           // free 手动内存释放
+    ASM,            // asm 内联汇编
     // 运算符
     PLUS, MINUS, STAR, SLASH, PERCENT,
     EQ, NEQ, LT, GT, LEQ, GEQ,

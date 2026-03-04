@@ -29,6 +29,14 @@ const std::unordered_map<std::string, TokenType> Lexer::keywords_ = {
     // Spec v1.0 新关键字
     {"interface",  TokenType::INTERFACE},
     {"exception",  TokenType::EXCEPTION},
+    // Phase 5-7 新关键字
+    {"profile",    TokenType::PROFILE},
+    {"platform",   TokenType::PLATFORM},
+    {"enum",       TokenType::ENUM},
+    {"append",     TokenType::APPEND},
+    {"alloc",      TokenType::ALLOC},
+    {"free",       TokenType::FREE},
+    {"asm",        TokenType::ASM},
 };
 
 Lexer::Lexer(const std::string& source) : source_(source) {}

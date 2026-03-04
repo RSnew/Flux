@@ -350,3 +350,58 @@ struct ExceptionDecl : ASTNode {
     std::string              target;    // "" = 内联, "fn" = 全局, "Type:method" = 方法
     std::vector<std::string> messages;
 };
+
+// ══════════════════════════════════════════════════════════
+// Phase 5-7 新节点
+// ══════════════════════════════════════════════════════════
+
+// ── @profile 装饰的函数声明 ─────────────────────────────
+struct ProfiledFnDecl : ASTNode {
+    NodePtr fnDecl;   // 包装的 FnDecl
+    explicit ProfiledFnDecl(NodePtr fn) : fnDecl(std::move(fn)) {}
+};
+
+// ── @platform(target) 声明 ──────────────────────────────
+struct PlatformDecl : ASTNode {
+    std::string target;     // "arm64" | "riscv64" | "esp32" | "generic" ...
+    std::vector<NodePtr> body;
+    PlatformDecl(std::string t, std::vector<NodePtr> b)
+        : target(std::move(t)), body(std::move(b)) {}
+};
+
+// ── enum 枚举定义 ───────────────────────────────────────
+// enum Color { Red, Green, Blue }
+// enum Status { Ok = 0, Error = 1 }
+struct EnumVariant {
+    std::string name;
+    NodePtr     value;    // 可为 null（自动递增）
+};
+
+struct EnumDecl : ASTNode {
+    std::string name;
+    std::vector<EnumVariant> variants;
+};
+
+// ── append 扩展 ─────────────────────────────────────────
+// append Array { func sum() { ... } }
+struct AppendDecl : ASTNode {
+    std::string typeName;       // 被扩展的类型名
+    std::vector<StructMethodDef> methods;
+};
+
+// ── alloc(size) 表达式 ──────────────────────────────────
+struct AllocExpr : ASTNode {
+    NodePtr size;
+    explicit AllocExpr(NodePtr s) : size(std::move(s)) {}
+};
+
+// ── free(ptr) 语句 ──────────────────────────────────────
+struct FreeStmt : ASTNode {
+    NodePtr ptr;
+    explicit FreeStmt(NodePtr p) : ptr(std::move(p)) {}
+};
+
+// ── asm { "指令" } 内联汇编 ─────────────────────────────
+struct AsmBlock : ASTNode {
+    std::vector<std::string> instructions;
+};

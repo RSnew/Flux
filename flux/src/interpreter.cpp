@@ -1,7 +1,9 @@
 #include "interpreter.h"
+#include "profiler.h"
 #include <iostream>
 #include <sstream>
 #include <cmath>
+#include <cstdlib>
 #include <algorithm>
 
 // ── ChanVal 方法实现 ──────────────────────────────────────
@@ -225,7 +227,13 @@ void Interpreter::execute(Program* program) {
     // 第一遍：注册全局函数 + 初始化全局 persistent
     functions_.clear();
     for (auto& stmt : program->statements) {
-        if (auto* fn = dynamic_cast<FnDecl*>(stmt.get())) {
+        if (auto* pfn = dynamic_cast<ProfiledFnDecl*>(stmt.get())) {
+            auto* fn = dynamic_cast<FnDecl*>(pfn->fnDecl.get());
+            if (fn) {
+                functions_[fn->name] = fn;
+                Profiler::instance().markFunction(fn->name);
+            }
+        } else if (auto* fn = dynamic_cast<FnDecl*>(stmt.get())) {
             // !func: 灰度切换 — 存入 pending，在下一调用边界生效
             if (fn->forceOverride) pendingFnUpdates_[fn->name] = fn;
             else                   functions_[fn->name] = fn;
@@ -244,6 +252,7 @@ void Interpreter::execute(Program* program) {
     // 第二遍：执行顶层语句（模块声明 + 普通语句）
     for (auto& stmt : program->statements) {
         if (dynamic_cast<FnDecl*>(stmt.get()))          continue;
+        if (dynamic_cast<ProfiledFnDecl*>(stmt.get()))  continue;
         if (dynamic_cast<PersistentBlock*>(stmt.get())) continue;
         try {
             evalNode(stmt.get(), globalEnv_);
@@ -252,6 +261,9 @@ void Interpreter::execute(Program* program) {
             throw std::runtime_error(p.message);
         }
     }
+
+    // 输出 @profile 性能报告
+    Profiler::instance().report();
 }
 
 // ── REPL 增量执行（保留 globalEnv_ + functions_）──────────
@@ -563,6 +575,11 @@ Value Interpreter::callFunction(const std::string& name,
     auto fnEnv = std::make_shared<Environment>(globalEnv_);
     for (size_t i = 0; i < fn->params.size(); i++)
         fnEnv->set(fn->params[i].name, i < args.size() ? args[i] : Value::Nil());
+
+    // @profile: 自动计时
+    std::unique_ptr<ProfileScope> profileScope;
+    if (Profiler::instance().isProfiled(name))
+        profileScope = std::make_unique<ProfileScope>(Profiler::instance(), name);
 
     try {
         for (auto& stmt : fn->body)
@@ -1580,6 +1597,115 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
         } else {
             // 内联 exception：存储当前描述（下次错误时合并输出）
             lastInlineExceptionDescs_ = n->messages;
+        }
+        return Value::Nil();
+    }
+
+    // ══════════════════════════════════════════════════════
+    // Phase 5-7 新节点
+    // ══════════════════════════════════════════════════════
+
+    // ── @profile 装饰的函数 ─────────────────────────────
+    if (auto* n = dynamic_cast<ProfiledFnDecl*>(node)) {
+        auto* fn = dynamic_cast<FnDecl*>(n->fnDecl.get());
+        if (!fn)
+            throw std::runtime_error("@profile: expected function declaration");
+        // 注册函数
+        functions_[fn->name] = fn;
+        // 标记为需要 profile
+        Profiler::instance().markFunction(fn->name);
+        return Value::Nil();
+    }
+
+    // ── @platform 条件编译 ──────────────────────────────
+    if (auto* n = dynamic_cast<PlatformDecl*>(node)) {
+        // 获取当前平台
+#if defined(__aarch64__) || defined(_M_ARM64)
+        std::string currentPlatform = "arm64";
+#elif defined(__riscv)
+        std::string currentPlatform = "riscv64";
+#elif defined(__x86_64__) || defined(_M_X64)
+        std::string currentPlatform = "x86_64";
+#else
+        std::string currentPlatform = "generic";
+#endif
+        // 只在目标平台上执行
+        if (n->target == currentPlatform || n->target == "generic"
+            || n->target == "any") {
+            for (auto& stmt : n->body)
+                evalNode(stmt.get(), env, mod);
+        }
+        return Value::Nil();
+    }
+
+    // ── enum 枚举 ───────────────────────────────────────
+    if (auto* n = dynamic_cast<EnumDecl*>(node)) {
+        // 创建一个 Map，每个变体名 → 值
+        auto m = std::make_shared<std::unordered_map<std::string, Value>>();
+        for (auto& v : n->variants) {
+            Value val = v.value ? evalNode(v.value.get(), env, mod) : Value::Nil();
+            (*m)[v.name] = val;
+            // 也设置反向映射：值 → 名（方便调试）
+            if (val.type == Value::Type::Number) {
+                (*m)[std::to_string((int)val.number)] = Value::Str(v.name);
+            }
+        }
+        Value enumVal = Value::MapOf(m);
+        env->set(n->name, enumVal);
+        return Value::Nil();
+    }
+
+    // ── append 扩展 ─────────────────────────────────────
+    if (auto* n = dynamic_cast<AppendDecl*>(node)) {
+        // 查找目标类型
+        if (!env->has(n->typeName))
+            throw std::runtime_error("append: type '" + n->typeName + "' not found");
+        Value tv = env->get(n->typeName);
+        if (tv.type != Value::Type::StructType || !tv.structType)
+            throw std::runtime_error("append: '" + n->typeName + "' is not a struct type");
+
+        // 将方法添加到结构体类型
+        for (auto& m : n->methods) {
+            StructTypeInfo::Method method;
+            method.name = m.name;
+            method.params = m.params;
+            method.returnType = m.returnType;
+            for (auto& s : m.body)
+                method.body.push_back(std::shared_ptr<ASTNode>(s.get(), [](ASTNode*){}));
+            tv.structType->methods.push_back(std::move(method));
+        }
+        return Value::Nil();
+    }
+
+    // ── alloc(size) ─────────────────────────────────────
+    if (auto* n = dynamic_cast<AllocExpr*>(node)) {
+        Value sz = evalNode(n->size.get(), env, mod);
+        if (sz.type != Value::Type::Number)
+            throw std::runtime_error("alloc: size must be a Number");
+        size_t bytes = (size_t)sz.number;
+        void* ptr = std::calloc(1, bytes);
+        if (!ptr)
+            throw std::runtime_error("alloc: out of memory");
+        // 返回地址作为 Number（Addr 类型在类型系统中，运行时用 double）
+        return Value::Num((double)(uintptr_t)ptr);
+    }
+
+    // ── free(ptr) ───────────────────────────────────────
+    if (auto* n = dynamic_cast<FreeStmt*>(node)) {
+        Value ptr = evalNode(n->ptr.get(), env, mod);
+        if (ptr.type != Value::Type::Number)
+            throw std::runtime_error("free: argument must be an Addr/Number");
+        void* p = (void*)(uintptr_t)ptr.number;
+        std::free(p);
+        return Value::Nil();
+    }
+
+    // ── asm {} 内联汇编 ─────────────────────────────────
+    if (auto* n = dynamic_cast<AsmBlock*>(node)) {
+        // 在解释器中不执行汇编，仅记录（编译后端使用）
+        // 输出到 stderr 用于调试
+        for (auto& inst : n->instructions) {
+            std::cerr << "\033[90m[asm] " << inst << "\033[0m\n";
         }
         return Value::Nil();
     }

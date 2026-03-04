@@ -12,6 +12,9 @@
 #include "gc.h"
 #include "hir.h"
 #include "mir.h"
+#include "jit.h"
+#include "codegen.h"
+#include "profiler.h"
 
 #include <iostream>
 #include <fstream>
@@ -726,8 +729,11 @@ static void printHelp() {
         << "  flux fmt   <file.flux>      Format file to stdout\n"
         << "  flux fmt   -w <file.flux>   Format file in-place (overwrite)\n"
         << "  flux --vm  <file.flux>      Run file with bytecode VM (Feature G)\n"
+        << "  flux jit   <file.flux>      JIT compile eligible functions\n"
+        << "  flux codegen <arch> <file>   Generate assembly (arm64, riscv64)\n"
         << "  flux lsp                    Start Language Server Protocol server\n"
         << "  flux debug <file.flux>      Start interactive debugger\n"
+        << "  flux registry [url]         Get/set central package registry URL\n"
         << "  flux --help                 Show this help\n"
         << "\n"
         << CLR_BOLD << "Package Manager (Feature L):\n" << CLR_RESET
@@ -959,6 +965,117 @@ int main(int argc, char* argv[]) {
         }
         g_useVM  = true;
         runFile(argv[2]);
+        return 0;
+    }
+
+    // ── flux codegen <arch> <file> — 代码生成 ─────────────
+    if (sub == "codegen") {
+        if (argc < 4) {
+            std::cerr << "Usage: flux codegen <arm64|riscv64> <file.flux>\n";
+            return 1;
+        }
+        try {
+            std::string archStr = argv[2];
+            std::string filepath = argv[3];
+            std::string src = readFile(filepath);
+
+            TargetArch arch;
+            if (archStr == "arm64" || archStr == "aarch64")
+                arch = TargetArch::ARM64;
+            else if (archStr == "riscv64" || archStr == "riscv")
+                arch = TargetArch::RISCV64;
+            else {
+                std::cerr << CLR_RED << "Unknown target: " << archStr
+                          << " (supported: arm64, riscv64)" << CLR_RESET << "\n";
+                return 1;
+            }
+
+            // Pipeline: Source → AST → HIR → MIR → optimize → codegen
+            Lexer  lexer(src);
+            auto   tokens = lexer.tokenize();
+            Parser parser(std::move(tokens));
+            auto   program = parser.parse();
+
+            HIRLowering lowering;
+            auto hir = lowering.lower(program.get());
+
+            MIRBuilder builder;
+            auto mir = builder.build(hir);
+            mirOptimize(mir);
+
+            auto gen = createCodeGenerator(arch);
+            auto result = gen->generate(mir);
+
+            if (!result.ok) {
+                std::cerr << CLR_RED << "Codegen error: " << result.error << CLR_RESET << "\n";
+                return 1;
+            }
+
+            std::cout << result.assembly;
+            std::cerr << CLR_GREEN << "// Generated " << archName(arch)
+                      << " assembly from: " << filepath << CLR_RESET << "\n";
+            return 0;
+
+        } catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
+    }
+
+    // ── flux jit <file> — JIT 编译执行 ────────────────────
+    if (sub == "jit") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux jit <file.flux>\n";
+            return 1;
+        }
+        try {
+            std::string src = readFile(argv[2]);
+
+            Lexer  lexer(src);
+            auto   tokens = lexer.tokenize();
+            Parser parser(std::move(tokens));
+            auto   program = parser.parse();
+
+            // HIR → MIR → optimize
+            HIRLowering lowering;
+            auto hir = lowering.lower(program.get());
+            MIRBuilder builder;
+            auto mir = builder.build(hir);
+            mirOptimize(mir);
+
+            // Try JIT for eligible functions
+            JITCompiler jit;
+            int compiled = 0;
+            for (auto& fn : mir.functions) {
+                if (fn.name == "__main__") continue;
+                auto result = jit.compile(fn);
+                if (result) compiled++;
+            }
+
+            std::cerr << CLR_CYAN << "[JIT] Compiled " << compiled
+                      << " function(s) to native code" << CLR_RESET << "\n";
+            jit.dumpStats();
+
+            // Fall back to interpreter for execution
+            Interpreter interp;
+            runSource(src, interp, false);
+            return 0;
+
+        } catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
+    }
+
+    // ── flux registry <url> — 设置中心包仓库 URL ─────────
+    if (sub == "registry") {
+        if (argc < 3) {
+            // 显示当前 registry
+            std::cout << "Current registry: " << getRegistryUrl() << "\n";
+            return 0;
+        }
+        setRegistryUrl(argv[2]);
+        std::cout << CLR_GREEN << "Registry set to: " << argv[2] << CLR_RESET << "\n";
         return 0;
     }
 
