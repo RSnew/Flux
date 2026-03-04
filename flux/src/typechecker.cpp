@@ -294,6 +294,12 @@ void TypeChecker::checkStmt(ASTNode* node, std::shared_ptr<TypeEnv> env) {
         return;
     }
 
+    // ── default funcName {} 全局默认值声明 ─────────────────
+    if (auto* n = dynamic_cast<DefaultDecl*>(node)) {
+        for (auto& s : n->body) checkStmt(s.get(), env);
+        return;
+    }
+
     // ── 其他节点（PersistentBlock, MigrateBlock 等）跳过 ──
 }
 

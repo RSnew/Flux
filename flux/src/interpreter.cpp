@@ -587,24 +587,40 @@ Value Interpreter::callFunction(const std::string& name,
     } catch (ReturnSignal& ret) {
         return ret.value;
     } catch (PanicSignal& p) {
+        lastInlineExceptionDescs_.clear();
+        // 有全局 default → 恢复为默认值
+        auto dfit = defaultBodies_.find(name);
+        if (dfit != defaultBodies_.end()) {
+            auto childEnv = std::make_shared<Environment>(globalEnv_);
+            Value result = Value::Nil();
+            for (auto* stmt : dfit->second)
+                result = evalNode(stmt, childEnv, mod);
+            return result;
+        }
         // 合并 exception 描述到错误信息（全局 + 内联）
         std::string merged = "[自动] " + p.message;
         bool hasDesc = false;
         auto dit = exceptionDescs_.find(name);
         if (dit != exceptionDescs_.end())
             for (auto& d : dit->second) { merged += "\n[描述] " + d; hasDesc = true; }
-        for (auto& d : lastInlineExceptionDescs_) { merged += "\n[描述] " + d; hasDesc = true; }
-        lastInlineExceptionDescs_.clear();
         if (hasDesc) throw PanicSignal{merged};
         throw;
     } catch (std::runtime_error& e) {
+        lastInlineExceptionDescs_.clear();
+        // 有全局 default → 恢复为默认值
+        auto dfit = defaultBodies_.find(name);
+        if (dfit != defaultBodies_.end()) {
+            auto childEnv = std::make_shared<Environment>(globalEnv_);
+            Value result = Value::Nil();
+            for (auto* stmt : dfit->second)
+                result = evalNode(stmt, childEnv, mod);
+            return result;
+        }
         std::string merged = "[自动] " + std::string(e.what());
         bool hasDesc = false;
         auto dit = exceptionDescs_.find(name);
         if (dit != exceptionDescs_.end())
             for (auto& d : dit->second) { merged += "\n[描述] " + d; hasDesc = true; }
-        for (auto& d : lastInlineExceptionDescs_) { merged += "\n[描述] " + d; hasDesc = true; }
-        lastInlineExceptionDescs_.clear();
         if (hasDesc) throw std::runtime_error(merged);
         throw;
     }
@@ -1598,6 +1614,44 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
             // 内联 exception：存储当前描述（下次错误时合并输出）
             lastInlineExceptionDescs_ = n->messages;
         }
+        return Value::Nil();
+    }
+
+    // ── default funcName { value } 全局默认值声明 ────────────
+    if (auto* n = dynamic_cast<DefaultDecl*>(node)) {
+        // 执行前检查：target 必须存在（同 exception 的检查逻辑）
+        auto colonPos = n->target.find(':');
+        if (colonPos != std::string::npos) {
+            std::string typeName   = n->target.substr(0, colonPos);
+            std::string methodName = n->target.substr(colonPos + 1);
+            bool found = false;
+            if (env->has(typeName)) {
+                try {
+                    Value tv = env->get(typeName);
+                    if (tv.type == Value::Type::StructType && tv.structType)
+                        found = tv.structType->findMethod(methodName) != nullptr;
+                } catch (...) {}
+            }
+            if (!found)
+                throw std::runtime_error("default target not found: " + n->target
+                    + " (struct type or method does not exist)");
+        } else {
+            bool found = functions_.count(n->target) || builtins_.count(n->target);
+            if (!found && env->has(n->target)) {
+                try {
+                    Value tv = env->get(n->target);
+                    if (tv.type == Value::Type::Function) found = true;
+                } catch (...) {}
+            }
+            if (!found)
+                throw std::runtime_error("default target not found: " + n->target
+                    + " (function does not exist)");
+        }
+        // 存储 body 的原始 AST 指针，调用出错时 eval
+        auto& bodies = defaultBodies_[n->target];
+        bodies.clear();
+        for (auto& stmt : n->body)
+            bodies.push_back(stmt.get());
         return Value::Nil();
     }
 

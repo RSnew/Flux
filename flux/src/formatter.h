@@ -462,6 +462,16 @@ private:
             return s;
         }
 
+        // ── default funcName {} 全局默认值声明 ──────────────
+        if (auto* n = dynamic_cast<DefaultDecl*>(node)) {
+            std::string s = ind() + "default " + n->target + " {\n";
+            indent_++;
+            for (auto& stmt : n->body) s += fmtStmt(stmt.get());
+            indent_--;
+            s += ind() + "}\n";
+            return s;
+        }
+
         // 回退：直接尝试表达式格式化
         return ind() + fmtExpr(node) + "\n";
     }

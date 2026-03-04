@@ -4,7 +4,7 @@
 
 print("=== exception + default {} tests ===")
 
-// ── Test 1: 经典用法 — exception 描述 + default 默认值 ──
+// ── Test 1: 经典用法 — 函数内 exception + default ────────
 exception divide {
     "除数 b 不能为零"
     "失败时返回默认值 0"
@@ -93,11 +93,50 @@ assert(safe_index(items, -1) == "N/A", "negative index default")
 print("Test 4c: " + safe_index(items, 99))
 assert(safe_index(items, 99) == "N/A", "overflow index default")
 
-// ── Test 5: exception 方法描述 ──────────────────────────
+// ── Test 5: 全局 default 声明（函数外部）─────────────────
+// 即使函数内部没写 default，全局声明也能捕获错误并返回默认值
+func risky_sqrt(x) {
+    if (x < 0) {
+        panic("cannot sqrt negative number")
+    }
+    return x
+}
+
+// 在函数外面声明 default —— 函数 panic 时自动返回 0
+exception risky_sqrt {
+    "输入不能为负数"
+}
+default risky_sqrt { 0 }
+
+var r5 = risky_sqrt(25)
+print("Test 5a: risky_sqrt(25) = " + str(r5))
+assert(r5 == 25, "normal sqrt")
+
+var r6 = risky_sqrt(-4)
+print("Test 5b: risky_sqrt(-4) = " + str(r6))
+assert(r6 == 0, "panic → global default recovery to 0")
+
+// ── Test 6: 全局 default 带复杂表达式 ───────────────────
+func parse_int(s) {
+    if (s == "bad") {
+        panic("invalid number format")
+    }
+    return 42
+}
+
+default parse_int { -1 }
+
+print("Test 6a: parse_int(\"ok\") = " + str(parse_int("ok")))
+assert(parse_int("ok") == 42, "normal parse")
+
+print("Test 6b: parse_int(\"bad\") = " + str(parse_int("bad")))
+assert(parse_int("bad") == -1, "panic → global default -1")
+
+// ── Test 7: exception 重复声明（追加描述）────────────────
 exception divide {
     "请注意：除数不能为零"
 }
 
-print("Test 6: exception target validation OK")
+print("Test 7: exception target validation OK")
 
 print("\n=== All exception + default {} tests passed! ===")

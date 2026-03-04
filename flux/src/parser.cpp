@@ -295,10 +295,27 @@ NodePtr Parser::parseStatement() {
         expect(TokenType::RPAREN, "expected ')'");
         return std::make_unique<FreeStmt>(std::move(ptr));
     }
-    // default { value } — 语句级默认值返回（与 exception {} 配合）
+    // default — 全局声明 or 语句级默认值
     if (check(TokenType::DEFAULT)) {
         consume(); // default
         skipNewlines();
+        // default funcName { ... } 或 default Type:method { ... }
+        if (check(TokenType::IDENTIFIER)) {
+            std::string target = current().value;
+            consume();
+            // Type:method 形式
+            if (check(TokenType::COLON)) {
+                consume();
+                if (!check(TokenType::IDENTIFIER))
+                    throw std::runtime_error("expected method name after ':'");
+                target += ":" + current().value;
+                consume();
+            }
+            skipNewlines();
+            auto body = parseBlock();
+            return std::make_unique<DefaultDecl>(target, std::move(body));
+        }
+        // default { value } — 语句级内联
         auto body = parseBlock();
         return std::make_unique<DefaultStmt>(std::move(body));
     }

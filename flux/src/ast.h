@@ -413,3 +413,13 @@ struct DefaultStmt : ASTNode {
     std::vector<NodePtr> body;   // 默认值块
     explicit DefaultStmt(std::vector<NodePtr> b) : body(std::move(b)) {}
 };
+
+// ── default funcName { value } 全局默认值声明 ───────────
+// 写在函数外面，为函数附加默认返回值
+// 函数出错时自动返回此默认值而非 panic
+struct DefaultDecl : ASTNode {
+    std::string          target;  // 函数名 或 "Type:method"
+    std::vector<NodePtr> body;    // 默认值块
+    DefaultDecl(std::string t, std::vector<NodePtr> b)
+        : target(std::move(t)), body(std::move(b)) {}
+};
