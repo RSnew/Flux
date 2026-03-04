@@ -64,6 +64,13 @@ enum class OpCode : uint8_t {
 
     // ── AST 委托（结构体/接口/exception/spawn）──────────
     EVAL_AST,        // 委托给解释器 evalNode(ast_nodes[a], env)，结果压栈
+
+    // ── 原生结构体/闭包/spawn 指令 ──────────────────────
+    MAKE_CLOSURE,    // 创建闭包：ast_nodes[a] = FuncExpr，捕获当前 env
+    FIELD_GET,       // 弹出 obj，压入 obj.field（names[a]=字段名）
+    FIELD_SET,       // 弹出 val，弹出 obj，obj.field=val，压入 val
+    STRUCT_CREATE,   // names[a]=类型名，b=字段数（栈: 类型值, name1, val1, ...)
+    SPAWN_TASK,      // ast_nodes[a] = SpawnStmt，fire-and-forget
 };
 
 // ── 单条指令 ──────────────────────────────────────────────

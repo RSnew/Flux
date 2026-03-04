@@ -373,7 +373,79 @@ Value VM::run(Chunk& chunk,
             break;
         }
 
-        // ── AST 委托（结构体/接口/exception/spawn/匿名函数等）──
+        // ── 原生结构体/闭包/spawn 指令 ───────────────────────
+        case OpCode::MAKE_CLOSURE: {
+            ASTNode* node = chunk.ast_nodes[inst.a];
+            auto* fe = dynamic_cast<FuncExpr*>(node);
+            if (!fe) throw std::runtime_error("VM MAKE_CLOSURE: expected FuncExpr");
+            auto fv = std::make_shared<FuncVal>();
+            fv->params  = fe->params;
+            fv->closure = curEnv;
+            for (auto& s : fe->body)
+                fv->ownedBody.push_back(std::shared_ptr<ASTNode>(s.get(), [](ASTNode*){}));
+            push(Value::FuncV(fv));
+            break;
+        }
+
+        case OpCode::FIELD_GET: {
+            const std::string& field = chunk.names[inst.a];
+            Value obj = pop();
+            if (obj.type == Value::Type::StructInst && obj.structInst) {
+                auto it = obj.structInst->fields.find(field);
+                if (it != obj.structInst->fields.end())
+                    push(it->second);
+                else
+                    throw std::runtime_error("VM FIELD_GET: no field '" + field + "'");
+            } else if (obj.type == Value::Type::Map && obj.map) {
+                auto it = obj.map->find(field);
+                push(it != obj.map->end() ? it->second : Value::Nil());
+            } else {
+                throw std::runtime_error("VM FIELD_GET: not a struct/map");
+            }
+            break;
+        }
+
+        case OpCode::FIELD_SET: {
+            const std::string& field = chunk.names[inst.a];
+            Value val = pop();
+            Value obj = pop();
+            if (obj.type == Value::Type::StructInst && obj.structInst) {
+                obj.structInst->fields[field] = val;
+            } else if (obj.type == Value::Type::Map && obj.map) {
+                (*obj.map)[field] = val;
+            } else {
+                throw std::runtime_error("VM FIELD_SET: not a struct/map");
+            }
+            push(val);
+            break;
+        }
+
+        case OpCode::STRUCT_CREATE: {
+            const std::string& typeName = chunk.names[inst.a];
+            int fieldCount = inst.b;
+            // 从栈弹出 field name/value pairs (reverse order)
+            std::vector<std::pair<std::string, Value>> fields(fieldCount);
+            for (int i = fieldCount - 1; i >= 0; --i) {
+                fields[i].second = pop();
+                fields[i].first  = pop().string;
+            }
+            // Lookup struct type from env
+            Value typeVal = curEnv->get(typeName);
+            if (typeVal.type != Value::Type::StructType || !typeVal.structType)
+                throw std::runtime_error("VM STRUCT_CREATE: '" + typeName + "' is not a struct type");
+            push(interp_.createStructInst(typeVal.structType, fields, curEnv, mod));
+            break;
+        }
+
+        case OpCode::SPAWN_TASK: {
+            ASTNode* node = chunk.ast_nodes[inst.a];
+            // Delegate spawn to interpreter (it manages the thread)
+            interp_.evalNode(node, curEnv, mod);
+            push(Value::Nil());
+            break;
+        }
+
+        // ── AST 委托（结构体定义/接口/exception 等声明性节点）──
         case OpCode::EVAL_AST: {
             ASTNode* node = chunk.ast_nodes[inst.a];
             Value result = interp_.evalNode(node, curEnv, mod);
@@ -592,7 +664,9 @@ void Chunk::dump(const std::string& title) const {
             CASE(JUMP) CASE(JUMP_IF_FALSE) CASE(JUMP_IF_TRUE)
             CASE(CALL) CASE(CALL_MODULE) CASE(CALL_METHOD) CASE(RETURN) CASE(RETURN_NIL)
             CASE(MAKE_ARRAY) CASE(MAKE_MAP) CASE(INDEX_GET) CASE(INDEX_SET)
-            CASE(ASYNC_CALL) CASE(ASYNC_MODULE) CASE(AWAIT) CASE(EVAL_AST)
+            CASE(ASYNC_CALL) CASE(ASYNC_MODULE) CASE(AWAIT)
+            CASE(MAKE_CLOSURE) CASE(FIELD_GET) CASE(FIELD_SET)
+            CASE(STRUCT_CREATE) CASE(SPAWN_TASK) CASE(EVAL_AST)
 #undef CASE
             default: name = "?"; break;
         }

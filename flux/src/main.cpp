@@ -15,6 +15,7 @@
 #include "jit.h"
 #include "codegen.h"
 #include "profiler.h"
+#include "fluz.h"
 
 #include <iostream>
 #include <fstream>
@@ -390,14 +391,26 @@ static void runFile(const std::string& filepath) {
 // ═══════════════════════════════════════════════════════════
 static std::string g_lastSourceHash;
 
+// 全局函数版本哈希表：funcName → FNV hash of function body
+static std::unordered_map<std::string, uint64_t> g_functionHashes;
+
 static std::string hashSource(const std::string& src) {
-    // Simple FNV-1a hash for change detection
-    uint64_t hash = 14695981039346656037ULL;
-    for (unsigned char c : src) {
-        hash ^= c;
-        hash *= 1099511628211ULL;
+    return std::to_string(fnvHash(src));
+}
+
+// 提取每个函数的源码哈希（用于增量更新检测）
+static std::unordered_map<std::string, uint64_t> computeFunctionHashes(Program* program) {
+    std::unordered_map<std::string, uint64_t> hashes;
+    for (auto& stmt : program->statements) {
+        if (auto* fn = dynamic_cast<FnDecl*>(stmt.get())) {
+            // Hash function by name + param count + body statement count
+            // (a proxy for body content since we can't easily serialize AST)
+            std::string sig = fn->name + "(" + std::to_string(fn->params.size()) + "){"
+                            + std::to_string(fn->body.size()) + "}";
+            hashes[fn->name] = fnvHash(sig);
+        }
     }
-    return std::to_string(hash);
+    return hashes;
 }
 
 // Run tests from a test file if it exists
@@ -498,10 +511,42 @@ static void runDevSource(const std::string& source, const std::string& filepath,
         auto compileMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             compileEnd - compileStart).count();
 
+        // Per-function incremental change detection
+        auto newHashes = computeFunctionHashes(program.get());
+        int changedFns = 0, totalFns = (int)newHashes.size();
+        std::vector<std::string> changedNames;
+
+        if (isReload) {
+            for (auto& [name, hash] : newHashes) {
+                auto it = g_functionHashes.find(name);
+                if (it == g_functionHashes.end() || it->second != hash) {
+                    changedFns++;
+                    changedNames.push_back(name);
+                }
+            }
+            // Detect removed functions
+            for (auto& [name, hash] : g_functionHashes) {
+                if (newHashes.find(name) == newHashes.end())
+                    changedNames.push_back("-" + name);
+            }
+        } else {
+            changedFns = totalFns;
+        }
+        g_functionHashes = newHashes;
+
         if (isReload) {
             std::cout << CLR_YELLOW << "\n🔄 Hot reload detected..."
-                      << CLR_GRAY << " (compiled in " << compileMs << "ms)"
+                      << CLR_GRAY << " (compiled in " << compileMs << "ms, "
+                      << changedFns << "/" << totalFns << " functions changed)"
                       << CLR_RESET << "\n";
+            if (!changedNames.empty()) {
+                std::cout << CLR_GRAY << "  changed: ";
+                for (size_t i = 0; i < changedNames.size(); i++) {
+                    if (i > 0) std::cout << ", ";
+                    std::cout << changedNames[i];
+                }
+                std::cout << CLR_RESET << "\n";
+            }
             std::cout << CLR_GRAY << "─────────────────────────────\n" << CLR_RESET;
         }
 
@@ -730,6 +775,9 @@ static void printHelp() {
         << "  flux fmt   -w <file.flux>   Format file in-place (overwrite)\n"
         << "  flux --vm  <file.flux>      Run file with bytecode VM (Feature G)\n"
         << "  flux jit   <file.flux>      JIT compile eligible functions\n"
+        << "  flux pack  <file> [-o app.fluz]  Pack into .fluz bytecode bundle\n"
+        << "  flux unpack <file.fluz>     Disassemble .fluz bytecode bundle\n"
+        << "  flux profile <file.flux>    Run with profiling on all functions\n"
         << "  flux codegen <arch> <file>   Generate assembly (arm64, riscv64)\n"
         << "  flux lsp                    Start Language Server Protocol server\n"
         << "  flux debug <file.flux>      Start interactive debugger\n"
@@ -1059,6 +1107,146 @@ int main(int argc, char* argv[]) {
             // Fall back to interpreter for execution
             Interpreter interp;
             runSource(src, interp, false);
+            return 0;
+
+        } catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
+    }
+
+    // ── flux pack <file> [-o out.fluz] — 发布打包 ─────────
+    if (sub == "pack") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux pack <file.flux> [-o output.fluz]\n";
+            return 1;
+        }
+        try {
+            std::string filepath = argv[2];
+            std::string output = "app.fluz";  // default output
+            // Parse -o flag
+            for (int i = 3; i < argc - 1; i++) {
+                if (std::string(argv[i]) == "-o") {
+                    output = argv[i + 1];
+                    break;
+                }
+            }
+
+            std::string src = readFile(filepath);
+
+            // Pipeline: Source → Lex → Parse → TypeCheck → HIR → MIR → FluzCodeGen
+            Lexer  lexer(src);
+            auto   tokens = lexer.tokenize();
+            Parser parser(std::move(tokens));
+            auto   program = parser.parse();
+
+            TypeChecker checker;
+            auto typeErrors = checker.check(program.get());
+            if (!typeErrors.empty()) {
+                std::cerr << CLR_RED << "Type errors — pack aborted:\n" << CLR_RESET;
+                for (auto& e : typeErrors)
+                    std::cerr << CLR_RED << "  " << e.message << CLR_RESET << "\n";
+                return 1;
+            }
+
+            HIRLowering lowering;
+            auto hir = lowering.lower(program.get());
+            MIRBuilder builder;
+            auto mir = builder.build(hir);
+            mirOptimize(mir);
+
+            FluzCodeGen codegen;
+            auto pkg = codegen.generate(mir, src);
+            pkg.flags = 1;  // stripped (no test blocks)
+
+            writeFluz(output, pkg);
+
+            std::cerr << CLR_GREEN << "Packed " << pkg.units.size()
+                      << " unit(s) → " << output << CLR_RESET << "\n";
+            // Show unit summary
+            for (auto& u : pkg.units) {
+                std::cerr << CLR_GRAY << "  " << u.name
+                          << " (" << u.code.size() << " instructions, hash="
+                          << std::hex << u.versionHash << std::dec << ")"
+                          << CLR_RESET << "\n";
+            }
+            return 0;
+
+        } catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
+    }
+
+    // ── flux unpack <file.fluz> — 反汇编 .fluz 包 ─────────
+    if (sub == "unpack") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux unpack <file.fluz>\n";
+            return 1;
+        }
+        try {
+            auto pkg = readFluz(argv[2]);
+            std::cout << "FLUZ v" << pkg.version << " (flags=" << pkg.flags
+                      << ", " << pkg.units.size() << " units)\n\n";
+            for (auto& unit : pkg.units) {
+                std::cout << "── " << unit.name << " (hash="
+                          << std::hex << unit.versionHash << std::dec << ") ──\n";
+                // Create a temporary chunk for dump
+                Chunk chunk;
+                chunk.code      = unit.code;
+                chunk.constants = unit.constants;
+                chunk.names     = unit.names;
+                chunk.dump(unit.name);
+                std::cout << "\n";
+            }
+            return 0;
+        } catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
+    }
+
+    // ── flux profile <file.flux> — 性能分析运行 ────────────
+    if (sub == "profile") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux profile <file.flux>\n";
+            return 1;
+        }
+        // "report" 子命令兼容
+        std::string target = argv[2];
+        if (target == "report" && argc > 3)
+            target = argv[3];
+
+        try {
+            std::string src = readFile(target);
+            Interpreter interp;
+            Profiler::instance().clear();
+
+            Lexer  lexer(src);
+            auto   tokens = lexer.tokenize();
+            Parser parser(std::move(tokens));
+            auto   program = parser.parse();
+
+            TypeChecker checker;
+            auto typeErrors = checker.check(program.get());
+            if (!typeErrors.empty()) {
+                for (auto& e : typeErrors)
+                    std::cerr << CLR_RED << "  " << e.message << CLR_RESET << "\n";
+                return 1;
+            }
+
+            // Mark ALL user-defined functions for profiling
+            for (auto& stmt : program->statements) {
+                if (auto* fn = dynamic_cast<FnDecl*>(stmt.get()))
+                    Profiler::instance().markFunction(fn->name);
+                if (auto* pfn = dynamic_cast<ProfiledFnDecl*>(stmt.get())) {
+                    auto* fn = dynamic_cast<FnDecl*>(pfn->fnDecl.get());
+                    if (fn) Profiler::instance().markFunction(fn->name);
+                }
+            }
+
+            interp.execute(program.get());
+            Profiler::instance().report();
             return 0;
 
         } catch (const std::exception& e) {

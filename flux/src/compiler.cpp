@@ -164,8 +164,10 @@ void Compiler::compileNode(ASTNode* node) {
     }
 
     // ── 字段赋值 obj.field = value ──────────────────────
-    if (dynamic_cast<FieldAssign*>(node)) {
-        chunk_.emit(OpCode::EVAL_AST, chunk_.addASTNode(node));
+    if (auto* n = dynamic_cast<FieldAssign*>(node)) {
+        compileNode(n->object.get());                    // 对象压栈
+        compileNode(n->value.get());                     // 值压栈
+        chunk_.emit(OpCode::FIELD_SET, chunk_.addName(n->field));
         return;
     }
 
@@ -196,7 +198,7 @@ void Compiler::compileNode(ASTNode* node) {
 
     // ── spawn { body } — fire-and-forget 后台任务 ───────
     if (dynamic_cast<SpawnStmt*>(node)) {
-        chunk_.emit(OpCode::EVAL_AST, chunk_.addASTNode(node));
+        chunk_.emit(OpCode::SPAWN_TASK, chunk_.addASTNode(node));
         return;
     }
 
@@ -208,11 +210,28 @@ void Compiler::compileNode(ASTNode* node) {
         return;
     }
 
-    // ── 结构体/接口/exception/匿名函数/default → EVAL_AST ──
+    // ── 匿名函数 / 闭包 ─────────────────────────────────
+    if (dynamic_cast<FuncExpr*>(node)) {
+        chunk_.emit(OpCode::MAKE_CLOSURE, chunk_.addASTNode(node));
+        return;
+    }
+
+    // ── 结构体实例化 Type(field: val, ...) ──────────────
+    if (auto* n = dynamic_cast<StructCreate*>(node)) {
+        // 栈布局: field_name1, field_val1, field_name2, field_val2, ...
+        for (auto& f : n->fields) {
+            chunk_.emit(OpCode::PUSH_CONST, chunk_.addConst(Value::Str(f.name)));
+            compileNode(f.value.get());
+        }
+        chunk_.emit(OpCode::STRUCT_CREATE,
+                    chunk_.addName(n->typeName),
+                    (int)n->fields.size());
+        return;
+    }
+
+    // ── 结构体/接口/exception/default → EVAL_AST ────────
     if (dynamic_cast<StructLit*>(node)     ||
         dynamic_cast<InterfaceLit*>(node)  ||
-        dynamic_cast<StructCreate*>(node)  ||
-        dynamic_cast<FuncExpr*>(node)      ||
         dynamic_cast<ExceptionDecl*>(node) ||
         dynamic_cast<IntervalRange*>(node) ||
         dynamic_cast<DefaultStmt*>(node) ||

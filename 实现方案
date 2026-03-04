@@ -50,6 +50,7 @@
 | `hw.h` | ~200 | 硬件抽象层（GPIO/UART/Platform） |
 | `hir.h` | ~385 | 高层中间表示（AST → HIR 脱糖/名称解析） |
 | `mir.h` | ~360 | 中层中间表示（CFG/SSA/优化 Pass） |
+| `fluz.h` | ~350 | .fluz 字节码打包格式 + MIR→FluzUnit 编译器 |
 
 ### 0.2 功能完成度总览
 
@@ -377,7 +378,12 @@
 | 并发 | `ASYNC_CALL` | a=名字索引, b=参数数 | 异步调用，返回 Future |
 | | `ASYNC_MODULE` | a=名字索引, b=参数数 | 跨 pool 异步调用 "Module.fn" |
 | | `AWAIT` | — | 弹出 Future，等待并压入结果 |
-| 委托 | `EVAL_AST` | a=AST 索引 | 委托给解释器处理复杂节点 |
+| 结构体 | `STRUCT_CREATE` | a=类型名索引, b=字段数 | 创建结构体实例 |
+| | `FIELD_GET` | a=字段名索引 | 读取结构体/Map 字段 |
+| | `FIELD_SET` | a=字段名索引 | 设置结构体/Map 字段 |
+| 闭包 | `MAKE_CLOSURE` | a=AST 索引 | 创建闭包（捕获当前环境） |
+| 并发 | `SPAWN_TASK` | a=AST 索引 | fire-and-forget 后台任务 |
+| 委托 | `EVAL_AST` | a=AST 索引 | 委托给解释器处理声明性节点 |
 
 **指令格式**：每条指令为 `{OpCode op, int32_t a, int32_t b}` 三元组。
 
@@ -863,8 +869,9 @@ flux-std/
 
 | 命令 | 说明 | 状态 |
 |------|------|------|
-| `flux pack <file> -o app.fluz` | 发布打包（排除 test 块） | ⬚ |
-| `flux profile report` | 性能分析报告 | ⬚ |
+| `flux pack <file> -o app.fluz` | 发布打包（.fluz 字节码） | ✅ |
+| `flux unpack <file.fluz>` | 反汇编 .fluz 字节码包 | ✅ |
+| `flux profile <file.flux>` | 全函数性能分析运行 | ✅ |
 
 ### 7.2 包管理器 ✅
 
@@ -969,6 +976,7 @@ FNV-1a 哈希比较（跳过未变化文件）
 - [x] `flux run` / `flux <file>` 命令
 - [x] 结构体 + 接口的 VM 编译（通过 EVAL_AST 委托 + 方法分发）
 - [x] `default {}` 错误处理 — `expr default { fallback }` 捕获 panic/runtime_error 并执行回退块
+- [x] VM 原生指令替代 EVAL_AST — MAKE_CLOSURE / FIELD_GET / FIELD_SET / STRUCT_CREATE / SPAWN_TASK
 
 ### Phase 2：热更新 — ✅ 大部分完成
 
@@ -980,7 +988,7 @@ FNV-1a 哈希比较（跳过未变化文件）
 - [x] persistent / migrate 状态迁移
 - [x] `flux dev` 命令（热更新 + FNV-1a 增量编译 + 自动测试）
 - [x] 执行前检查完善（接口完整性、exception 引用检查）
-- [ ] 版本哈希 + 差量替换（单元级增量）
+- [x] 版本哈希 + 函数级增量变更检测（FNV-1a per-function hash）
 - [ ] 枚举合法性检查
 
 ### Phase 3：并发 — ✅ 完成
@@ -1035,6 +1043,9 @@ FNV-1a 哈希比较（跳过未变化文件）
 - [x] flux dev（开发模式：热更新 + 增量编译 + 自动测试）
 - [x] 中心包仓库（pkg.flux-lang.org）— CLI 支持 `flux registry [url]`
 - [x] @profile 性能分析（函数级耗时/调用次数/最大最小值报告）
+- [x] `flux pack` / `flux unpack` — .fluz 字节码打包与反汇编
+- [x] `flux profile` — 全函数性能分析运行
+- [x] MIR → .fluz 字节码 Code Gen（FluzCodeGen）
 
 ### Phase 6：硬件支持 — ✅ 完成
 
