@@ -365,7 +365,15 @@ NodePtr Parser::parseIf() {
     auto thenBlock = parseBlock();
     std::vector<NodePtr> elseBlock;
     skipNewlines();
-    if (match(TokenType::ELSE)) elseBlock = parseBlock();
+    if (match(TokenType::ELSE)) {
+        skipNewlines();
+        if (check(TokenType::IF)) {
+            // else if → parse as single if statement in else block
+            elseBlock.push_back(parseIf());
+        } else {
+            elseBlock = parseBlock();
+        }
+    }
     return std::make_unique<IfStmt>(std::move(cond), std::move(thenBlock), std::move(elseBlock));
 }
 
