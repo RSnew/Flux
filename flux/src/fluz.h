@@ -1,5 +1,6 @@
 // fluz.h — Flux 字节码打包格式 (.fluz)
-// 二进制格式：序列化 Chunk + 常量池 + 名字池 + AST 节点引用
+// 二进制格式：序列化 Chunk + 常量池 + 名字池
+// 安全设计：名字混淆 + 字符串加密 + 指令异或，防止反编译泄漏源码
 #pragma once
 #include "vm.h"
 #include <string>
@@ -8,26 +9,29 @@
 #include <stdexcept>
 #include <cstring>
 #include <unordered_map>
+#include <unordered_set>
+#include <random>
 
 // ═══════════════════════════════════════════════════════════
 // .fluz 文件头
 // ═══════════════════════════════════════════════════════════
 // Magic: "FLUZ" (4 bytes)
 // Version: uint32_t
-// Flags: uint32_t (0 = normal, 1 = stripped tests)
+// Flags: uint32_t
+//   bit 0: stripped (no test blocks)
+//   bit 1: obfuscated (names scrambled)
+//   bit 2: encrypted (string constants XOR)
+//   bit 3: debug (allow disassembly — only with --debug flag)
+// XorKey: uint32_t (字节流加密密钥)
 // NumFunctions: uint32_t
-// Each function unit:
-//   Name length: uint32_t + Name bytes
-//   Version hash: uint64_t (FNV-1a of source)
-//   Instruction count: uint32_t
-//   Constants count: uint32_t
-//   Names count: uint32_t
-//   Instructions: [op(1) + a(4) + b(4)] * count
-//   Constants: type(1) + data
-//   Names: len(4) + bytes
 
 static constexpr uint32_t FLUZ_MAGIC   = 0x5A554C46;  // "FLUZ" little-endian
-static constexpr uint32_t FLUZ_VERSION = 1;
+static constexpr uint32_t FLUZ_VERSION = 2;
+
+static constexpr uint32_t FLUZ_FLAG_STRIPPED   = 0x01;
+static constexpr uint32_t FLUZ_FLAG_OBFUSCATED = 0x02;
+static constexpr uint32_t FLUZ_FLAG_ENCRYPTED  = 0x04;
+static constexpr uint32_t FLUZ_FLAG_DEBUG      = 0x08;
 
 // ═══════════════════════════════════════════════════════════
 // 函数单元（编译后的可替换单元）
@@ -43,6 +47,7 @@ struct FluzUnit {
 struct FluzPackage {
     uint32_t version = FLUZ_VERSION;
     uint32_t flags   = 0;
+    uint32_t xorKey  = 0;     // 加密密钥（0 = 未加密）
     std::vector<FluzUnit> units;
 };
 
@@ -56,6 +61,134 @@ inline uint64_t fnvHash(const std::string& data) {
         hash *= 1099511628211ULL;
     }
     return hash;
+}
+
+// ═══════════════════════════════════════════════════════════
+// 保留名：运行时必须保留原名的标识符
+// （内置函数、方法名、print/len 等不能混淆）
+// ═══════════════════════════════════════════════════════════
+inline bool isReservedName(const std::string& name) {
+    // 内部编译器符号
+    if (name.rfind("__", 0) == 0) return true;   // __main__, __iter_N, __idx_N
+    // 标准库 / 内置函数
+    static const std::unordered_set<std::string> reserved = {
+        "print", "println", "len", "push", "pop", "append",
+        "size", "first", "last", "contains", "join", "reverse",
+        "upper", "lower", "split", "trim", "has", "get", "set",
+        "delete", "remove", "keys", "values", "entries",
+        "send", "recv", "tryRecv", "close", "isClosed",
+        "await", "isReady", "value",
+        "nil", "true", "false",
+        "self", "state", "struct",
+        "Math", "IO", "Net", "Time", "JSON", "OS",
+        "toString", "toNumber", "typeof", "assert", "panic",
+        "range", "input", "sleep", "time", "random",
+        "floor", "ceil", "sqrt", "abs", "pow", "min", "max",
+        "sin", "cos", "tan", "log", "exp", "pi",
+        "read", "write", "readFile", "writeFile",
+    };
+    // 模块方法调用 "Module.fn" — 保留
+    if (name.find('.') != std::string::npos) return true;
+    return reserved.count(name) > 0;
+}
+
+// ═══════════════════════════════════════════════════════════
+// 名字混淆：将用户标识符替换为 _0, _1, _2, ...
+// ═══════════════════════════════════════════════════════════
+inline void obfuscateUnit(FluzUnit& unit) {
+    std::unordered_map<std::string, std::string> nameMap;
+    int counter = 0;
+
+    for (auto& name : unit.names) {
+        if (isReservedName(name)) continue;
+        auto it = nameMap.find(name);
+        if (it == nameMap.end()) {
+            std::string obf = "_" + std::to_string(counter++);
+            nameMap[name] = obf;
+        }
+    }
+
+    // 替换名字池
+    for (auto& name : unit.names) {
+        auto it = nameMap.find(name);
+        if (it != nameMap.end())
+            name = it->second;
+    }
+
+    // 替换常量池中的字符串（仅用于调试信息的字符串，不替换用户字符串字面量）
+    // 注意：用户字符串字面量由 XOR 加密保护，不做混淆
+}
+
+// 混淆函数单元名称
+inline void obfuscateUnitName(FluzUnit& unit) {
+    if (unit.name == "__main__") return;
+    // 函数名用哈希截断替代
+    uint64_t h = fnvHash(unit.name);
+    unit.name = "_F" + std::to_string(h & 0xFFFF);
+}
+
+// ═══════════════════════════════════════════════════════════
+// XOR 字符串加密 / 解密
+// ═══════════════════════════════════════════════════════════
+inline std::string xorEncrypt(const std::string& data, uint32_t key) {
+    if (key == 0) return data;
+    std::string out = data;
+    uint8_t kb[4] = {
+        (uint8_t)(key),       (uint8_t)(key >> 8),
+        (uint8_t)(key >> 16), (uint8_t)(key >> 24)
+    };
+    for (size_t i = 0; i < out.size(); i++)
+        out[i] ^= kb[i % 4];
+    return out;
+}
+
+// 解密 = 加密（XOR 对称）
+inline std::string xorDecrypt(const std::string& data, uint32_t key) {
+    return xorEncrypt(data, key);
+}
+
+// ═══════════════════════════════════════════════════════════
+// 指令字节异或：对 opcode 做简单变换，防止直接模式匹配
+// ═══════════════════════════════════════════════════════════
+inline uint8_t encryptOpcode(uint8_t op, uint32_t key) {
+    return op ^ (uint8_t)(key >> 4);
+}
+inline uint8_t decryptOpcode(uint8_t op, uint32_t key) {
+    return op ^ (uint8_t)(key >> 4);
+}
+
+// ═══════════════════════════════════════════════════════════
+// 打包保护：一键应用所有防护层
+// ═══════════════════════════════════════════════════════════
+inline void protectPackage(FluzPackage& pkg, bool debug = false) {
+    if (debug) {
+        pkg.flags |= FLUZ_FLAG_DEBUG;
+        return;  // debug 模式不做任何保护
+    }
+
+    // 1. 生成随机密钥
+    std::random_device rd;
+    pkg.xorKey = rd() | 1;  // 确保非零
+
+    // 2. 标记 flags
+    pkg.flags |= FLUZ_FLAG_OBFUSCATED | FLUZ_FLAG_ENCRYPTED | FLUZ_FLAG_STRIPPED;
+
+    // 3. 对每个 unit 做混淆 + 加密
+    for (auto& unit : pkg.units) {
+        // 名字混淆
+        obfuscateUnit(unit);
+        obfuscateUnitName(unit);
+
+        // 字符串常量加密
+        for (auto& c : unit.constants) {
+            if (c.type == Value::Type::String)
+                c.string = xorEncrypt(c.string, pkg.xorKey);
+        }
+
+        // 名字池加密
+        for (auto& n : unit.names)
+            n = xorEncrypt(n, pkg.xorKey);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -116,7 +249,10 @@ inline void writeFluz(const std::string& path, const FluzPackage& pkg) {
     writeU32(f, FLUZ_MAGIC);
     writeU32(f, pkg.version);
     writeU32(f, pkg.flags);
+    writeU32(f, pkg.xorKey);
     writeU32(f, (uint32_t)pkg.units.size());
+
+    bool encrypted = (pkg.flags & FLUZ_FLAG_ENCRYPTED) != 0;
 
     for (auto& unit : pkg.units) {
         writeStr(f, unit.name);
@@ -125,22 +261,26 @@ inline void writeFluz(const std::string& path, const FluzPackage& pkg) {
         writeU32(f, (uint32_t)unit.constants.size());
         writeU32(f, (uint32_t)unit.names.size());
 
-        // Instructions
+        // Instructions (opcode 异或加密)
         for (auto& inst : unit.code) {
-            writeU8(f, (uint8_t)inst.op);
+            uint8_t op = encrypted
+                ? encryptOpcode((uint8_t)inst.op, pkg.xorKey)
+                : (uint8_t)inst.op;
+            writeU8(f, op);
             writeU32(f, (uint32_t)inst.a);
             writeU32(f, (uint32_t)inst.b);
         }
 
-        // Constants
+        // Constants (字符串已在 protectPackage 中加密)
         for (auto& c : unit.constants) writeValue(f, c);
 
-        // Names
+        // Names (已在 protectPackage 中加密)
         for (auto& n : unit.names) writeStr(f, n);
     }
 }
 
 // ── 反序列化 .fluz 包 ────────────────────────────────────
+// 注意：加密的 .fluz 仅能由 Flux VM 内部加载执行，不支持外部反汇编
 inline FluzPackage readFluz(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
     if (!f) throw std::runtime_error("cannot open file: " + path);
@@ -152,7 +292,10 @@ inline FluzPackage readFluz(const std::string& path) {
     FluzPackage pkg;
     pkg.version = readU32(f);
     pkg.flags   = readU32(f);
+    pkg.xorKey  = readU32(f);
     uint32_t numUnits = readU32(f);
+
+    bool encrypted = (pkg.flags & FLUZ_FLAG_ENCRYPTED) != 0;
 
     for (uint32_t u = 0; u < numUnits; ++u) {
         FluzUnit unit;
@@ -162,23 +305,32 @@ inline FluzPackage readFluz(const std::string& path) {
         uint32_t numConsts = readU32(f);
         uint32_t numNames  = readU32(f);
 
-        // Instructions
+        // Instructions (解密 opcode)
         unit.code.resize(numInsts);
         for (uint32_t i = 0; i < numInsts; ++i) {
-            unit.code[i].op = (OpCode)readU8(f);
+            uint8_t rawOp = readU8(f);
+            unit.code[i].op = encrypted
+                ? (OpCode)decryptOpcode(rawOp, pkg.xorKey)
+                : (OpCode)rawOp;
             unit.code[i].a  = (int32_t)readU32(f);
             unit.code[i].b  = (int32_t)readU32(f);
         }
 
-        // Constants
+        // Constants (解密字符串)
         unit.constants.resize(numConsts);
-        for (uint32_t i = 0; i < numConsts; ++i)
+        for (uint32_t i = 0; i < numConsts; ++i) {
             unit.constants[i] = readValue(f);
+            if (encrypted && unit.constants[i].type == Value::Type::String)
+                unit.constants[i].string = xorDecrypt(unit.constants[i].string, pkg.xorKey);
+        }
 
-        // Names
+        // Names (解密)
         unit.names.resize(numNames);
-        for (uint32_t i = 0; i < numNames; ++i)
+        for (uint32_t i = 0; i < numNames; ++i) {
             unit.names[i] = readStr(f);
+            if (encrypted)
+                unit.names[i] = xorDecrypt(unit.names[i], pkg.xorKey);
+        }
 
         pkg.units.push_back(std::move(unit));
     }

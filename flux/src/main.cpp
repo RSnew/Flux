@@ -775,8 +775,8 @@ static void printHelp() {
         << "  flux fmt   -w <file.flux>   Format file in-place (overwrite)\n"
         << "  flux --vm  <file.flux>      Run file with bytecode VM (Feature G)\n"
         << "  flux jit   <file.flux>      JIT compile eligible functions\n"
-        << "  flux pack  <file> [-o app.fluz]  Pack into .fluz bytecode bundle\n"
-        << "  flux unpack <file.fluz>     Disassemble .fluz bytecode bundle\n"
+        << "  flux pack  <file> [-o app.fluz]  Pack (obfuscated + encrypted)\n"
+        << "  flux pack  <file> --debug   Pack without protection (debuggable)\n"
         << "  flux profile <file.flux>    Run with profiling on all functions\n"
         << "  flux codegen <arch> <file>   Generate assembly (arm64, riscv64)\n"
         << "  flux lsp                    Start Language Server Protocol server\n"
@@ -1115,20 +1115,22 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // ── flux pack <file> [-o out.fluz] — 发布打包 ─────────
+    // ── flux pack <file> [-o out.fluz] [--debug] — 发布打包 ──
     if (sub == "pack") {
         if (argc < 3) {
-            std::cerr << "Usage: flux pack <file.flux> [-o output.fluz]\n";
+            std::cerr << "Usage: flux pack <file.flux> [-o output.fluz] [--debug]\n";
             return 1;
         }
         try {
             std::string filepath = argv[2];
             std::string output = "app.fluz";  // default output
-            // Parse -o flag
-            for (int i = 3; i < argc - 1; i++) {
-                if (std::string(argv[i]) == "-o") {
-                    output = argv[i + 1];
-                    break;
+            bool debugMode = false;
+            // Parse flags
+            for (int i = 3; i < argc; i++) {
+                if (std::string(argv[i]) == "-o" && i + 1 < argc) {
+                    output = argv[++i];
+                } else if (std::string(argv[i]) == "--debug") {
+                    debugMode = true;
                 }
             }
 
@@ -1157,18 +1159,29 @@ int main(int argc, char* argv[]) {
 
             FluzCodeGen codegen;
             auto pkg = codegen.generate(mir, src);
-            pkg.flags = 1;  // stripped (no test blocks)
+
+            // 保护：混淆 + 加密（debug 模式跳过）
+            protectPackage(pkg, debugMode);
 
             writeFluz(output, pkg);
 
-            std::cerr << CLR_GREEN << "Packed " << pkg.units.size()
-                      << " unit(s) → " << output << CLR_RESET << "\n";
-            // Show unit summary
-            for (auto& u : pkg.units) {
-                std::cerr << CLR_GRAY << "  " << u.name
-                          << " (" << u.code.size() << " instructions, hash="
-                          << std::hex << u.versionHash << std::dec << ")"
-                          << CLR_RESET << "\n";
+            int unitCount = (int)pkg.units.size();
+            std::cerr << CLR_GREEN << "Packed " << unitCount
+                      << " unit(s) → " << output;
+            if (debugMode)
+                std::cerr << " (debug mode — NOT protected)";
+            else
+                std::cerr << " (obfuscated + encrypted)";
+            std::cerr << CLR_RESET << "\n";
+
+            // 仅 debug 模式显示单元详情
+            if (debugMode) {
+                for (auto& u : pkg.units) {
+                    std::cerr << CLR_GRAY << "  " << u.name
+                              << " (" << u.code.size() << " instructions, hash="
+                              << std::hex << u.versionHash << std::dec << ")"
+                              << CLR_RESET << "\n";
+                }
             }
             return 0;
 
@@ -1178,20 +1191,31 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // ── flux unpack <file.fluz> — 反汇编 .fluz 包 ─────────
+    // ── flux unpack — 已禁用（防止源码泄漏）─────────────────
     if (sub == "unpack") {
+        // 仅允许反汇编带 debug 标志的 .fluz 文件
         if (argc < 3) {
             std::cerr << "Usage: flux unpack <file.fluz>\n";
             return 1;
         }
         try {
             auto pkg = readFluz(argv[2]);
-            std::cout << "FLUZ v" << pkg.version << " (flags=" << pkg.flags
-                      << ", " << pkg.units.size() << " units)\n\n";
+
+            // 检查是否为 debug 包
+            if (!(pkg.flags & FLUZ_FLAG_DEBUG)) {
+                std::cerr << CLR_RED
+                    << "Error: this .fluz file is protected (obfuscated + encrypted).\n"
+                    << "Disassembly is not available for production builds.\n"
+                    << "Use `flux pack --debug` to create a debuggable bundle."
+                    << CLR_RESET << "\n";
+                return 1;
+            }
+
+            std::cout << "FLUZ v" << pkg.version
+                      << " (debug, " << pkg.units.size() << " units)\n\n";
             for (auto& unit : pkg.units) {
                 std::cout << "── " << unit.name << " (hash="
                           << std::hex << unit.versionHash << std::dec << ") ──\n";
-                // Create a temporary chunk for dump
                 Chunk chunk;
                 chunk.code      = unit.code;
                 chunk.constants = unit.constants;
