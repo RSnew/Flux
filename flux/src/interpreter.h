@@ -387,6 +387,8 @@ private:
     std::unordered_map<std::string, std::vector<std::string>> exceptionDescs_;
     // 内联 exception 描述（当前作用域中最后遇到的描述）
     std::vector<std::string> lastInlineExceptionDescs_;
+    // default 声明表：target → DefaultDecl body (AST nodes)
+    std::unordered_map<std::string, std::vector<ASTNode*>> defaultBodies_;
 
     // ── !var / !func 灰度切换（Spec v1.0）─────────────────
     // 热更新期间将新值/新函数体存入 pending 表；

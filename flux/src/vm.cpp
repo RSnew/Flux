@@ -4,6 +4,8 @@
 #include <iostream>
 #include <algorithm>
 #include <cmath>
+#include <thread>
+#include <future>
 
 // ── 构造 ─────────────────────────────────────────────────
 VM::VM(Interpreter& interp) : interp_(interp) {
@@ -293,6 +295,164 @@ Value VM::run(Chunk& chunk,
             break;
         }
 
+        // ── 并发 ───────────────────────────────────────────
+        case OpCode::ASYNC_CALL: {
+            const std::string& name = chunk.names[inst.a];
+            int argc = inst.b;
+            std::vector<Value> args(argc);
+            for (int i = argc - 1; i >= 0; --i) args[i] = pop();
+
+            auto promise = std::make_shared<std::promise<Value>>();
+            auto sfuture = promise->get_future().share();
+            Interpreter* self = &interp_;
+            std::thread t([self, promise, name, captArgs = std::move(args)]() mutable {
+                GILGuard gil;
+                try {
+                    Value result = self->callFunction(name, std::move(captArgs));
+                    promise->set_value(std::move(result));
+                } catch (...) {
+                    promise->set_exception(std::current_exception());
+                }
+            });
+            t.detach();
+            interp_.pendingTasks_.push_back(sfuture);
+            push(Value::Future(std::make_shared<FutureVal>(std::move(sfuture))));
+            break;
+        }
+        case OpCode::ASYNC_MODULE: {
+            const std::string& combined = chunk.names[inst.a];
+            int argc = inst.b;
+            std::vector<Value> args(argc);
+            for (int i = argc - 1; i >= 0; --i) args[i] = pop();
+
+            auto dot = combined.find('.');
+            std::string modName = combined.substr(0, dot);
+            std::string fnName  = combined.substr(dot + 1);
+
+            auto promise = std::make_shared<std::promise<Value>>();
+            auto sfuture = promise->get_future().share();
+            Interpreter* self = &interp_;
+
+            // Check if module has a bound thread pool
+            ThreadPool* pool = interp_.getModulePool(modName);
+            if (pool) {
+                pool->submit([self, promise, modName, fnName,
+                               captArgs = std::move(args)]() mutable {
+                    GILGuard gil;
+                    try {
+                        Value result = self->callModuleFunction(
+                            modName, fnName, std::move(captArgs));
+                        promise->set_value(std::move(result));
+                    } catch (...) {
+                        promise->set_exception(std::current_exception());
+                    }
+                });
+            } else {
+                std::thread t([self, promise, modName, fnName,
+                               captArgs = std::move(args)]() mutable {
+                    GILGuard gil;
+                    try {
+                        Value result = self->callModuleFunction(
+                            modName, fnName, std::move(captArgs));
+                        promise->set_value(std::move(result));
+                    } catch (...) {
+                        promise->set_exception(std::current_exception());
+                    }
+                });
+                t.detach();
+            }
+            interp_.pendingTasks_.push_back(sfuture);
+            push(Value::Future(std::make_shared<FutureVal>(std::move(sfuture))));
+            break;
+        }
+        case OpCode::AWAIT: {
+            Value futVal = pop();
+            if (futVal.type != Value::Type::Future || !futVal.future)
+                throw std::runtime_error("await requires a Future value");
+            push(futVal.future->get());
+            break;
+        }
+
+        // ── 原生结构体/闭包/spawn 指令 ───────────────────────
+        case OpCode::MAKE_CLOSURE: {
+            ASTNode* node = chunk.ast_nodes[inst.a];
+            auto* fe = dynamic_cast<FuncExpr*>(node);
+            if (!fe) throw std::runtime_error("VM MAKE_CLOSURE: expected FuncExpr");
+            auto fv = std::make_shared<FuncVal>();
+            fv->params  = fe->params;
+            fv->closure = curEnv;
+            for (auto& s : fe->body)
+                fv->ownedBody.push_back(std::shared_ptr<ASTNode>(s.get(), [](ASTNode*){}));
+            push(Value::FuncV(fv));
+            break;
+        }
+
+        case OpCode::FIELD_GET: {
+            const std::string& field = chunk.names[inst.a];
+            Value obj = pop();
+            if (obj.type == Value::Type::StructInst && obj.structInst) {
+                auto it = obj.structInst->fields.find(field);
+                if (it != obj.structInst->fields.end())
+                    push(it->second);
+                else
+                    throw std::runtime_error("VM FIELD_GET: no field '" + field + "'");
+            } else if (obj.type == Value::Type::Map && obj.map) {
+                auto it = obj.map->find(field);
+                push(it != obj.map->end() ? it->second : Value::Nil());
+            } else {
+                throw std::runtime_error("VM FIELD_GET: not a struct/map");
+            }
+            break;
+        }
+
+        case OpCode::FIELD_SET: {
+            const std::string& field = chunk.names[inst.a];
+            Value val = pop();
+            Value obj = pop();
+            if (obj.type == Value::Type::StructInst && obj.structInst) {
+                obj.structInst->fields[field] = val;
+            } else if (obj.type == Value::Type::Map && obj.map) {
+                (*obj.map)[field] = val;
+            } else {
+                throw std::runtime_error("VM FIELD_SET: not a struct/map");
+            }
+            push(val);
+            break;
+        }
+
+        case OpCode::STRUCT_CREATE: {
+            const std::string& typeName = chunk.names[inst.a];
+            int fieldCount = inst.b;
+            // 从栈弹出 field name/value pairs (reverse order)
+            std::vector<std::pair<std::string, Value>> fields(fieldCount);
+            for (int i = fieldCount - 1; i >= 0; --i) {
+                fields[i].second = pop();
+                fields[i].first  = pop().string;
+            }
+            // Lookup struct type from env
+            Value typeVal = curEnv->get(typeName);
+            if (typeVal.type != Value::Type::StructType || !typeVal.structType)
+                throw std::runtime_error("VM STRUCT_CREATE: '" + typeName + "' is not a struct type");
+            push(interp_.createStructInst(typeVal.structType, fields, curEnv, mod));
+            break;
+        }
+
+        case OpCode::SPAWN_TASK: {
+            ASTNode* node = chunk.ast_nodes[inst.a];
+            // Delegate spawn to interpreter (it manages the thread)
+            interp_.evalNode(node, curEnv, mod);
+            push(Value::Nil());
+            break;
+        }
+
+        // ── AST 委托（结构体定义/接口/exception 等声明性节点）──
+        case OpCode::EVAL_AST: {
+            ASTNode* node = chunk.ast_nodes[inst.a];
+            Value result = interp_.evalNode(node, curEnv, mod);
+            push(result);
+            break;
+        }
+
         default:
             throw std::runtime_error("VM: unhandled opcode " +
                                      std::to_string((int)inst.op));
@@ -415,6 +575,73 @@ Value VM::dispatchMethod(Value& obj, const std::string& m,
             return Value::Arr(arr);
         }
     }
+    // ── StructInst method dispatch ───────────────────────────
+    if (obj.type == Value::Type::StructInst && obj.structInst) {
+        // Field access via getter (method name matches field name with no args)
+        if (args.empty() && obj.structInst->fields.count(m)) {
+            return obj.structInst->fields[m];
+        }
+        // Method dispatch
+        if (obj.structInst->type) {
+            auto* method = obj.structInst->type->findMethod(m);
+            if (method) {
+                // Build env with "self" bound to the struct instance
+                auto methodEnv = std::make_shared<Environment>(interp_.globalEnv_);
+                methodEnv->set("self", obj);
+                // Bind fields as local variables for convenience
+                for (auto& [fname, fval] : obj.structInst->fields)
+                    methodEnv->set(fname, fval);
+                // Bind parameters
+                for (size_t i = 0; i < method->params.size() && i < args.size(); ++i)
+                    methodEnv->set(method->params[i].name, args[i]);
+                // Execute method body via interpreter
+                Value result = Value::Nil();
+                for (auto& stmt : method->body) {
+                    try {
+                        result = interp_.evalNode(stmt.get(), methodEnv);
+                    } catch (ReturnSignal& r) {
+                        result = r.value;
+                        break;
+                    }
+                }
+                // Write back field changes from self assignments
+                for (auto& [fname, fval] : obj.structInst->fields) {
+                    if (methodEnv->has(fname))
+                        obj.structInst->fields[fname] = methodEnv->get(fname);
+                }
+                return result;
+            }
+        }
+    }
+    // ── Future methods ─────────────────────────────────────────
+    if (obj.type == Value::Type::Future && obj.future) {
+        if (m == "await" || m == "get" || m == "value") return obj.future->get();
+        if (m == "isReady") return Value::Bool(obj.future->isReady());
+    }
+    // ── Channel methods ────────────────────────────────────────
+    if (obj.type == Value::Type::Chan && obj.chan) {
+        if (m == "send" && !args.empty()) {
+            obj.chan->send(args[0]);
+            return Value::Nil();
+        }
+        if (m == "recv") {
+            auto val = obj.chan->recv();
+            return val ? *val : Value::Nil();
+        }
+        if (m == "tryRecv") {
+            auto val = obj.chan->tryRecv();
+            return val ? *val : Value::Nil();
+        }
+        if (m == "close") { obj.chan->close(); return Value::Nil(); }
+        if (m == "len") {
+            std::unique_lock<std::mutex> lk(obj.chan->mu);
+            return Value::Num((double)obj.chan->q.size());
+        }
+        if (m == "isClosed") {
+            std::unique_lock<std::mutex> lk(obj.chan->mu);
+            return Value::Bool(obj.chan->closed_);
+        }
+    }
     throw std::runtime_error("VM: unknown method '" + m + "' on " + obj.toString());
 }
 
@@ -437,6 +664,9 @@ void Chunk::dump(const std::string& title) const {
             CASE(JUMP) CASE(JUMP_IF_FALSE) CASE(JUMP_IF_TRUE)
             CASE(CALL) CASE(CALL_MODULE) CASE(CALL_METHOD) CASE(RETURN) CASE(RETURN_NIL)
             CASE(MAKE_ARRAY) CASE(MAKE_MAP) CASE(INDEX_GET) CASE(INDEX_SET)
+            CASE(ASYNC_CALL) CASE(ASYNC_MODULE) CASE(AWAIT)
+            CASE(MAKE_CLOSURE) CASE(FIELD_GET) CASE(FIELD_SET)
+            CASE(STRUCT_CREATE) CASE(SPAWN_TASK) CASE(EVAL_AST)
 #undef CASE
             default: name = "?"; break;
         }

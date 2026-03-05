@@ -163,10 +163,89 @@ void Compiler::compileNode(ASTNode* node) {
         return;
     }
 
+    // ── 字段赋值 obj.field = value ──────────────────────
+    if (auto* n = dynamic_cast<FieldAssign*>(node)) {
+        compileNode(n->object.get());                    // 对象压栈
+        compileNode(n->value.get());                     // 值压栈
+        chunk_.emit(OpCode::FIELD_SET, chunk_.addName(n->field));
+        return;
+    }
+
+    // ── async call(args) — 异步执行函数调用 ─────────────
+    if (auto* n = dynamic_cast<AsyncExpr*>(node)) {
+        // 提取被调用节点：CallExpr 或 ModuleCall
+        if (auto* call = dynamic_cast<CallExpr*>(n->call.get())) {
+            for (auto& a : call->args) compileNode(a.get());
+            chunk_.emit(OpCode::ASYNC_CALL, chunk_.addName(call->name), (int)call->args.size());
+        } else if (auto* mc = dynamic_cast<ModuleCall*>(n->call.get())) {
+            for (auto& a : mc->args) compileNode(a.get());
+            std::string combined = mc->module + "." + mc->fn;
+            chunk_.emit(OpCode::ASYNC_MODULE, chunk_.addName(combined), (int)mc->args.size());
+        } else {
+            // Fallback to interpreter for complex cases
+            chunk_.emit(OpCode::EVAL_AST, chunk_.addASTNode(node));
+        }
+        return;
+    }
+
+    // ── await expr — 等待 Future ────────────────────────
+    if (dynamic_cast<AwaitExpr*>(node)) {
+        auto* n = dynamic_cast<AwaitExpr*>(node);
+        compileNode(n->expr.get());
+        chunk_.emit(OpCode::AWAIT);
+        return;
+    }
+
+    // ── spawn { body } — fire-and-forget 后台任务 ───────
+    if (dynamic_cast<SpawnStmt*>(node)) {
+        chunk_.emit(OpCode::SPAWN_TASK, chunk_.addASTNode(node));
+        return;
+    }
+
+    // ── Module.fn.async(args) — 跨 pool 异步调用 ───────
+    if (auto* n = dynamic_cast<AsyncCall*>(node)) {
+        for (auto& a : n->args) compileNode(a.get());
+        std::string combined = n->module + "." + n->fn;
+        chunk_.emit(OpCode::ASYNC_MODULE, chunk_.addName(combined), (int)n->args.size());
+        return;
+    }
+
+    // ── 匿名函数 / 闭包 ─────────────────────────────────
+    if (dynamic_cast<FuncExpr*>(node)) {
+        chunk_.emit(OpCode::MAKE_CLOSURE, chunk_.addASTNode(node));
+        return;
+    }
+
+    // ── 结构体实例化 Type(field: val, ...) ──────────────
+    if (auto* n = dynamic_cast<StructCreate*>(node)) {
+        // 栈布局: field_name1, field_val1, field_name2, field_val2, ...
+        for (auto& f : n->fields) {
+            chunk_.emit(OpCode::PUSH_CONST, chunk_.addConst(Value::Str(f.name)));
+            compileNode(f.value.get());
+        }
+        chunk_.emit(OpCode::STRUCT_CREATE,
+                    chunk_.addName(n->typeName),
+                    (int)n->fields.size());
+        return;
+    }
+
+    // ── 结构体/接口/exception/default → EVAL_AST ────────
+    if (dynamic_cast<StructLit*>(node)     ||
+        dynamic_cast<InterfaceLit*>(node)  ||
+        dynamic_cast<ExceptionDecl*>(node) ||
+        dynamic_cast<IntervalRange*>(node) ||
+        dynamic_cast<DefaultStmt*>(node) ||
+        dynamic_cast<DefaultDecl*>(node)) {
+        chunk_.emit(OpCode::EVAL_AST, chunk_.addASTNode(node));
+        return;
+    }
+
     // ── 顶层跳过节点 ────────────────────────────────────
     if (dynamic_cast<FnDecl*>(node))          return;
     if (dynamic_cast<PersistentBlock*>(node)) return;
     if (dynamic_cast<MigrateBlock*>(node))    return;
+    if (dynamic_cast<ThreadPoolDecl*>(node))  return;
+    if (dynamic_cast<ModuleDecl*>(node))      return;
 
     throw std::runtime_error("Compiler: unhandled AST node type");
 }

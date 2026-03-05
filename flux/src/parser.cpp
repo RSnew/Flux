@@ -127,7 +127,23 @@ NodePtr Parser::parseTopLevel() {
             return parseModuleDecl(rp, maxRetries);
         }
 
-        throw ParseError("unknown annotation (expected supervised, concurrent, or threadpool)", current().line);
+        // @profile fn/func — 性能分析装饰器
+        if (check(TokenType::PROFILE)) {
+            consume();
+            skipNewlines();
+            if (!check(TokenType::FN) && !check(TokenType::FUNC))
+                throw ParseError("@profile must be followed by fn/func declaration", current().line);
+            auto fn = parseFnDecl();
+            return std::make_unique<ProfiledFnDecl>(std::move(fn));
+        }
+
+        // @platform("arm64") { ... }
+        if (check(TokenType::PLATFORM)) {
+            consume();
+            return parsePlatformDecl();
+        }
+
+        throw ParseError("unknown annotation (expected supervised, concurrent, threadpool, profile, or platform)", current().line);
     }
 
     // func / fn (both introduce function declarations)
@@ -144,6 +160,12 @@ NodePtr Parser::parseTopLevel() {
     }
     // exception — 顶层错误描述声明
     if (check(TokenType::EXCEPTION))  return parseExceptionDecl();
+    // enum — 枚举声明
+    if (check(TokenType::ENUM))       return parseEnumDecl();
+    // append — 类型扩展
+    if (check(TokenType::APPEND))     return parseAppendDecl();
+    // asm — 内联汇编
+    if (check(TokenType::ASM))        return parseAsmBlock();
     return parseStatement();
 }
 
@@ -265,6 +287,38 @@ NodePtr Parser::parseStatement() {
     }
     // inline exception { "..." }
     if (check(TokenType::EXCEPTION)) return parseExceptionDecl();
+    // free(ptr) 语句
+    if (check(TokenType::FREE)) {
+        consume();
+        expect(TokenType::LPAREN, "expected '(' after free");
+        auto ptr = parseExpr();
+        expect(TokenType::RPAREN, "expected ')'");
+        return std::make_unique<FreeStmt>(std::move(ptr));
+    }
+    // default — 全局声明 or 语句级默认值
+    if (check(TokenType::DEFAULT)) {
+        consume(); // default
+        skipNewlines();
+        // default funcName { ... } 或 default Type:method { ... }
+        if (check(TokenType::IDENTIFIER)) {
+            std::string target = current().value;
+            consume();
+            // Type:method 形式
+            if (check(TokenType::COLON)) {
+                consume();
+                if (!check(TokenType::IDENTIFIER))
+                    throw std::runtime_error("expected method name after ':'");
+                target += ":" + current().value;
+                consume();
+            }
+            skipNewlines();
+            auto body = parseBlock();
+            return std::make_unique<DefaultDecl>(target, std::move(body));
+        }
+        // default { value } — 语句级内联
+        auto body = parseBlock();
+        return std::make_unique<DefaultStmt>(std::move(body));
+    }
 
     // 赋值 or 表达式语句
     auto expr = parseExpr();
@@ -335,7 +389,15 @@ NodePtr Parser::parseIf() {
     auto thenBlock = parseBlock();
     std::vector<NodePtr> elseBlock;
     skipNewlines();
-    if (match(TokenType::ELSE)) elseBlock = parseBlock();
+    if (match(TokenType::ELSE)) {
+        skipNewlines();
+        if (check(TokenType::IF)) {
+            // else if → parse as single if statement in else block
+            elseBlock.push_back(parseIf());
+        } else {
+            elseBlock = parseBlock();
+        }
+    }
     return std::make_unique<IfStmt>(std::move(cond), std::move(thenBlock), std::move(elseBlock));
 }
 
@@ -410,17 +472,9 @@ NodePtr Parser::parseSpawn() {
 }
 
 // ── 表达式（递归下降）─────────────────────────────────────
-// parseExpr → parseNilCoalesce → parseOr → ... → parsePrimary
-NodePtr Parser::parseExpr()       { return parseNilCoalesce(); }
-
-// ?? 空合并运算符（最低优先级）: a ?? b  →  a if a != nil else b
-NodePtr Parser::parseNilCoalesce() {
-    auto left = parseOr();
-    while (check(TokenType::QUESTION_QUESTION)) {
-        consume();
-        left = std::make_unique<BinaryExpr>("??", std::move(left), parseOr());
-    }
-    return left;
+// parseExpr → parseOr → ... → parsePrimary
+NodePtr Parser::parseExpr() {
+    return parseOr();
 }
 
 NodePtr Parser::parseOr() {
@@ -511,6 +565,14 @@ NodePtr Parser::parsePrimary() {
     }
     // nil 字面量
     if (check(TokenType::NIL))   { consume(); return std::make_unique<NilLit>(); }
+    // alloc(size) 表达式
+    if (check(TokenType::ALLOC)) {
+        consume();
+        expect(TokenType::LPAREN, "expected '(' after alloc");
+        auto sz = parseExpr();
+        expect(TokenType::RPAREN, "expected ')'");
+        return std::make_unique<AllocExpr>(std::move(sz));
+    }
     // bool
     if (check(TokenType::TRUE))  { consume(); return std::make_unique<BoolLit>(true); }
     if (check(TokenType::FALSE)) { consume(); return std::make_unique<BoolLit>(false); }
@@ -846,4 +908,119 @@ NodePtr Parser::parseExceptionDecl() {
     expect(TokenType::RBRACE, "expected '}'");
     while (match(TokenType::NEWLINE)) {}
     return decl;
+}
+
+// ══════════════════════════════════════════════════════════
+// Phase 5-7: 新语法解析
+// ══════════════════════════════════════════════════════════
+
+// enum Color { Red, Green, Blue }
+// enum Status { Ok = 0, Error = 1 }
+NodePtr Parser::parseEnumDecl() {
+    expect(TokenType::ENUM, "expected 'enum'");
+    std::string name = expect(TokenType::IDENTIFIER, "expected enum name").value;
+    skipNewlines();
+    expect(TokenType::LBRACE, "expected '{' after enum name");
+    skipNewlines();
+
+    auto decl = std::make_unique<EnumDecl>();
+    decl->name = name;
+    int autoValue = 0;
+
+    while (!check(TokenType::RBRACE) && !check(TokenType::EOF_TOKEN)) {
+        skipNewlines();
+        std::string vname = expect(TokenType::IDENTIFIER, "expected variant name").value;
+        NodePtr val;
+        if (match(TokenType::ASSIGN)) {
+            val = parseExpr();
+        } else {
+            val = std::make_unique<NumberLit>((double)autoValue);
+        }
+        autoValue++;
+        decl->variants.push_back({vname, std::move(val)});
+        match(TokenType::COMMA);
+        skipNewlines();
+    }
+
+    expect(TokenType::RBRACE, "expected '}'");
+    while (match(TokenType::NEWLINE)) {}
+    return decl;
+}
+
+// append Array { func sum() { ... } }
+NodePtr Parser::parseAppendDecl() {
+    expect(TokenType::APPEND, "expected 'append'");
+    std::string typeName = expect(TokenType::IDENTIFIER, "expected type name after append").value;
+    skipNewlines();
+    expect(TokenType::LBRACE, "expected '{' after type name");
+    skipNewlines();
+
+    auto decl = std::make_unique<AppendDecl>();
+    decl->typeName = typeName;
+
+    while (!check(TokenType::RBRACE) && !check(TokenType::EOF_TOKEN)) {
+        skipNewlines();
+        if (check(TokenType::FN) || check(TokenType::FUNC)) {
+            consume();
+            std::string mName = expect(TokenType::IDENTIFIER, "expected method name").value;
+            expect(TokenType::LPAREN, "expected '('");
+            std::vector<Param> params;
+            while (!check(TokenType::RPAREN) && !check(TokenType::EOF_TOKEN)) {
+                std::string pName = expect(TokenType::IDENTIFIER, "expected param name").value;
+                std::string pType;
+                if (match(TokenType::COLON))
+                    pType = expect(TokenType::IDENTIFIER, "expected type name").value;
+                params.push_back({pName, pType});
+                if (!match(TokenType::COMMA)) break;
+            }
+            expect(TokenType::RPAREN, "expected ')'");
+            std::string retType;
+            if (match(TokenType::ARROW))
+                retType = expect(TokenType::IDENTIFIER, "expected return type").value;
+            skipNewlines();
+            auto body = parseBlock();
+            decl->methods.push_back({mName, params, retType, std::move(body)});
+        } else {
+            consume(); // skip unknown
+        }
+        skipNewlines();
+    }
+
+    expect(TokenType::RBRACE, "expected '}'");
+    while (match(TokenType::NEWLINE)) {}
+    return decl;
+}
+
+// asm { "mov rax, 0" "syscall" }
+NodePtr Parser::parseAsmBlock() {
+    expect(TokenType::ASM, "expected 'asm'");
+    skipNewlines();
+    expect(TokenType::LBRACE, "expected '{' after asm");
+    skipNewlines();
+
+    auto block = std::make_unique<AsmBlock>();
+    while (!check(TokenType::RBRACE) && !check(TokenType::EOF_TOKEN)) {
+        skipNewlines();
+        if (check(TokenType::STRING)) {
+            block->instructions.push_back(current().value);
+            consume();
+        }
+        match(TokenType::COMMA);
+        skipNewlines();
+    }
+
+    expect(TokenType::RBRACE, "expected '}'");
+    while (match(TokenType::NEWLINE)) {}
+    return block;
+}
+
+// @platform("arm64") { ... }
+NodePtr Parser::parsePlatformDecl() {
+    expect(TokenType::LPAREN, "expected '(' after @platform");
+    std::string target = expect(TokenType::STRING, "expected platform target string").value;
+    expect(TokenType::RPAREN, "expected ')'");
+    skipNewlines();
+
+    auto body = parseBlock();
+    return std::make_unique<PlatformDecl>(target, std::move(body));
 }

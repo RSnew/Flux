@@ -1,7 +1,9 @@
 #include "interpreter.h"
+#include "profiler.h"
 #include <iostream>
 #include <sstream>
 #include <cmath>
+#include <cstdlib>
 #include <algorithm>
 
 // ── ChanVal 方法实现 ──────────────────────────────────────
@@ -225,7 +227,13 @@ void Interpreter::execute(Program* program) {
     // 第一遍：注册全局函数 + 初始化全局 persistent
     functions_.clear();
     for (auto& stmt : program->statements) {
-        if (auto* fn = dynamic_cast<FnDecl*>(stmt.get())) {
+        if (auto* pfn = dynamic_cast<ProfiledFnDecl*>(stmt.get())) {
+            auto* fn = dynamic_cast<FnDecl*>(pfn->fnDecl.get());
+            if (fn) {
+                functions_[fn->name] = fn;
+                Profiler::instance().markFunction(fn->name);
+            }
+        } else if (auto* fn = dynamic_cast<FnDecl*>(stmt.get())) {
             // !func: 灰度切换 — 存入 pending，在下一调用边界生效
             if (fn->forceOverride) pendingFnUpdates_[fn->name] = fn;
             else                   functions_[fn->name] = fn;
@@ -244,6 +252,7 @@ void Interpreter::execute(Program* program) {
     // 第二遍：执行顶层语句（模块声明 + 普通语句）
     for (auto& stmt : program->statements) {
         if (dynamic_cast<FnDecl*>(stmt.get()))          continue;
+        if (dynamic_cast<ProfiledFnDecl*>(stmt.get()))  continue;
         if (dynamic_cast<PersistentBlock*>(stmt.get())) continue;
         try {
             evalNode(stmt.get(), globalEnv_);
@@ -252,6 +261,9 @@ void Interpreter::execute(Program* program) {
             throw std::runtime_error(p.message);
         }
     }
+
+    // 输出 @profile 性能报告
+    Profiler::instance().report();
 }
 
 // ── REPL 增量执行（保留 globalEnv_ + functions_）──────────
@@ -564,30 +576,51 @@ Value Interpreter::callFunction(const std::string& name,
     for (size_t i = 0; i < fn->params.size(); i++)
         fnEnv->set(fn->params[i].name, i < args.size() ? args[i] : Value::Nil());
 
+    // @profile: 自动计时
+    std::unique_ptr<ProfileScope> profileScope;
+    if (Profiler::instance().isProfiled(name))
+        profileScope = std::make_unique<ProfileScope>(Profiler::instance(), name);
+
     try {
         for (auto& stmt : fn->body)
             evalNode(stmt.get(), fnEnv, mod);
     } catch (ReturnSignal& ret) {
         return ret.value;
     } catch (PanicSignal& p) {
+        lastInlineExceptionDescs_.clear();
+        // 有全局 default → 恢复为默认值
+        auto dfit = defaultBodies_.find(name);
+        if (dfit != defaultBodies_.end()) {
+            auto childEnv = std::make_shared<Environment>(globalEnv_);
+            Value result = Value::Nil();
+            for (auto* stmt : dfit->second)
+                result = evalNode(stmt, childEnv, mod);
+            return result;
+        }
         // 合并 exception 描述到错误信息（全局 + 内联）
         std::string merged = "[自动] " + p.message;
         bool hasDesc = false;
         auto dit = exceptionDescs_.find(name);
         if (dit != exceptionDescs_.end())
             for (auto& d : dit->second) { merged += "\n[描述] " + d; hasDesc = true; }
-        for (auto& d : lastInlineExceptionDescs_) { merged += "\n[描述] " + d; hasDesc = true; }
-        lastInlineExceptionDescs_.clear();
         if (hasDesc) throw PanicSignal{merged};
         throw;
     } catch (std::runtime_error& e) {
+        lastInlineExceptionDescs_.clear();
+        // 有全局 default → 恢复为默认值
+        auto dfit = defaultBodies_.find(name);
+        if (dfit != defaultBodies_.end()) {
+            auto childEnv = std::make_shared<Environment>(globalEnv_);
+            Value result = Value::Nil();
+            for (auto* stmt : dfit->second)
+                result = evalNode(stmt, childEnv, mod);
+            return result;
+        }
         std::string merged = "[自动] " + std::string(e.what());
         bool hasDesc = false;
         auto dit = exceptionDescs_.find(name);
         if (dit != exceptionDescs_.end())
             for (auto& d : dit->second) { merged += "\n[描述] " + d; hasDesc = true; }
-        for (auto& d : lastInlineExceptionDescs_) { merged += "\n[描述] " + d; hasDesc = true; }
-        lastInlineExceptionDescs_.clear();
         if (hasDesc) throw std::runtime_error(merged);
         throw;
     }
@@ -1584,6 +1617,165 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
         return Value::Nil();
     }
 
+    // ── default funcName { value } 全局默认值声明 ────────────
+    if (auto* n = dynamic_cast<DefaultDecl*>(node)) {
+        // 执行前检查：target 必须存在（同 exception 的检查逻辑）
+        auto colonPos = n->target.find(':');
+        if (colonPos != std::string::npos) {
+            std::string typeName   = n->target.substr(0, colonPos);
+            std::string methodName = n->target.substr(colonPos + 1);
+            bool found = false;
+            if (env->has(typeName)) {
+                try {
+                    Value tv = env->get(typeName);
+                    if (tv.type == Value::Type::StructType && tv.structType)
+                        found = tv.structType->findMethod(methodName) != nullptr;
+                } catch (...) {}
+            }
+            if (!found)
+                throw std::runtime_error("default target not found: " + n->target
+                    + " (struct type or method does not exist)");
+        } else {
+            bool found = functions_.count(n->target) || builtins_.count(n->target);
+            if (!found && env->has(n->target)) {
+                try {
+                    Value tv = env->get(n->target);
+                    if (tv.type == Value::Type::Function) found = true;
+                } catch (...) {}
+            }
+            if (!found)
+                throw std::runtime_error("default target not found: " + n->target
+                    + " (function does not exist)");
+        }
+        // 存储 body 的原始 AST 指针，调用出错时 eval
+        auto& bodies = defaultBodies_[n->target];
+        bodies.clear();
+        for (auto& stmt : n->body)
+            bodies.push_back(stmt.get());
+        return Value::Nil();
+    }
+
+    // ══════════════════════════════════════════════════════
+    // Phase 5-7 新节点
+    // ══════════════════════════════════════════════════════
+
+    // ── @profile 装饰的函数 ─────────────────────────────
+    if (auto* n = dynamic_cast<ProfiledFnDecl*>(node)) {
+        auto* fn = dynamic_cast<FnDecl*>(n->fnDecl.get());
+        if (!fn)
+            throw std::runtime_error("@profile: expected function declaration");
+        // 注册函数
+        functions_[fn->name] = fn;
+        // 标记为需要 profile
+        Profiler::instance().markFunction(fn->name);
+        return Value::Nil();
+    }
+
+    // ── @platform 条件编译 ──────────────────────────────
+    if (auto* n = dynamic_cast<PlatformDecl*>(node)) {
+        // 获取当前平台
+#if defined(__aarch64__) || defined(_M_ARM64)
+        std::string currentPlatform = "arm64";
+#elif defined(__riscv)
+        std::string currentPlatform = "riscv64";
+#elif defined(__x86_64__) || defined(_M_X64)
+        std::string currentPlatform = "x86_64";
+#else
+        std::string currentPlatform = "generic";
+#endif
+        // 只在目标平台上执行
+        if (n->target == currentPlatform || n->target == "generic"
+            || n->target == "any") {
+            for (auto& stmt : n->body)
+                evalNode(stmt.get(), env, mod);
+        }
+        return Value::Nil();
+    }
+
+    // ── enum 枚举 ───────────────────────────────────────
+    if (auto* n = dynamic_cast<EnumDecl*>(node)) {
+        // 创建一个 Map，每个变体名 → 值
+        auto m = std::make_shared<std::unordered_map<std::string, Value>>();
+        for (auto& v : n->variants) {
+            Value val = v.value ? evalNode(v.value.get(), env, mod) : Value::Nil();
+            (*m)[v.name] = val;
+            // 也设置反向映射：值 → 名（方便调试）
+            if (val.type == Value::Type::Number) {
+                (*m)[std::to_string((int)val.number)] = Value::Str(v.name);
+            }
+        }
+        Value enumVal = Value::MapOf(m);
+        env->set(n->name, enumVal);
+        return Value::Nil();
+    }
+
+    // ── append 扩展 ─────────────────────────────────────
+    if (auto* n = dynamic_cast<AppendDecl*>(node)) {
+        // 查找目标类型
+        if (!env->has(n->typeName))
+            throw std::runtime_error("append: type '" + n->typeName + "' not found");
+        Value tv = env->get(n->typeName);
+        if (tv.type != Value::Type::StructType || !tv.structType)
+            throw std::runtime_error("append: '" + n->typeName + "' is not a struct type");
+
+        // 将方法添加到结构体类型
+        for (auto& m : n->methods) {
+            StructTypeInfo::Method method;
+            method.name = m.name;
+            method.params = m.params;
+            method.returnType = m.returnType;
+            for (auto& s : m.body)
+                method.body.push_back(std::shared_ptr<ASTNode>(s.get(), [](ASTNode*){}));
+            tv.structType->methods.push_back(std::move(method));
+        }
+        return Value::Nil();
+    }
+
+    // ── alloc(size) ─────────────────────────────────────
+    if (auto* n = dynamic_cast<AllocExpr*>(node)) {
+        Value sz = evalNode(n->size.get(), env, mod);
+        if (sz.type != Value::Type::Number)
+            throw std::runtime_error("alloc: size must be a Number");
+        size_t bytes = (size_t)sz.number;
+        void* ptr = std::calloc(1, bytes);
+        if (!ptr)
+            throw std::runtime_error("alloc: out of memory");
+        // 返回地址作为 Number（Addr 类型在类型系统中，运行时用 double）
+        return Value::Num((double)(uintptr_t)ptr);
+    }
+
+    // ── free(ptr) ───────────────────────────────────────
+    if (auto* n = dynamic_cast<FreeStmt*>(node)) {
+        Value ptr = evalNode(n->ptr.get(), env, mod);
+        if (ptr.type != Value::Type::Number)
+            throw std::runtime_error("free: argument must be an Addr/Number");
+        void* p = (void*)(uintptr_t)ptr.number;
+        std::free(p);
+        return Value::Nil();
+    }
+
+    // ── asm {} 内联汇编 ─────────────────────────────────
+    if (auto* n = dynamic_cast<AsmBlock*>(node)) {
+        // 在解释器中不执行汇编，仅记录（编译后端使用）
+        // 输出到 stderr 用于调试
+        for (auto& inst : n->instructions) {
+            std::cerr << "\033[90m[asm] " << inst << "\033[0m\n";
+        }
+        return Value::Nil();
+    }
+
+    // ── default { value } 语句级默认值返回 ──────────────────
+    // 与 exception {} 配合，在错误条件分支中返回默认值
+    if (auto* n = dynamic_cast<DefaultStmt*>(node)) {
+        auto childEnv = std::make_shared<Environment>(env);
+        Value result = Value::Nil();
+        for (auto& stmt : n->body) {
+            result = evalNode(stmt.get(), childEnv, mod);
+        }
+        // 像 return 一样退出当前函数
+        throw ReturnSignal{result};
+    }
+
     throw std::runtime_error("unknown AST node");
 }
 
@@ -1620,13 +1812,6 @@ Value Interpreter::evalBinary(BinaryExpr* node, std::shared_ptr<Environment> env
         if (l.isTruthy()) return Value::Bool(true);
         return Value::Bool(evalNode(node->right.get(), env, mod).isTruthy());
     }
-    // ?? nil coalescing: return left if not nil, else right
-    if (node->op == "??") {
-        Value l = evalNode(node->left.get(), env, mod);
-        if (l.type != Value::Type::Nil) return l;
-        return evalNode(node->right.get(), env, mod);
-    }
-
     Value l = evalNode(node->left.get(), env, mod);
     Value r = evalNode(node->right.get(), env, mod);
     const std::string& op = node->op;

@@ -23,7 +23,9 @@ add_executable(flux
 
 # 链接 pthread（FileWatcher 使用线程）
 find_package(Threads REQUIRED)
-target_link_libraries(flux Threads::Threads)
+# 链接 OpenSSL（HTTPS 支持）
+find_package(OpenSSL REQUIRED)
+target_link_libraries(flux Threads::Threads OpenSSL::SSL OpenSSL::Crypto)
 
 # 安装
 install(TARGETS flux DESTINATION bin)
