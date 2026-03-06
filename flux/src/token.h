@@ -27,6 +27,7 @@ enum class TokenType {
     FREE,           // free 手动内存释放
     ASM,            // asm 内联汇编
     DEFAULT,        // default 错误恢复
+    TEST,           // test 测试覆盖声明
     // 运算符
     PLUS, MINUS, STAR, SLASH, PERCENT,
     EQ, NEQ, LT, GT, LEQ, GEQ,

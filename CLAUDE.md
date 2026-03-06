@@ -76,3 +76,4 @@ Source (.flux) → Lexer → Tokens → Parser → AST → TypeChecker → Inter
 - Async: `var f = obj.method.async(args)`, `f.await()`
 - Supervision: `@supervised(restart: .always, maxRetries: 3)`
 - Exception: `exception "message"`
+- Test override: `test func name() { ... }`, `test var x = 99` (use `--no-test` to strip)

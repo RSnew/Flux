@@ -237,6 +237,13 @@ void Interpreter::execute(Program* program) {
             // !func: 灰度切换 — 存入 pending，在下一调用边界生效
             if (fn->forceOverride) pendingFnUpdates_[fn->name] = fn;
             else                   functions_[fn->name] = fn;
+        } else if (auto* td = dynamic_cast<TestDecl*>(stmt.get())) {
+            // test func: 在非 --no-test 模式下覆盖已有函数
+            if (!noTest_) {
+                if (auto* fn = dynamic_cast<FnDecl*>(td->inner.get())) {
+                    functions_[fn->name] = fn;
+                }
+            }
         } else if (auto* pb = dynamic_cast<PersistentBlock*>(stmt.get())) {
             for (auto& field : pb->fields) {
                 if (!persistentStore_.count(field.name)) {
@@ -254,6 +261,11 @@ void Interpreter::execute(Program* program) {
         if (dynamic_cast<FnDecl*>(stmt.get()))          continue;
         if (dynamic_cast<ProfiledFnDecl*>(stmt.get()))  continue;
         if (dynamic_cast<PersistentBlock*>(stmt.get())) continue;
+        // test 包装的函数已在第一遍处理，跳过含 FnDecl 的 TestDecl
+        if (auto* td = dynamic_cast<TestDecl*>(stmt.get())) {
+            if (noTest_) continue;  // --no-test: 跳过所有 test 声明
+            if (dynamic_cast<FnDecl*>(td->inner.get())) continue;  // 函数已注册
+        }
         try {
             evalNode(stmt.get(), globalEnv_);
         } catch (ReturnSignal&) {
@@ -1297,6 +1309,19 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
             return Value::FuncV(std::move(fv));
         }
         return env->get(n->name);  // 抛出 undefined variable
+    }
+
+    // ── test 覆盖声明 ──
+    if (auto* n = dynamic_cast<TestDecl*>(node)) {
+        if (noTest_) return Value::Nil();  // --no-test: 跳过
+        // test var: 执行内部声明并强制覆盖
+        if (auto* vd = dynamic_cast<VarDecl*>(n->inner.get())) {
+            Value v = vd->initializer ? evalNode(vd->initializer.get(), env, mod) : Value::Nil();
+            env->set(vd->name, v);  // 强制覆盖
+            return v;
+        }
+        // test func: 已在 execute() 第一遍处理
+        return Value::Nil();
     }
 
     // ── 声明 ──

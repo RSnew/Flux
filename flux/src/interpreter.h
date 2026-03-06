@@ -333,6 +333,7 @@ public:
     // VM 模式：只做注册 + 初始化 + 模块声明，不执行普通语句
     void  initProgram(Program* program);
     void  registerBuiltin(const std::string& name, BuiltinFn fn);
+    void  setNoTest(bool v) { noTest_ = v; }
 
     // ── VM / Compiler 需要调用的公共接口 ─────────────────
     Value callFunction(const std::string& name, std::vector<Value> args,
@@ -406,4 +407,7 @@ private:
     // 调用函数值（匿名函数 / 闭包 / 具名函数引用）
     Value callFuncVal(std::shared_ptr<FuncVal> fv, std::vector<Value> args,
                       ModuleRuntime* mod = nullptr);
+
+    // ── --no-test 模式标志 ────────────────────────────────
+    bool noTest_ = false;
 };

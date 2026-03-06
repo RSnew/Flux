@@ -320,7 +320,7 @@ private:
         return {"var", "func", "return", "if", "else", "while", "true", "false",
                 "null", "for", "in", "persistent", "state", "module", "migrate",
                 "supervised", "async", "await", "spawn", "threadpool", "concurrent",
-                "interface", "exception"};
+                "interface", "exception", "test"};
     }
 
     std::unordered_map<std::string, std::string> getKeywordDocs() {
@@ -337,6 +337,7 @@ private:
             {"await",      "Wait for Future: `await expr`"},
             {"spawn",      "Fire-and-forget: `spawn { body }`"},
             {"exception",  "Error descriptions: `exception funcName { \"msg\" }`"},
+            {"test",       "Test override: `test func name() { }` replaces existing definition"},
         };
     }
 

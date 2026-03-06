@@ -52,9 +52,11 @@ static void printBanner(const std::string& file) {
 }
 
 // ── 编译并执行（热更新时复用解释器状态）──────────────────
-static bool g_useVM = false;   // --vm 标志
+static bool g_useVM  = false;   // --vm 标志
+static bool g_noTest = false;   // --no-test 标志
 
 static void runSource(const std::string& source, Interpreter& interp, bool isReload) {
+    interp.setNoTest(g_noTest);
     try {
         Lexer  lexer(source);
         auto   tokens = lexer.tokenize();
@@ -784,6 +786,9 @@ static void printHelp() {
         << "  flux registry [url]         Get/set central package registry URL\n"
         << "  flux --help                 Show this help\n"
         << "\n"
+        << CLR_BOLD << "Flags:\n" << CLR_RESET
+        << "  --no-test                   Strip all test declarations\n"
+        << "\n"
         << CLR_BOLD << "Package Manager (Feature L):\n" << CLR_RESET
         << "  flux new    <name>          Create a new Flux project\n"
         << "  flux build  [script]        Build & run project (default: run)\n"
@@ -814,7 +819,29 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    std::string sub = argv[1];
+    // ── 解析全局标志（在子命令之前）──────────────────────
+    // 将 argv 中的全局标志提取出来，剩余参数前移
+    std::vector<std::string> args;
+    for (int i = 1; i < argc; i++) {
+        std::string a = argv[i];
+        if (a == "--no-test") { g_noTest = true; continue; }
+        args.push_back(a);
+    }
+    if (args.empty()) {
+        cmdRepl();
+        return 0;
+    }
+    std::string sub = args[0];
+
+    // 重建 argc/argv 供后续使用（去除已解析的全局标志）
+    // 注意：args[0] = sub, args[1..] = 子命令参数
+    // 为简化兼容，将 argc 和 argv 指针更新
+    static std::vector<char*> newArgv;
+    static std::string progName = argv[0];
+    newArgv.push_back(&progName[0]);
+    for (auto& s : args) newArgv.push_back(&s[0]);
+    argc = (int)newArgv.size();
+    argv = newArgv.data();
 
     // ── --help ───────────────────────────────────────────
     if (sub == "--help" || sub == "-h" || sub == "help") {
@@ -1244,6 +1271,7 @@ int main(int argc, char* argv[]) {
         try {
             std::string src = readFile(target);
             Interpreter interp;
+            interp.setNoTest(g_noTest);
             Profiler::instance().clear();
 
             Lexer  lexer(src);

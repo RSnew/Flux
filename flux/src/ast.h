@@ -423,3 +423,12 @@ struct DefaultDecl : ASTNode {
     DefaultDecl(std::string t, std::vector<NodePtr> b)
         : target(std::move(t)), body(std::move(b)) {}
 };
+
+// ── test 测试覆盖声明 ────────────────────────────────────
+// test func add(a, b) { ... }  → 替换已有的 add 函数
+// test var x = 99              → 替换已有的 x 变量
+// --no-test 模式下自动跳过所有 TestDecl
+struct TestDecl : ASTNode {
+    NodePtr inner;   // 被包装的声明（FnDecl / VarDecl）
+    explicit TestDecl(NodePtr n) : inner(std::move(n)) {}
+};

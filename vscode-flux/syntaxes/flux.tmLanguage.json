@@ -68,7 +68,7 @@
         },
         "keywords-declaration": {
             "name": "storage.type.flux",
-            "match": "\\b(let|var|func|module)\\b"
+            "match": "\\b(let|var|func|module|test)\\b"
         },
         "keywords-other": {
             "patterns": [

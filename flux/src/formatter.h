@@ -394,6 +394,16 @@ private:
             return ind() + "@profile\n" + fmtStmt(n->fnDecl.get());
         }
 
+        // ── test 覆盖声明 ────────────────────────────────────
+        if (auto* n = dynamic_cast<TestDecl*>(node)) {
+            std::string inner = fmtStmt(n->inner.get());
+            // 去除内部语句的前导缩进，前缀加上 "test "
+            size_t start = inner.find_first_not_of(' ');
+            if (start != std::string::npos)
+                inner = inner.substr(start);
+            return ind() + "test " + inner;
+        }
+
         // ── @platform ────────────────────────────────────────
         if (auto* n = dynamic_cast<PlatformDecl*>(node)) {
             std::string s = ind() + "@platform(\"" + n->target + "\") {\n";

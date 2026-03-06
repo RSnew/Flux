@@ -166,6 +166,16 @@ NodePtr Parser::parseTopLevel() {
     if (check(TokenType::APPEND))     return parseAppendDecl();
     // asm — 内联汇编
     if (check(TokenType::ASM))        return parseAsmBlock();
+    // test — 测试覆盖声明
+    if (check(TokenType::TEST)) {
+        consume();
+        skipNewlines();
+        NodePtr inner;
+        if (check(TokenType::FUNC))       inner = parseFnDecl();
+        else if (check(TokenType::VAR))   inner = parseVarDecl();
+        else throw ParseError("expected 'func' or 'var' after 'test'", current().line);
+        return std::make_unique<TestDecl>(std::move(inner));
+    }
     return parseStatement();
 }
 
