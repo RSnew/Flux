@@ -93,7 +93,7 @@ assert(!(3 >= 4), "3 >= 4 should be false")
 
 // ── 12. 模块 + 数组参数 ───────────────────────────────────
 module Calc {
-    fn sum(arr: Any) -> Int {
+    func sum(arr: Any) -> Int {
         var total = 0
         for v in arr {
             total = total + v
@@ -101,7 +101,7 @@ module Calc {
         return total
     }
 
-    fn max(arr: Any) -> Int {
+    func max(arr: Any) -> Int {
         var m = arr[0]
         for v in arr {
             if v > m { m = v }

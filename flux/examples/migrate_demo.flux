@@ -6,10 +6,10 @@ module Analytics {
         lastEvent: "none",
         userId:    "anonymous"
     }
-    fn track(event) {
+    func track(event) {
         state.pageViews = state.pageViews + 1
     }
-    fn report() {
+    func report() {
         print("  v3 report: views=" + str(state.pageViews))
     }
 }

@@ -6,15 +6,15 @@ var version = "1.0"
 var count = 0
 
 // ── 函数 ──
-fn greet(name) {
+func greet(name) {
     print("Hello, " + name + "! Flux v" + version)
 }
 
-fn add(a, b) {
+func add(a, b) {
     return a + b
 }
 
-fn factorial(n) {
+func factorial(n) {
     if n <= 1 {
         return 1
     }

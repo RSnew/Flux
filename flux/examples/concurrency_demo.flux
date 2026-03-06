@@ -11,11 +11,11 @@
 // 默认：overflow: .block（安全优先，不丢任务）
 @concurrent(pool: "cpu-pool")
 module ImageProcessor {
-    fn resize(w, h) {
+    func resize(w, h) {
         Time.sleep(50)    // 模拟 CPU 密集型：50ms
         return w * h
     }
-    fn compress(quality) {
+    func compress(quality) {
         Time.sleep(30)    // 模拟 CPU 密集型：30ms
         return quality * 100
     }
@@ -24,11 +24,11 @@ module ImageProcessor {
 // 日志/采样场景：队列满时静默丢弃，不阻塞调用方
 @concurrent(pool: "io-pool", queue: 32, overflow: .drop)
 module FileService {
-    fn read(path) {
+    func read(path) {
         Time.sleep(20)    // 模拟 IO：20ms
         return "content of " + path
     }
-    fn write(path, data) {
+    func write(path, data) {
         Time.sleep(10)    // 模拟 IO：10ms
         return true
     }
@@ -37,7 +37,7 @@ module FileService {
 // 金融/关键路径：队列满时报错，不能丢
 @concurrent(pool: "order-pool", queue: 10000, overflow: .error)
 module OrderBook {
-    fn place(symbol, qty, price) {
+    func place(symbol, qty, price) {
         Time.sleep(5)
         return symbol + " x" + qty + " @" + price
     }
@@ -111,7 +111,7 @@ print("结果: " + res)
 // ── 8. 向后兼容：保留 async keyword / await keyword / spawn ──
 print("")
 print("--- 8. 向后兼容语法（async/await 关键字 + spawn）---")
-fn slow_fn(x) {
+func slow_fn(x) {
     Time.sleep(15)
     return x * 2
 }

@@ -7,24 +7,24 @@ module Counter {
         total: 0
     }
 
-    fn increment() {
+    func increment() {
         state.count = state.count + 1
         state.total = state.total + 1
     }
 
-    fn decrement() {
+    func decrement() {
         state.count = state.count - 1
     }
 
-    fn reset() {
+    func reset() {
         state.count = 0
     }
 
-    fn getValue() {
+    func getValue() {
         return state.count
     }
 
-    fn getTotal() {
+    func getTotal() {
         return state.total
     }
 }
@@ -34,12 +34,12 @@ module Logger {
         logs: 0
     }
 
-    fn log(msg) {
+    func log(msg) {
         state.logs = state.logs + 1
         print("[LOG #" + str(state.logs) + "] " + msg)
     }
 
-    fn getLogs() {
+    func getLogs() {
         return state.logs
     }
 }

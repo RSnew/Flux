@@ -136,7 +136,7 @@ void Interpreter::registerBuiltins() {
         return Value::Num(0);
     });
     registerBuiltin("type", [](std::vector<Value> args) -> Value {
-        if (args.empty()) return Value::Str("nil");
+        if (args.empty()) return Value::Str("null");
         switch (args[0].type) {
             case Value::Type::Number: return Value::Str("Number");
             case Value::Type::String: return Value::Str("String");

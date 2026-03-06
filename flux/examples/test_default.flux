@@ -28,8 +28,8 @@ assert(r2 == 0, "div by zero should return default 0")
 
 // ── Test 2: 字符串默认值 ────────────────────────────────
 func safe_greet(name) {
-    if (name == nil) {
-        exception { "name 参数为 nil" }
+    if (name == null) {
+        exception { "name 参数为 null" }
         default { "Hello, Guest!" }
     }
     return "Hello, " + name + "!"
@@ -39,9 +39,9 @@ var r3 = safe_greet("Flux")
 print("Test 2a: " + r3)
 assert(r3 == "Hello, Flux!", "normal greet")
 
-var r4 = safe_greet(nil)
+var r4 = safe_greet(null)
 print("Test 2b: " + r4)
-assert(r4 == "Hello, Guest!", "nil should return default greeting")
+assert(r4 == "Hello, Guest!", "null should return default greeting")
 
 // ── Test 3: 多条件 default ──────────────────────────────
 exception clamp {

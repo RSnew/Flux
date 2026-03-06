@@ -3,15 +3,14 @@
 
 const std::unordered_map<std::string, TokenType> Lexer::keywords_ = {
     {"var",        TokenType::VAR},
-    {"fn",         TokenType::FN},
-    {"func",       TokenType::FUNC},      // Spec v1.0: alias for fn
+    {"func",       TokenType::FUNC},
     {"return",     TokenType::RETURN},
     {"if",         TokenType::IF},
     {"else",       TokenType::ELSE},
     {"while",      TokenType::WHILE},
     {"true",       TokenType::TRUE},
     {"false",      TokenType::FALSE},
-    {"nil",        TokenType::NIL},
+    {"null",       TokenType::NULL_TOKEN},
     {"for",        TokenType::FOR},
     {"in",         TokenType::IN},
     {"persistent", TokenType::PERSISTENT},

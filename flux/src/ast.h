@@ -347,7 +347,7 @@ struct FuncExpr : ASTNode {
 // 方法：exception Point:move { "描述" } target = "Point:move"
 // 内联：exception { "描述" }           target = ""（函数体内部）
 struct ExceptionDecl : ASTNode {
-    std::string              target;    // "" = 内联, "fn" = 全局, "Type:method" = 方法
+    std::string              target;    // "" = 内联, "func" = 全局, "Type:method" = 方法
     std::vector<std::string> messages;
 };
 

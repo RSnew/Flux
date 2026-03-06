@@ -302,12 +302,12 @@ private:
 
     std::unordered_map<std::string, std::string> getBuiltins() {
         return {
-            {"print",   "print(...args) → Nil — Print values space-separated"},
+            {"print",   "print(...args) → Null — Print values space-separated"},
             {"str",     "str(Any) → String — Convert to string"},
             {"num",     "num(Any) → Number — Convert to number"},
             {"sqrt",    "sqrt(Number) → Number — Square root"},
             {"panic",   "panic(msg) → never — Trigger panic"},
-            {"assert",  "assert(cond, msg?) → Nil — Assert condition"},
+            {"assert",  "assert(cond, msg?) → Null — Assert condition"},
             {"range",   "range(n) → Array — Generate [0..n-1]"},
             {"len",     "len(x) → Number — Length of string/array/map"},
             {"type",    "type(x) → String — Type name"},
@@ -317,8 +317,8 @@ private:
     }
 
     std::vector<std::string> getKeywords() {
-        return {"var", "fn", "func", "return", "if", "else", "while", "true", "false",
-                "nil", "for", "in", "persistent", "state", "module", "migrate",
+        return {"var", "func", "return", "if", "else", "while", "true", "false",
+                "null", "for", "in", "persistent", "state", "module", "migrate",
                 "supervised", "async", "await", "spawn", "threadpool", "concurrent",
                 "interface", "exception"};
     }
@@ -326,8 +326,7 @@ private:
     std::unordered_map<std::string, std::string> getKeywordDocs() {
         return {
             {"var",        "Variable declaration: `var name = value` or `var name: Type = value`"},
-            {"fn",         "Function declaration: `fn name(params) -> ReturnType { body }`"},
-            {"func",       "Alias for `fn`"},
+            {"func",       "Function declaration: `func name(params) -> ReturnType { body }`"},
             {"return",     "Return from function: `return expr`"},
             {"if",         "Conditional: `if cond { } else { }`"},
             {"while",      "Loop: `while cond { body }`"},
@@ -364,11 +363,11 @@ private:
                      {"post", 2, "Http.post(url, body, type?) → String", ""},
                      {"put", 2, "Http.put(url, body, type?) → String", ""},
                      {"delete", 2, "Http.delete(url) → String", ""},
-                     {"serve", 2, "Http.serve(port, routes) → Nil", ""}};
+                     {"serve", 2, "Http.serve(port, routes) → Null", ""}};
         } else if (mod == "Time") {
             items = {{"now", 2, "Time.now() → Number", ""},
                      {"clock", 2, "Time.clock() → Number", ""},
-                     {"sleep", 2, "Time.sleep(ms) → Nil", ""},
+                     {"sleep", 2, "Time.sleep(ms) → Null", ""},
                      {"format", 2, "Time.format(ts, fmt?) → String", ""},
                      {"diff", 2, "Time.diff(a, b) → Number", ""}};
         } else if (mod == "Math") {
@@ -404,11 +403,11 @@ private:
                      {"notEqual", 2, "Test.notEqual(actual, expected, msg?)", ""},
                      {"isTrue", 2, "Test.isTrue(cond, msg?)", ""},
                      {"isFalse", 2, "Test.isFalse(cond, msg?)", ""},
-                     {"isNil", 2, "Test.isNil(val, msg?)", ""}};
+                     {"isNull", 2, "Test.isNull(val, msg?)", ""}};
         } else if (mod == "Chan") {
             items = {{"make", 2, "Chan.make(cap?) → Chan", ""}};
         } else if (mod == "Env") {
-            items = {{"get", 2, "Env.get(name) → String|Nil", ""}};
+            items = {{"get", 2, "Env.get(name) → String|Null", ""}};
         }
 
         return items;

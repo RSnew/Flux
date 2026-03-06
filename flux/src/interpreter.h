@@ -106,7 +106,7 @@ struct Value {
     }
 
     std::string toString() const {
-        if (type == Type::Nil)    return "nil";
+        if (type == Type::Nil)    return "null";
         if (type == Type::Number) {
             if (number == (long long)number) return std::to_string((long long)number);
             return std::to_string(number);
@@ -143,7 +143,7 @@ struct Value {
         if (type == Type::StructInst) return "<StructInst>";
         if (type == Type::Interface)  return "<Interface>";
         if (type == Type::Function)  return "<Function>";
-        return "nil";
+        return "null";
     }
 
     // Full toString for struct instances (defined after StructInstInfo is complete)

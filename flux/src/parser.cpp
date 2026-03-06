@@ -131,8 +131,8 @@ NodePtr Parser::parseTopLevel() {
         if (check(TokenType::PROFILE)) {
             consume();
             skipNewlines();
-            if (!check(TokenType::FN) && !check(TokenType::FUNC))
-                throw ParseError("@profile must be followed by fn/func declaration", current().line);
+            if (!check(TokenType::FUNC))
+                throw ParseError("@profile must be followed by func declaration", current().line);
             auto fn = parseFnDecl();
             return std::make_unique<ProfiledFnDecl>(std::move(fn));
         }
@@ -146,16 +146,16 @@ NodePtr Parser::parseTopLevel() {
         throw ParseError("unknown annotation (expected supervised, concurrent, threadpool, profile, or platform)", current().line);
     }
 
-    // func / fn (both introduce function declarations)
-    if (check(TokenType::FN) || check(TokenType::FUNC))  return parseFnDecl();
+    // func (function declaration)
+    if (check(TokenType::FUNC))  return parseFnDecl();
     if (check(TokenType::VAR))        return parseVarDecl();
     if (check(TokenType::PERSISTENT)) return parsePersistentBlock();
     if (check(TokenType::MODULE))     return parseModuleDecl();
-    // !var / !func — 热更新强制覆盖 (NOT token followed by var/func/fn)
+    // !var / !func — 热更新强制覆盖 (NOT token followed by var/func)
     if (check(TokenType::NOT)) {
         auto& nx = peek();
         if (nx.type == TokenType::VAR)  { consume(); return parseVarDecl(true); }
-        if (nx.type == TokenType::FN || nx.type == TokenType::FUNC)
+        if (nx.type == TokenType::FUNC)
             { consume(); return parseFnDecl(true); }
     }
     // exception — 顶层错误描述声明
@@ -204,7 +204,7 @@ NodePtr Parser::parseModuleDecl(RestartPolicy rp, int maxRetries,
 
     std::vector<NodePtr> body;
     while (!check(TokenType::RBRACE) && !check(TokenType::EOF_TOKEN)) {
-        if      (check(TokenType::FN) || check(TokenType::FUNC)) body.push_back(parseFnDecl());
+        if      (check(TokenType::FUNC)) body.push_back(parseFnDecl());
         else if (check(TokenType::PERSISTENT)) body.push_back(parsePersistentBlock());
         else if (check(TokenType::MIGRATE))    body.push_back(parseMigrateBlock());
         else if (check(TokenType::VAR))        body.push_back(parseVarDecl());
@@ -243,9 +243,8 @@ NodePtr Parser::parsePersistentBlock() {
 }
 
 std::unique_ptr<FnDecl> Parser::parseFnDecl(bool forceOverride) {
-    // Accept both fn and func keywords
-    if (check(TokenType::FN) || check(TokenType::FUNC)) consume();
-    else throw ParseError("expected 'fn' or 'func'", current().line);
+    if (check(TokenType::FUNC)) consume();
+    else throw ParseError("expected 'func'", current().line);
     std::string name = expect(TokenType::IDENTIFIER, "expected function name").value;
     expect(TokenType::LPAREN, "expected '('");
 
@@ -272,7 +271,7 @@ std::unique_ptr<FnDecl> Parser::parseFnDecl(bool forceOverride) {
 NodePtr Parser::parseStatement() {
     skipNewlines();
     if (check(TokenType::VAR))    return parseVarDecl();
-    if (check(TokenType::FN) || check(TokenType::FUNC)) return parseFnDecl();
+    if (check(TokenType::FUNC)) return parseFnDecl();
     if (check(TokenType::IF))     return parseIf();
     if (check(TokenType::WHILE))  return parseWhile();
     if (check(TokenType::FOR))    return parseForIn();
@@ -282,7 +281,7 @@ NodePtr Parser::parseStatement() {
     if (check(TokenType::NOT)) {
         auto& nx = peek();
         if (nx.type == TokenType::VAR)  { consume(); return parseVarDecl(true); }
-        if (nx.type == TokenType::FN || nx.type == TokenType::FUNC)
+        if (nx.type == TokenType::FUNC)
             { consume(); return parseFnDecl(true); }
     }
     // inline exception { "..." }
@@ -563,8 +562,8 @@ NodePtr Parser::parsePrimary() {
         consume();
         return std::make_unique<StringLit>(v);
     }
-    // nil 字面量
-    if (check(TokenType::NIL))   { consume(); return std::make_unique<NilLit>(); }
+    // null 字面量
+    if (check(TokenType::NULL_TOKEN))   { consume(); return std::make_unique<NilLit>(); }
     // alloc(size) 表达式
     if (check(TokenType::ALLOC)) {
         consume();
@@ -716,7 +715,7 @@ NodePtr Parser::parsePrimary() {
                 if      (check(TokenType::IDENTIFIER)) member = consume().value;
                 else if (check(TokenType::ASYNC))      { consume(); member = "async"; }
                 else if (check(TokenType::AWAIT))      { consume(); member = "await"; }
-                else if (check(TokenType::FUNC) || check(TokenType::FN))
+                else if (check(TokenType::FUNC))
                                                        { consume(); member = "func"; }
                 else throw ParseError("expected member name after '.'", current().line);
 
@@ -791,7 +790,7 @@ NodePtr Parser::parseStructLit(std::string interfaceName) {
         skipNewlines();
         if (check(TokenType::RBRACE)) break;
 
-        if (check(TokenType::FN) || check(TokenType::FUNC)) {
+        if (check(TokenType::FUNC)) {
             // struct method: func name(params) { body }
             consume(); // fn / func
             StructMethodDef m;
@@ -843,7 +842,7 @@ NodePtr Parser::parseInterfaceLit() {
         skipNewlines();
         if (check(TokenType::RBRACE)) break;
 
-        if (check(TokenType::FN) || check(TokenType::FUNC)) {
+        if (check(TokenType::FUNC)) {
             consume(); // fn / func
             InterfaceMethodSig sig;
             sig.name = expect(TokenType::IDENTIFIER, "expected method name").value;
@@ -960,7 +959,7 @@ NodePtr Parser::parseAppendDecl() {
 
     while (!check(TokenType::RBRACE) && !check(TokenType::EOF_TOKEN)) {
         skipNewlines();
-        if (check(TokenType::FN) || check(TokenType::FUNC)) {
+        if (check(TokenType::FUNC)) {
             consume();
             std::string mName = expect(TokenType::IDENTIFIER, "expected method name").value;
             expect(TokenType::LPAREN, "expected '('");

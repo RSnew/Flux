@@ -2,20 +2,20 @@
 // Flux Language Spec v1.0 — Feature Showcase
 // ============================================================
 
-// ── 1. func keyword (alias for fn) ──────────────────────────
+// ── 1. func keyword ──────────────────────────────────────────
 func greet(name) {
     return "Hello, " + name + "!"
 }
 print(greet("Flux"))
 
-// ── 2. ?? nil-coalescing operator ──────────────────────────
-var missing = nil
+// ── 2. ?? null-coalescing operator ──────────────────────────
+var missing = null
 var value   = missing ?? "default"
-print("nil coalesce: " + value)
+print("null coalesce: " + value)
 
 var found  = "real"
 var result = found ?? "fallback"
-print("nil coalesce found: " + result)
+print("null coalesce found: " + result)
 
 // ── 3. Struct literals with methods ────────────────────────
 var Point = {

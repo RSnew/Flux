@@ -62,14 +62,14 @@ Source (.flux) → Lexer → Tokens → Parser → AST → TypeChecker → Inter
 - The interpreter maintains a `std::map<std::string, Value>` environment
 - Modules have isolated environments with optional persistent state
 - Hot reload re-runs the full file while preserving persistent state
-- `fn` and `func` are both valid function keywords
+- `func` is the function keyword (`fn` was removed)
 - String interpolation uses `\(expr)` syntax (Swift-style)
 
 ## Flux Language Quick Reference
 
 - Variables: `var x = 42`, `var name: String = "Flux"`, `!var forced = 0`
-- Functions: `fn foo(a, b) { ... }` or `func foo(a, b) { ... }`
-- Modules: `module Name { persistent { key: val } fn method() { ... } }`
+- Functions: `func foo(a, b) { ... }`
+- Modules: `module Name { persistent { key: val } func method() { ... } }`
 - Interfaces: `var Shape: interface = { func area() }`
 - Structs: `var Circle = Shape { radius: 1, func area() { ... } }`
 - Concurrency: `@threadpool(name: "pool", size: 4)` + `@concurrent(pool: "pool")`
