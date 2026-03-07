@@ -342,7 +342,7 @@ private:
     }
 
     std::vector<std::string> getStdlibModules() {
-        return {"File", "Json", "Http", "Time", "Chan", "Math", "Set", "Log", "Env", "Test"};
+        return {"File", "Json", "Http", "Time", "Chan", "Math", "Set", "Log", "Env", "Test", "String"};
     }
 
     std::vector<LspCompletionItem> getModuleMethods(const std::string& mod) {
@@ -354,7 +354,16 @@ private:
                      {"append", 2, "File.append(path, content) → Bool", ""},
                      {"exists", 2, "File.exists(path) → Bool", ""},
                      {"lines", 2, "File.lines(path) → Array", ""},
-                     {"delete", 2, "File.delete(path) → Bool", ""}};
+                     {"delete", 2, "File.delete(path) → Bool", ""},
+                     {"rename", 2, "File.rename(old, new) → Bool", ""},
+                     {"copy", 2, "File.copy(src, dst) → Bool", ""},
+                     {"size", 2, "File.size(path) → Number", ""},
+                     {"isDir", 2, "File.isDir(path) → Bool", ""},
+                     {"mkdir", 2, "File.mkdir(path) → Bool", ""},
+                     {"listDir", 2, "File.listDir(path) → Array", ""},
+                     {"ext", 2, "File.ext(path) → String", ""},
+                     {"basename", 2, "File.basename(path) → String", ""},
+                     {"dirname", 2, "File.dirname(path) → String", ""}};
         } else if (mod == "Json") {
             items = {{"parse", 2, "Json.parse(str) → Any", ""},
                      {"stringify", 2, "Json.stringify(value) → String", ""},
@@ -370,7 +379,10 @@ private:
                      {"clock", 2, "Time.clock() → Number", ""},
                      {"sleep", 2, "Time.sleep(ms) → Null", ""},
                      {"format", 2, "Time.format(ts, fmt?) → String", ""},
-                     {"diff", 2, "Time.diff(a, b) → Number", ""}};
+                     {"diff", 2, "Time.diff(a, b) → Number", ""},
+                     {"millis", 2, "Time.millis() → Number (ms)", ""},
+                     {"measure", 2, "Time.measure(start_ns) → Number (ms)", ""},
+                     {"date", 2, "Time.date(ts?) → Map", ""}};
         } else if (mod == "Math") {
             items = {{"abs", 2, "Math.abs(x) → Number", ""},
                      {"floor", 2, "Math.floor(x) → Number", ""},
@@ -382,8 +394,19 @@ private:
                      {"log", 2, "Math.log(x) → Number", ""},
                      {"sin", 2, "Math.sin(x) → Number", ""},
                      {"cos", 2, "Math.cos(x) → Number", ""},
+                     {"sqrt", 2, "Math.sqrt(x) → Number", ""},
+                     {"tan", 2, "Math.tan(x) → Number", ""},
+                     {"atan", 2, "Math.atan(x) → Number", ""},
+                     {"atan2", 2, "Math.atan2(y, x) → Number", ""},
+                     {"log2", 2, "Math.log2(x) → Number", ""},
+                     {"log10", 2, "Math.log10(x) → Number", ""},
+                     {"exp", 2, "Math.exp(x) → Number", ""},
+                     {"clamp", 2, "Math.clamp(val, lo, hi) → Number", ""},
+                     {"sign", 2, "Math.sign(x) → Number", ""},
                      {"random", 2, "Math.random() → Number [0,1)", ""},
-                     {"PI", 2, "Math.PI() → 3.14159...", ""}};
+                     {"PI", 2, "Math.PI() → 3.14159...", ""},
+                     {"E", 2, "Math.E() → 2.71828...", ""},
+                     {"INF", 2, "Math.INF() → Infinity", ""}};
         } else if (mod == "Set") {
             items = {{"new", 2, "Set.new() → Set", ""},
                      {"from", 2, "Set.from(array) → Set", ""},
@@ -393,7 +416,9 @@ private:
                      {"size", 2, "Set.size(set) → Number", ""},
                      {"toArray", 2, "Set.toArray(set) → Array", ""},
                      {"union", 2, "Set.union(a, b) → Set", ""},
-                     {"intersect", 2, "Set.intersect(a, b) → Set", ""}};
+                     {"intersect", 2, "Set.intersect(a, b) → Set", ""},
+                     {"diff", 2, "Set.diff(a, b) → Set", ""},
+                     {"equals", 2, "Set.equals(a, b) → Bool", ""}};
         } else if (mod == "Log") {
             items = {{"info", 2, "Log.info(...args)", ""},
                      {"warn", 2, "Log.warn(...args)", ""},
@@ -408,7 +433,24 @@ private:
         } else if (mod == "Chan") {
             items = {{"make", 2, "Chan.make(cap?) → Chan", ""}};
         } else if (mod == "Env") {
-            items = {{"get", 2, "Env.get(name) → String|Null", ""}};
+            items = {{"get", 2, "Env.get(name) → String|Null", ""},
+                     {"set", 2, "Env.set(name, value) → Bool", ""},
+                     {"has", 2, "Env.has(name) → Bool", ""},
+                     {"unset", 2, "Env.unset(name) → Bool", ""}};
+        } else if (mod == "String") {
+            items = {{"replace", 2, "String.replace(str, old, new) → String", ""},
+                     {"startsWith", 2, "String.startsWith(str, prefix) → Bool", ""},
+                     {"endsWith", 2, "String.endsWith(str, suffix) → Bool", ""},
+                     {"repeat", 2, "String.repeat(str, n) → String", ""},
+                     {"indexOf", 2, "String.indexOf(str, sub) → Number", ""},
+                     {"slice", 2, "String.slice(str, start, end?) → String", ""},
+                     {"charAt", 2, "String.charAt(str, index) → String", ""},
+                     {"padLeft", 2, "String.padLeft(str, len, fill?) → String", ""},
+                     {"padRight", 2, "String.padRight(str, len, fill?) → String", ""},
+                     {"chars", 2, "String.chars(str) → Array", ""},
+                     {"code", 2, "String.code(str) → Number", ""},
+                     {"fromCode", 2, "String.fromCode(n) → String", ""},
+                     {"reverse", 2, "String.reverse(str) → String", ""}};
         }
 
         return items;

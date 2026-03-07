@@ -220,7 +220,7 @@ std::vector<Token> Lexer::tokenize() {
                 // .always / .never 枚举值
                 if (pos_ < source_.size() && std::isalpha(peek())) {
                     std::string word;
-                    while (pos_ < source_.size() && std::isalpha(peek()))
+                    while (pos_ < source_.size() && (std::isalnum(peek()) || peek() == '_'))
                         word += advance();
                     if      (word == "always") tokens.push_back({TokenType::DOT_ALWAYS, ".always", line_});
                     else if (word == "never")  tokens.push_back({TokenType::DOT_NEVER,  ".never",  line_});
