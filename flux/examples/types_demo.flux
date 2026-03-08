@@ -1,8 +1,8 @@
-fn double(n: Int) -> Int {
+func double(n: Int) -> Int {
     return n * 2
 }
 
-fn triple(n: Int) -> Int {
+func triple(n: Int) -> Int {
     return n * 3
 }
 

@@ -60,7 +60,7 @@ module Stats {
         history: 0
     }
 
-    fn sum(arr: Any) -> Int {
+    func sum(arr: Any) -> Int {
         var total = 0
         for x in arr {
             total = total + x
@@ -69,7 +69,7 @@ module Stats {
         return total
     }
 
-    fn max(arr: Any) -> Int {
+    func max(arr: Any) -> Int {
         var m = arr[0]
         for x in arr {
             if x > m { m = x }

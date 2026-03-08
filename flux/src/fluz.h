@@ -78,7 +78,7 @@ inline bool isReservedName(const std::string& name) {
         "delete", "remove", "keys", "values", "entries",
         "send", "recv", "tryRecv", "close", "isClosed",
         "await", "isReady", "value",
-        "nil", "true", "false",
+        "null", "true", "false",
         "self", "state", "struct",
         "Math", "IO", "Net", "Time", "JSON", "OS",
         "toString", "toNumber", "typeof", "assert", "panic",

@@ -347,7 +347,7 @@ struct FuncExpr : ASTNode {
 // 方法：exception Point:move { "描述" } target = "Point:move"
 // 内联：exception { "描述" }           target = ""（函数体内部）
 struct ExceptionDecl : ASTNode {
-    std::string              target;    // "" = 内联, "fn" = 全局, "Type:method" = 方法
+    std::string              target;    // "" = 内联, "func" = 全局, "Type:method" = 方法
     std::vector<std::string> messages;
 };
 
@@ -422,4 +422,13 @@ struct DefaultDecl : ASTNode {
     std::vector<NodePtr> body;    // 默认值块
     DefaultDecl(std::string t, std::vector<NodePtr> b)
         : target(std::move(t)), body(std::move(b)) {}
+};
+
+// ── test 测试覆盖声明 ────────────────────────────────────
+// test func add(a, b) { ... }  → 替换已有的 add 函数
+// test var x = 99              → 替换已有的 x 变量
+// --no-test 模式下自动跳过所有 TestDecl
+struct TestDecl : ASTNode {
+    NodePtr inner;   // 被包装的声明（FnDecl / VarDecl）
+    explicit TestDecl(NodePtr n) : inner(std::move(n)) {}
 };

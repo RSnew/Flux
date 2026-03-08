@@ -5,7 +5,7 @@ enum class TokenType {
     // 字面量
     NUMBER, STRING, IDENTIFIER,
     // 关键字
-    VAR, FN, FUNC, RETURN, IF, ELSE, WHILE, TRUE, FALSE, NIL,
+    VAR, FUNC, RETURN, IF, ELSE, WHILE, TRUE, FALSE, NULL_TOKEN,
     FOR, IN,
     PERSISTENT, STATE, MODULE, MIGRATE,
     SUPERVISED, AT,
@@ -27,6 +27,7 @@ enum class TokenType {
     FREE,           // free 手动内存释放
     ASM,            // asm 内联汇编
     DEFAULT,        // default 错误恢复
+    TEST,           // test 测试覆盖声明
     // 运算符
     PLUS, MINUS, STAR, SLASH, PERCENT,
     EQ, NEQ, LT, GT, LEQ, GEQ,

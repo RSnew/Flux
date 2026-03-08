@@ -4,13 +4,13 @@
 //
 // 支持的语法子集：
 //   - var 声明 + 赋值
-//   - fn / func 函数声明 + 调用
+//   - func 函数声明 + 调用
 //   - if / else 条件
 //   - while 循环
 //   - for item in array { } 迭代
 //   - return 语句
 //   - 算术/比较/逻辑运算符
-//   - 数字/字符串/布尔/nil 字面量
+//   - 数字/字符串/布尔/null 字面量
 //   - 数组字面量 + 下标访问
 //   - print() / str() / len() / range() / type() 内置函数
 //   - 字符串插值基础支持
@@ -20,22 +20,22 @@
 // 工具函数
 // ─────────────────────────────────────────────────────────
 
-fn is_digit(c) {
+func is_digit(c) {
     var digits = "0123456789"
     return digits.contains(c)
 }
 
-fn is_alpha(c) {
+func is_alpha(c) {
     var letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_"
     return letters.contains(c)
 }
 
-fn is_alnum(c) {
+func is_alnum(c) {
     if (is_alpha(c)) { return true }
     return is_digit(c)
 }
 
-fn is_space(c) {
+func is_space(c) {
     if (c == " ") { return true }
     if (c == "\t") { return true }
     return c == "\r"
@@ -46,7 +46,7 @@ fn is_space(c) {
 // ═══════════════════════════════════════════════════════════
 // Token 结构: Map { type: "...", value: "...", line: N }
 
-fn make_token(tp, val, line) {
+func make_token(tp, val, line) {
     var t = Map()
     t.set("type", tp)
     t.set("value", val)
@@ -54,7 +54,7 @@ fn make_token(tp, val, line) {
     return t
 }
 
-fn tokenize(source) {
+func tokenize(source) {
     var tokens = []
     var pos = 0
     var line = 1
@@ -120,8 +120,7 @@ fn tokenize(source) {
             }
             // 关键字检查
             if (word == "var") { tokens.push(make_token("VAR", word, line)) }
-            else if (word == "fn") { tokens.push(make_token("FN", word, line)) }
-            else if (word == "func") { tokens.push(make_token("FN", word, line)) }
+            else if (word == "func") { tokens.push(make_token("FUNC", word, line)) }
             else if (word == "return") { tokens.push(make_token("RETURN", word, line)) }
             else if (word == "if") { tokens.push(make_token("IF", word, line)) }
             else if (word == "else") { tokens.push(make_token("ELSE", word, line)) }
@@ -130,7 +129,7 @@ fn tokenize(source) {
             else if (word == "in") { tokens.push(make_token("IN", word, line)) }
             else if (word == "true") { tokens.push(make_token("TRUE", word, line)) }
             else if (word == "false") { tokens.push(make_token("FALSE", word, line)) }
-            else if (word == "nil") { tokens.push(make_token("NIL", word, line)) }
+            else if (word == "null") { tokens.push(make_token("NULL", word, line)) }
             else if (word == "not") { tokens.push(make_token("NOT", "!", line)) }
             else { tokens.push(make_token("ID", word, line)) }
         } else if (c == "+") {
@@ -221,52 +220,52 @@ fn tokenize(source) {
 
 var parser_ = Map()
 
-fn p_init(tokens) {
+func p_init(tokens) {
     parser_.set("tokens", tokens)
     parser_.set("pos", 0)
 }
 
-fn p_cur() {
+func p_cur() {
     var tokens = parser_.get("tokens")
     var pos = parser_.get("pos")
     if (pos >= len(tokens)) { return tokens[len(tokens) - 1] }
     return tokens[pos]
 }
 
-fn p_peek(offset) {
+func p_peek(offset) {
     var tokens = parser_.get("tokens")
     var pos = parser_.get("pos") + offset
     if (pos >= len(tokens)) { return tokens[len(tokens) - 1] }
     return tokens[pos]
 }
 
-fn p_advance() {
+func p_advance() {
     var t = p_cur()
     parser_.set("pos", parser_.get("pos") + 1)
     return t
 }
 
-fn p_check(tp) {
+func p_check(tp) {
     return p_cur().get("type") == tp
 }
 
-fn p_match(tp) {
+func p_match(tp) {
     if (p_check(tp)) { p_advance() ; return true }
     return false
 }
 
-fn p_expect(tp, msg) {
+func p_expect(tp, msg) {
     if (!p_check(tp)) {
         panic("Parse error line \(p_cur().get("line")): \(msg) (got '\(p_cur().get("value"))')")
     }
     return p_advance()
 }
 
-fn p_skip_nl() {
+func p_skip_nl() {
     while (p_check("NEWLINE")) { p_advance() }
 }
 
-fn make_node(kind) {
+func make_node(kind) {
     var n = Map()
     n.set("node", kind)
     return n
@@ -274,11 +273,11 @@ fn make_node(kind) {
 
 // ── 表达式解析 ──────────────────────────────────────────
 
-fn parse_expr() {
+func parse_expr() {
     return parse_or()
 }
 
-fn parse_or() {
+func parse_or() {
     var left = parse_and()
     while (p_check("OR")) {
         p_advance()
@@ -292,7 +291,7 @@ fn parse_or() {
     return left
 }
 
-fn parse_and() {
+func parse_and() {
     var left = parse_eq()
     while (p_check("AND")) {
         p_advance()
@@ -306,7 +305,7 @@ fn parse_and() {
     return left
 }
 
-fn parse_eq() {
+func parse_eq() {
     var left = parse_cmp()
     while (p_check("EQ") || p_check("NEQ")) {
         var op = p_advance().get("value")
@@ -320,7 +319,7 @@ fn parse_eq() {
     return left
 }
 
-fn parse_cmp() {
+func parse_cmp() {
     var left = parse_add()
     while (p_check("LT") || p_check("GT") || p_check("LEQ") || p_check("GEQ")) {
         var op = p_advance().get("value")
@@ -334,7 +333,7 @@ fn parse_cmp() {
     return left
 }
 
-fn parse_add() {
+func parse_add() {
     var left = parse_mul()
     while (p_check("PLUS") || p_check("MINUS")) {
         var op = p_advance().get("value")
@@ -348,7 +347,7 @@ fn parse_add() {
     return left
 }
 
-fn parse_mul() {
+func parse_mul() {
     var left = parse_unary()
     while (p_check("STAR") || p_check("SLASH") || p_check("PERCENT")) {
         var op = p_advance().get("value")
@@ -362,7 +361,7 @@ fn parse_mul() {
     return left
 }
 
-fn parse_unary() {
+func parse_unary() {
     if (p_check("MINUS")) {
         p_advance()
         var operand = parse_unary()
@@ -382,7 +381,7 @@ fn parse_unary() {
     return parse_postfix()
 }
 
-fn parse_postfix() {
+func parse_postfix() {
     var expr = parse_primary()
     // 下标访问 expr[index] 和方法调用 expr.method(args) 链
     var cont = true
@@ -429,7 +428,7 @@ fn parse_postfix() {
     return expr
 }
 
-fn parse_primary() {
+func parse_primary() {
     // 数字
     if (p_check("NUMBER")) {
         var t = p_advance()
@@ -447,8 +446,8 @@ fn parse_primary() {
     // true / false
     if (p_check("TRUE"))  { p_advance() ; var n = make_node("bool") ; n.set("value", true) ; return n }
     if (p_check("FALSE")) { p_advance() ; var n = make_node("bool") ; n.set("value", false) ; return n }
-    // nil
-    if (p_check("NIL"))   { p_advance() ; return make_node("nil") }
+    // null
+    if (p_check("NULL"))   { p_advance() ; return make_node("null") }
 
     // 数组字面量 [1, 2, 3]
     if (p_check("LBRACKET")) {
@@ -507,7 +506,7 @@ fn parse_primary() {
 
 // ── 语句解析 ────────────────────────────────────────────
 
-fn parse_block() {
+func parse_block() {
     p_expect("LBRACE", "expected '{'")
     p_skip_nl()
     var stmts = []
@@ -519,7 +518,7 @@ fn parse_block() {
     return stmts
 }
 
-fn parse_stmt() {
+func parse_stmt() {
     p_skip_nl()
 
     // var x = expr
@@ -536,8 +535,8 @@ fn parse_stmt() {
         return n
     }
 
-    // fn name(params) { body }
-    if (p_check("FN")) {
+    // func name(params) { body }
+    if (p_check("FUNC")) {
         p_advance()
         var name = p_expect("ID", "expected function name").get("value")
         p_expect("LPAREN", "expected '('")
@@ -619,7 +618,7 @@ fn parse_stmt() {
     // return expr
     if (p_check("RETURN")) {
         p_advance()
-        var val = nil
+        var val = null
         if (!p_check("NEWLINE") && !p_check("RBRACE") && !p_check("EOF")) {
             val = parse_expr()
         }
@@ -676,7 +675,7 @@ fn parse_stmt() {
     return n
 }
 
-fn parse_program(tokens) {
+func parse_program(tokens) {
     p_init(tokens)
     var stmts = []
     p_skip_nl()
@@ -694,24 +693,24 @@ fn parse_program(tokens) {
 
 // ReturnSignal 用 Map 表示: { signal: "return", value: ... }
 
-fn env_new() {
+func env_new() {
     return [Map()]
 }
 
-fn env_push(env) {
+func env_push(env) {
     env.push(Map())
 }
 
-fn env_pop(env) {
+func env_pop(env) {
     env.pop()
 }
 
-fn env_set(env, name, val) {
+func env_set(env, name, val) {
     var top = env[len(env) - 1]
     top.set(name, val)
 }
 
-fn env_get(env, name) {
+func env_get(env, name) {
     var i = len(env) - 1
     while (i >= 0) {
         var scope = env[i]
@@ -721,7 +720,7 @@ fn env_get(env, name) {
     panic("undefined variable: \(name)")
 }
 
-fn env_has(env, name) {
+func env_has(env, name) {
     var i = len(env) - 1
     while (i >= 0) {
         if (env[i].has(name)) { return true }
@@ -730,11 +729,11 @@ fn env_has(env, name) {
     return false
 }
 
-fn env_assign(env, name, val) {
+func env_assign(env, name, val) {
     var i = len(env) - 1
     while (i >= 0) {
         var scope = env[i]
-        if (scope.has(name)) { scope.set(name, val) ; return nil }
+        if (scope.has(name)) { scope.set(name, val) ; return null }
         i = i - 1
     }
     panic("undefined variable (cannot assign): \(name)")
@@ -744,8 +743,8 @@ fn env_assign(env, name, val) {
 var functions_ = Map()
 
 // ── 值转字符串 ──────────────────────────────────────────
-fn val_to_str(v) {
-    if (v == nil) { return "nil" }
+func val_to_str(v) {
+    if (v == null) { return "null" }
     if (type(v) == "Number") {
         // 整数不带小数点
         if (v == 0 - (0 - v) && v % 1 == 0) {
@@ -769,12 +768,12 @@ fn val_to_str(v) {
 }
 
 // ── 内置函数 ────────────────────────────────────────────
-fn call_builtin(name, args) {
+func call_builtin(name, args) {
     if (name == "print") {
         var parts = []
         for a in args { parts.push(val_to_str(a)) }
         print(parts.join(" "))
-        return nil
+        return null
     }
     if (name == "str") {
         if (len(args) == 0) { return "" }
@@ -802,17 +801,17 @@ fn call_builtin(name, args) {
             if (len(args) > 1) { msg = val_to_str(args[1]) }
             panic(msg)
         }
-        return nil
+        return null
     }
     if (name == "panic") {
         var msg = "panic"
         if (len(args) > 0) { msg = val_to_str(args[0]) }
         panic(msg)
     }
-    return nil
+    return null
 }
 
-fn is_builtin(name) {
+func is_builtin(name) {
     if (name == "print") { return true }
     if (name == "str") { return true }
     if (name == "num") { return true }
@@ -826,13 +825,13 @@ fn is_builtin(name) {
 
 // ── 表达式求值 ──────────────────────────────────────────
 
-fn eval_expr(node, env) {
+func eval_expr(node, env) {
     var kind = node.get("node")
 
     if (kind == "number") { return node.get("value") }
     if (kind == "string") { return node.get("value") }
     if (kind == "bool")   { return node.get("value") }
-    if (kind == "nil")    { return nil }
+    if (kind == "null")    { return null }
 
     if (kind == "id") {
         return env_get(env, node.get("name"))
@@ -867,7 +866,7 @@ fn eval_expr(node, env) {
 
         // 数组方法
         if (type(obj) == "Array") {
-            if (method == "push")    { obj.push(args[0]) ; return nil }
+            if (method == "push")    { obj.push(args[0]) ; return null }
             if (method == "pop")     { return obj.pop() }
             if (method == "len")     { return len(obj) }
             if (method == "join")    { return obj.join(args[0]) }
@@ -891,7 +890,7 @@ fn eval_expr(node, env) {
         // Map 方法
         if (type(obj) == "Map") {
             if (method == "get")  { return obj.get(args[0]) }
-            if (method == "set")  { obj.set(args[0], args[1]) ; return nil }
+            if (method == "set")  { obj.set(args[0], args[1]) ; return null }
             if (method == "has")  { return obj.has(args[0]) }
             if (method == "keys") { return obj.keys() }
         }
@@ -959,7 +958,7 @@ fn eval_expr(node, env) {
 
 // ── 函数调用 ─────────────────────────────────────────────
 
-fn call_fn(fn_node, args) {
+func call_fn(fn_node, args) {
     var params = fn_node.get("params")
     var body = fn_node.get("body")
 
@@ -975,7 +974,7 @@ fn call_fn(fn_node, args) {
     // 绑定参数
     var i = 0
     while (i < len(params)) {
-        var val = nil
+        var val = null
         if (i < len(args)) { val = args[i] }
         env_set(fn_env, params[i], val)
         i = i + 1
@@ -983,32 +982,32 @@ fn call_fn(fn_node, args) {
 
     // 执行函数体
     var result = exec_block(body, fn_env)
-    if (result != nil && type(result) == "Map" && result.has("signal")) {
+    if (result != null && type(result) == "Map" && result.has("signal")) {
         if (result.get("signal") == "return") {
             return result.get("value")
         }
     }
-    return nil
+    return null
 }
 
 // ── 语句执行 ─────────────────────────────────────────────
 
-fn exec_stmt(node, env) {
+func exec_stmt(node, env) {
     var kind = node.get("node")
 
     if (kind == "var_decl") {
-        var val = nil
-        if (node.get("init") != nil) {
+        var val = null
+        if (node.get("init") != null) {
             val = eval_expr(node.get("init"), env)
         }
         env_set(env, node.get("name"), val)
-        return nil
+        return null
     }
 
     if (kind == "assign") {
         var val = eval_expr(node.get("value"), env)
         env_assign(env, node.get("name"), val)
-        return nil
+        return null
     }
 
     if (kind == "index_assign") {
@@ -1016,17 +1015,17 @@ fn exec_stmt(node, env) {
         var idx = eval_expr(node.get("index"), env)
         var val = eval_expr(node.get("value"), env)
         obj[idx] = val
-        return nil
+        return null
     }
 
     if (kind == "fn_decl") {
         functions_.set(node.get("name"), node)
-        return nil
+        return null
     }
 
     if (kind == "return") {
-        var val = nil
-        if (node.get("value") != nil) {
+        var val = null
+        if (node.get("value") != null) {
             val = eval_expr(node.get("value"), env)
         }
         var sig = Map()
@@ -1051,7 +1050,7 @@ fn exec_stmt(node, env) {
                 return r
             }
         }
-        return nil
+        return null
     }
 
     if (kind == "while") {
@@ -1060,10 +1059,10 @@ fn exec_stmt(node, env) {
             env_push(env)
             var r = exec_block(node.get("body"), env)
             env_pop(env)
-            if (r != nil && type(r) == "Map" && r.has("signal")) { return r }
+            if (r != null && type(r) == "Map" && r.has("signal")) { return r }
             w_cond = eval_expr(node.get("cond"), env)
         }
-        return nil
+        return null
     }
 
     if (kind == "for_in") {
@@ -1074,32 +1073,32 @@ fn exec_stmt(node, env) {
             env_set(env, var_name, item)
             var r = exec_block(node.get("body"), env)
             env_pop(env)
-            if (r != nil && type(r) == "Map" && r.has("signal")) { return r }
+            if (r != null && type(r) == "Map" && r.has("signal")) { return r }
         }
-        return nil
+        return null
     }
 
     if (kind == "expr_stmt") {
         eval_expr(node.get("expr"), env)
-        return nil
+        return null
     }
 
     panic("unknown statement node: \(kind)")
 }
 
-fn exec_block(stmts, env) {
+func exec_block(stmts, env) {
     for stmt in stmts {
         var r = exec_stmt(stmt, env)
-        if (r != nil && type(r) == "Map" && r.has("signal")) { return r }
+        if (r != null && type(r) == "Map" && r.has("signal")) { return r }
     }
-    return nil
+    return null
 }
 
 // ═══════════════════════════════════════════════════════════
 // 主入口 — 运行 Flux 源代码
 // ═══════════════════════════════════════════════════════════
 
-fn flux_run(source) {
+func flux_run(source) {
     // 重置状态
     functions_ = Map()
 
@@ -1165,14 +1164,14 @@ flux_run("var sum = 0\nvar i = 1\nwhile (i <= 10) { sum = sum + i\ni = i + 1 }\n
 
 // ── Test 6: 函数声明与调用 ───────────────────────────────
 print("\nTest 6: Functions")
-flux_run("fn double(x) { return x * 2 }\nprint(double(21))")
-flux_run("fn greet(name) { return \"Hello, \" + name + \"!\" }\nprint(greet(\"Flux\"))")
+flux_run("func double(x) { return x * 2 }\nprint(double(21))")
+flux_run("func greet(name) { return \"Hello, \" + name + \"!\" }\nprint(greet(\"Flux\"))")
 
 // ── Test 7: 递归 ────────────────────────────────────────
 print("\nTest 7: Recursion")
-flux_run("fn fib(n) {\nif (n <= 1) { return n }\nreturn fib(n - 1) + fib(n - 2)\n}\nprint(fib(10))")
+flux_run("func fib(n) {\nif (n <= 1) { return n }\nreturn fib(n - 1) + fib(n - 2)\n}\nprint(fib(10))")
 
-flux_run("fn factorial(n) {\nif (n <= 1) { return 1 }\nreturn n * factorial(n - 1)\n}\nprint(factorial(10))")
+flux_run("func factorial(n) {\nif (n <= 1) { return 1 }\nreturn n * factorial(n - 1)\n}\nprint(factorial(10))")
 
 // ── Test 8: 数组 ────────────────────────────────────────
 print("\nTest 8: Arrays")
@@ -1185,13 +1184,13 @@ flux_run("for i in range(5) { print(i) }")
 
 // ── Test 10: 复合程序 ───────────────────────────────────
 print("\nTest 10: Complex program — FizzBuzz")
-flux_run("fn fizzbuzz(n) {\nvar i = 1\nwhile (i <= n) {\nif (i % 15 == 0) { print(\"FizzBuzz\") }\nelse if (i % 3 == 0) { print(\"Fizz\") }\nelse if (i % 5 == 0) { print(\"Buzz\") }\nelse { print(i) }\ni = i + 1\n}\n}\nfizzbuzz(15)")
+flux_run("func fizzbuzz(n) {\nvar i = 1\nwhile (i <= n) {\nif (i % 15 == 0) { print(\"FizzBuzz\") }\nelse if (i % 3 == 0) { print(\"Fizz\") }\nelse if (i % 5 == 0) { print(\"Buzz\") }\nelse { print(i) }\ni = i + 1\n}\n}\nfizzbuzz(15)")
 
 // ── Test 11: 自举自身 — Flux 解释器解释 Flux 代码 ────────
 print("\nTest 11: Meta — self-interpreting a program")
 // 嵌套的 Flux 代码（由自举编译器运行的代码中再运行代码）
 // 这不是真正的嵌套自举（那需要序列化整个编译器），但验证了复杂程序执行
-flux_run("fn square(x) { return x * x }\nfn sum_squares(n) {\nvar total = 0\nvar i = 1\nwhile (i <= n) { total = total + square(i)\ni = i + 1 }\nreturn total\n}\nprint(sum_squares(10))")
+flux_run("func square(x) { return x * x }\nfunc sum_squares(n) {\nvar total = 0\nvar i = 1\nwhile (i <= n) { total = total + square(i)\ni = i + 1 }\nreturn total\n}\nprint(sum_squares(10))")
 
 print("\n═══════════════════════════════════════")
 print("  All self-hosting tests passed!")

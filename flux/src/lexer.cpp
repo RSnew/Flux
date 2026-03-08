@@ -3,15 +3,14 @@
 
 const std::unordered_map<std::string, TokenType> Lexer::keywords_ = {
     {"var",        TokenType::VAR},
-    {"fn",         TokenType::FN},
-    {"func",       TokenType::FUNC},      // Spec v1.0: alias for fn
+    {"func",       TokenType::FUNC},
     {"return",     TokenType::RETURN},
     {"if",         TokenType::IF},
     {"else",       TokenType::ELSE},
     {"while",      TokenType::WHILE},
     {"true",       TokenType::TRUE},
     {"false",      TokenType::FALSE},
-    {"nil",        TokenType::NIL},
+    {"null",       TokenType::NULL_TOKEN},
     {"for",        TokenType::FOR},
     {"in",         TokenType::IN},
     {"persistent", TokenType::PERSISTENT},
@@ -38,6 +37,7 @@ const std::unordered_map<std::string, TokenType> Lexer::keywords_ = {
     {"free",       TokenType::FREE},
     {"asm",        TokenType::ASM},
     {"default",    TokenType::DEFAULT},
+    {"test",       TokenType::TEST},
 };
 
 Lexer::Lexer(const std::string& source) : source_(source) {}
@@ -220,7 +220,7 @@ std::vector<Token> Lexer::tokenize() {
                 // .always / .never 枚举值
                 if (pos_ < source_.size() && std::isalpha(peek())) {
                     std::string word;
-                    while (pos_ < source_.size() && std::isalpha(peek()))
+                    while (pos_ < source_.size() && (std::isalnum(peek()) || peek() == '_'))
                         word += advance();
                     if      (word == "always") tokens.push_back({TokenType::DOT_ALWAYS, ".always", line_});
                     else if (word == "never")  tokens.push_back({TokenType::DOT_NEVER,  ".never",  line_});

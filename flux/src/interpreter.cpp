@@ -136,7 +136,7 @@ void Interpreter::registerBuiltins() {
         return Value::Num(0);
     });
     registerBuiltin("type", [](std::vector<Value> args) -> Value {
-        if (args.empty()) return Value::Str("nil");
+        if (args.empty()) return Value::Str("null");
         switch (args[0].type) {
             case Value::Type::Number: return Value::Str("Number");
             case Value::Type::String: return Value::Str("String");
@@ -237,6 +237,13 @@ void Interpreter::execute(Program* program) {
             // !func: 灰度切换 — 存入 pending，在下一调用边界生效
             if (fn->forceOverride) pendingFnUpdates_[fn->name] = fn;
             else                   functions_[fn->name] = fn;
+        } else if (auto* td = dynamic_cast<TestDecl*>(stmt.get())) {
+            // test func: 在非 --no-test 模式下覆盖已有函数
+            if (!noTest_) {
+                if (auto* fn = dynamic_cast<FnDecl*>(td->inner.get())) {
+                    functions_[fn->name] = fn;
+                }
+            }
         } else if (auto* pb = dynamic_cast<PersistentBlock*>(stmt.get())) {
             for (auto& field : pb->fields) {
                 if (!persistentStore_.count(field.name)) {
@@ -254,6 +261,11 @@ void Interpreter::execute(Program* program) {
         if (dynamic_cast<FnDecl*>(stmt.get()))          continue;
         if (dynamic_cast<ProfiledFnDecl*>(stmt.get()))  continue;
         if (dynamic_cast<PersistentBlock*>(stmt.get())) continue;
+        // test 包装的函数已在第一遍处理，跳过含 FnDecl 的 TestDecl
+        if (auto* td = dynamic_cast<TestDecl*>(stmt.get())) {
+            if (noTest_) continue;  // --no-test: 跳过所有 test 声明
+            if (dynamic_cast<FnDecl*>(td->inner.get())) continue;  // 函数已注册
+        }
         try {
             evalNode(stmt.get(), globalEnv_);
         } catch (ReturnSignal&) {
@@ -784,6 +796,64 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
                 std::reverse(obj.array->begin(), obj.array->end());
                 return obj;
             }
+            if (n->method == "sort") {
+                std::sort(obj.array->begin(), obj.array->end(),
+                    [](const Value& a, const Value& b) {
+                        if (a.type == Value::Type::Number && b.type == Value::Type::Number)
+                            return a.number < b.number;
+                        return a.toString() < b.toString();
+                    });
+                return obj;
+            }
+            if (n->method == "slice") {
+                int start = margs.empty() ? 0 : (int)margs[0].number;
+                int end = margs.size() > 1 ? (int)margs[1].number : (int)obj.array->size();
+                int sz = (int)obj.array->size();
+                if (start < 0) start = std::max(0, sz + start);
+                if (end < 0) end = std::max(0, sz + end);
+                start = std::min(start, sz);
+                end = std::min(end, sz);
+                auto arr = std::make_shared<std::vector<Value>>(
+                    obj.array->begin() + start, obj.array->begin() + end);
+                return Value::Arr(arr);
+            }
+            if (n->method == "indexOf") {
+                if (margs.empty()) return Value::Num(-1);
+                std::string needle = margs[0].toString();
+                for (size_t i = 0; i < obj.array->size(); i++)
+                    if ((*obj.array)[i].toString() == needle) return Value::Num((double)i);
+                return Value::Num(-1);
+            }
+            if (n->method == "flat") {
+                auto arr = std::make_shared<std::vector<Value>>();
+                for (auto& v : *obj.array) {
+                    if (v.type == Value::Type::Array && v.array)
+                        for (auto& inner : *v.array) arr->push_back(inner);
+                    else
+                        arr->push_back(v);
+                }
+                return Value::Arr(arr);
+            }
+            if (n->method == "clear") {
+                obj.array->clear();
+                return Value::Nil();
+            }
+            if (n->method == "insert") {
+                if (margs.size() < 2) throw std::runtime_error("array.insert(index, value)");
+                int idx = (int)margs[0].number;
+                if (idx < 0 || idx > (int)obj.array->size()) idx = (int)obj.array->size();
+                obj.array->insert(obj.array->begin() + idx, margs[1]);
+                return Value::Num((double)obj.array->size());
+            }
+            if (n->method == "removeAt") {
+                if (margs.empty()) throw std::runtime_error("array.removeAt(index)");
+                int idx = (int)margs[0].number;
+                if (idx < 0 || idx >= (int)obj.array->size())
+                    throw std::runtime_error("array.removeAt: index out of range");
+                Value v = (*obj.array)[idx];
+                obj.array->erase(obj.array->begin() + idx);
+                return v;
+            }
         }
         if (obj.type == Value::Type::String) {
             if (n->method == "len" || n->method == "size")
@@ -818,6 +888,65 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
                 size_t l = s.find_first_not_of(" \t\n\r");
                 size_t r = s.find_last_not_of(" \t\n\r");
                 return Value::Str(l == std::string::npos ? "" : s.substr(l, r - l + 1));
+            }
+            if (n->method == "replace") {
+                if (margs.size() < 2) throw std::runtime_error("str.replace(old, new)");
+                std::string s = obj.string;
+                std::string from = margs[0].toString(), to = margs[1].toString();
+                if (!from.empty()) {
+                    size_t pos = 0;
+                    while ((pos = s.find(from, pos)) != std::string::npos) {
+                        s.replace(pos, from.length(), to);
+                        pos += to.length();
+                    }
+                }
+                return Value::Str(s);
+            }
+            if (n->method == "startsWith") {
+                if (margs.empty()) return Value::Bool(false);
+                std::string p = margs[0].toString();
+                return Value::Bool(obj.string.size() >= p.size()
+                    && obj.string.compare(0, p.size(), p) == 0);
+            }
+            if (n->method == "endsWith") {
+                if (margs.empty()) return Value::Bool(false);
+                std::string p = margs[0].toString();
+                return Value::Bool(obj.string.size() >= p.size()
+                    && obj.string.compare(obj.string.size() - p.size(), p.size(), p) == 0);
+            }
+            if (n->method == "indexOf") {
+                if (margs.empty()) return Value::Num(-1);
+                size_t pos = obj.string.find(margs[0].toString());
+                return Value::Num(pos == std::string::npos ? -1.0 : (double)pos);
+            }
+            if (n->method == "slice") {
+                int start = margs.empty() ? 0 : (int)margs[0].number;
+                int end = margs.size() > 1 ? (int)margs[1].number : (int)obj.string.size();
+                int sz = (int)obj.string.size();
+                if (start < 0) start = std::max(0, sz + start);
+                if (end < 0) end = std::max(0, sz + end);
+                start = std::min(start, sz);
+                end = std::min(end, sz);
+                return Value::Str(start < end ? obj.string.substr(start, end - start) : "");
+            }
+            if (n->method == "charAt") {
+                if (margs.empty()) return Value::Str("");
+                int idx = (int)margs[0].number;
+                if (idx < 0 || idx >= (int)obj.string.size()) return Value::Str("");
+                return Value::Str(std::string(1, obj.string[idx]));
+            }
+            if (n->method == "repeat") {
+                if (margs.empty()) return Value::Str(obj.string);
+                int n2 = (int)margs[0].number;
+                std::string r;
+                r.reserve(obj.string.size() * n2);
+                for (int i = 0; i < n2; i++) r += obj.string;
+                return Value::Str(r);
+            }
+            if (n->method == "reverse") {
+                std::string s = obj.string;
+                std::reverse(s.begin(), s.end());
+                return Value::Str(s);
             }
         }
         // ── Map 方法 ──────────────────────────────────────
@@ -1091,6 +1220,59 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
                 std::reverse(obj.array->begin(), obj.array->end());
                 return obj;
             }
+            if (n->fn == "sort") {
+                std::sort(obj.array->begin(), obj.array->end(),
+                    [](const Value& a, const Value& b) {
+                        if (a.type == Value::Type::Number && b.type == Value::Type::Number)
+                            return a.number < b.number;
+                        return a.toString() < b.toString();
+                    });
+                return obj;
+            }
+            if (n->fn == "slice") {
+                int start2 = margs.empty() ? 0 : (int)margs[0].number;
+                int end2 = margs.size() > 1 ? (int)margs[1].number : (int)obj.array->size();
+                int sz = (int)obj.array->size();
+                if (start2 < 0) start2 = std::max(0, sz + start2);
+                if (end2 < 0) end2 = std::max(0, sz + end2);
+                start2 = std::min(start2, sz); end2 = std::min(end2, sz);
+                auto arr = std::make_shared<std::vector<Value>>(
+                    obj.array->begin() + start2, obj.array->begin() + end2);
+                return Value::Arr(arr);
+            }
+            if (n->fn == "indexOf") {
+                if (margs.empty()) return Value::Num(-1);
+                std::string needle = margs[0].toString();
+                for (size_t i = 0; i < obj.array->size(); i++)
+                    if ((*obj.array)[i].toString() == needle) return Value::Num((double)i);
+                return Value::Num(-1);
+            }
+            if (n->fn == "flat") {
+                auto arr = std::make_shared<std::vector<Value>>();
+                for (auto& v : *obj.array) {
+                    if (v.type == Value::Type::Array && v.array)
+                        for (auto& inner : *v.array) arr->push_back(inner);
+                    else arr->push_back(v);
+                }
+                return Value::Arr(arr);
+            }
+            if (n->fn == "clear") { obj.array->clear(); return Value::Nil(); }
+            if (n->fn == "insert") {
+                if (margs.size() < 2) throw std::runtime_error("array.insert(index, value)");
+                int idx = (int)margs[0].number;
+                if (idx < 0 || idx > (int)obj.array->size()) idx = (int)obj.array->size();
+                obj.array->insert(obj.array->begin() + idx, margs[1]);
+                return Value::Num((double)obj.array->size());
+            }
+            if (n->fn == "removeAt") {
+                if (margs.empty()) throw std::runtime_error("array.removeAt(index)");
+                int idx = (int)margs[0].number;
+                if (idx < 0 || idx >= (int)obj.array->size())
+                    throw std::runtime_error("array.removeAt: index out of range");
+                Value v = (*obj.array)[idx];
+                obj.array->erase(obj.array->begin() + idx);
+                return v;
+            }
         }
         if (obj.type == Value::Type::String) {
             if (n->fn == "len" || n->fn == "size")
@@ -1125,6 +1307,64 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
                 size_t l = s.find_first_not_of(" \t\n\r");
                 size_t r = s.find_last_not_of(" \t\n\r");
                 return Value::Str(l == std::string::npos ? "" : s.substr(l, r - l + 1));
+            }
+            if (n->fn == "replace") {
+                if (margs.size() < 2) throw std::runtime_error("str.replace(old, new)");
+                std::string s = obj.string;
+                std::string from = margs[0].toString(), to = margs[1].toString();
+                if (!from.empty()) {
+                    size_t pos = 0;
+                    while ((pos = s.find(from, pos)) != std::string::npos) {
+                        s.replace(pos, from.length(), to);
+                        pos += to.length();
+                    }
+                }
+                return Value::Str(s);
+            }
+            if (n->fn == "startsWith") {
+                if (margs.empty()) return Value::Bool(false);
+                std::string p = margs[0].toString();
+                return Value::Bool(obj.string.size() >= p.size()
+                    && obj.string.compare(0, p.size(), p) == 0);
+            }
+            if (n->fn == "endsWith") {
+                if (margs.empty()) return Value::Bool(false);
+                std::string p = margs[0].toString();
+                return Value::Bool(obj.string.size() >= p.size()
+                    && obj.string.compare(obj.string.size() - p.size(), p.size(), p) == 0);
+            }
+            if (n->fn == "indexOf") {
+                if (margs.empty()) return Value::Num(-1);
+                size_t pos = obj.string.find(margs[0].toString());
+                return Value::Num(pos == std::string::npos ? -1.0 : (double)pos);
+            }
+            if (n->fn == "slice") {
+                int start2 = margs.empty() ? 0 : (int)margs[0].number;
+                int end2 = margs.size() > 1 ? (int)margs[1].number : (int)obj.string.size();
+                int sz = (int)obj.string.size();
+                if (start2 < 0) start2 = std::max(0, sz + start2);
+                if (end2 < 0) end2 = std::max(0, sz + end2);
+                start2 = std::min(start2, sz); end2 = std::min(end2, sz);
+                return Value::Str(start2 < end2 ? obj.string.substr(start2, end2 - start2) : "");
+            }
+            if (n->fn == "charAt") {
+                if (margs.empty()) return Value::Str("");
+                int idx = (int)margs[0].number;
+                if (idx < 0 || idx >= (int)obj.string.size()) return Value::Str("");
+                return Value::Str(std::string(1, obj.string[idx]));
+            }
+            if (n->fn == "repeat") {
+                if (margs.empty()) return Value::Str(obj.string);
+                int cnt = (int)margs[0].number;
+                std::string r;
+                r.reserve(obj.string.size() * cnt);
+                for (int i = 0; i < cnt; i++) r += obj.string;
+                return Value::Str(r);
+            }
+            if (n->fn == "reverse") {
+                std::string s = obj.string;
+                std::reverse(s.begin(), s.end());
+                return Value::Str(s);
             }
         }
         // ── Map 方法（变量回退路径）──────────────────────
@@ -1297,6 +1537,19 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
             return Value::FuncV(std::move(fv));
         }
         return env->get(n->name);  // 抛出 undefined variable
+    }
+
+    // ── test 覆盖声明 ──
+    if (auto* n = dynamic_cast<TestDecl*>(node)) {
+        if (noTest_) return Value::Nil();  // --no-test: 跳过
+        // test var: 执行内部声明并强制覆盖
+        if (auto* vd = dynamic_cast<VarDecl*>(n->inner.get())) {
+            Value v = vd->initializer ? evalNode(vd->initializer.get(), env, mod) : Value::Nil();
+            env->set(vd->name, v);  // 强制覆盖
+            return v;
+        }
+        // test func: 已在 execute() 第一遍处理
+        return Value::Nil();
     }
 
     // ── 声明 ──

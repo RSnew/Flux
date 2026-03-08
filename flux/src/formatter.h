@@ -56,10 +56,10 @@ private:
     // ── 表达式格式化（无缩进，无换行）───────────────────
     // minPrec: 调用方期望的最小优先级；若该节点优先级更低则加括号
     std::string fmtExpr(ASTNode* node, int minPrec = 0) {
-        if (!node) return "nil";
+        if (!node) return "null";
 
         // nil 字面量
-        if (dynamic_cast<NilLit*>(node)) return "nil";
+        if (dynamic_cast<NilLit*>(node)) return "null";
         // 数字字面量
         if (auto* n = dynamic_cast<NumberLit*>(node)) {
             std::string s = fmtNum(n->value);
@@ -392,6 +392,16 @@ private:
         // ── @profile fn ──────────────────────────────────────
         if (auto* n = dynamic_cast<ProfiledFnDecl*>(node)) {
             return ind() + "@profile\n" + fmtStmt(n->fnDecl.get());
+        }
+
+        // ── test 覆盖声明 ────────────────────────────────────
+        if (auto* n = dynamic_cast<TestDecl*>(node)) {
+            std::string inner = fmtStmt(n->inner.get());
+            // 去除内部语句的前导缩进，前缀加上 "test "
+            size_t start = inner.find_first_not_of(' ');
+            if (start != std::string::npos)
+                inner = inner.substr(start);
+            return ind() + "test " + inner;
         }
 
         // ── @platform ────────────────────────────────────────
