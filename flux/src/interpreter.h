@@ -106,7 +106,7 @@ struct Value {
     }
 
     std::string toString() const {
-        if (type == Type::Nil)    return "nil";
+        if (type == Type::Nil)    return "null";
         if (type == Type::Number) {
             if (number == (long long)number) return std::to_string((long long)number);
             return std::to_string(number);
@@ -143,7 +143,7 @@ struct Value {
         if (type == Type::StructInst) return "<StructInst>";
         if (type == Type::Interface)  return "<Interface>";
         if (type == Type::Function)  return "<Function>";
-        return "nil";
+        return "null";
     }
 
     // Full toString for struct instances (defined after StructInstInfo is complete)
@@ -333,6 +333,7 @@ public:
     // VM 模式：只做注册 + 初始化 + 模块声明，不执行普通语句
     void  initProgram(Program* program);
     void  registerBuiltin(const std::string& name, BuiltinFn fn);
+    void  setNoTest(bool v) { noTest_ = v; }
 
     // ── VM / Compiler 需要调用的公共接口 ─────────────────
     Value callFunction(const std::string& name, std::vector<Value> args,
@@ -390,6 +391,8 @@ private:
     std::unordered_map<std::string, std::vector<std::string>> exceptionDescs_;
     // 内联 exception 描述（当前作用域中最后遇到的描述）
     std::vector<std::string> lastInlineExceptionDescs_;
+    // default 声明表：target → DefaultDecl body (AST nodes)
+    std::unordered_map<std::string, std::vector<ASTNode*>> defaultBodies_;
 
     // ── !var / !func 灰度切换（Spec v1.0）─────────────────
     // 热更新期间将新值/新函数体存入 pending 表；
@@ -407,4 +410,7 @@ private:
     // 调用函数值（匿名函数 / 闭包 / 具名函数引用）
     Value callFuncVal(std::shared_ptr<FuncVal> fv, std::vector<Value> args,
                       ModuleRuntime* mod = nullptr);
+
+    // ── --no-test 模式标志 ────────────────────────────────
+    bool noTest_ = false;
 };

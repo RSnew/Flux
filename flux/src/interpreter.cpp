@@ -1,7 +1,9 @@
 #include "interpreter.h"
+#include "profiler.h"
 #include <iostream>
 #include <sstream>
 #include <cmath>
+#include <cstdlib>
 #include <algorithm>
 
 // ── ChanVal 方法实现 ──────────────────────────────────────
@@ -134,7 +136,7 @@ void Interpreter::registerBuiltins() {
         return Value::Num(0);
     });
     registerBuiltin("type", [](std::vector<Value> args) -> Value {
-        if (args.empty()) return Value::Str("nil");
+        if (args.empty()) return Value::Str("null");
         switch (args[0].type) {
             case Value::Type::Number: return Value::Str("Number");
             case Value::Type::String: return Value::Str("String");
@@ -225,10 +227,23 @@ void Interpreter::execute(Program* program) {
     // 第一遍：注册全局函数 + 初始化全局 persistent
     functions_.clear();
     for (auto& stmt : program->statements) {
-        if (auto* fn = dynamic_cast<FnDecl*>(stmt.get())) {
+        if (auto* pfn = dynamic_cast<ProfiledFnDecl*>(stmt.get())) {
+            auto* fn = dynamic_cast<FnDecl*>(pfn->fnDecl.get());
+            if (fn) {
+                functions_[fn->name] = fn;
+                Profiler::instance().markFunction(fn->name);
+            }
+        } else if (auto* fn = dynamic_cast<FnDecl*>(stmt.get())) {
             // !func: 灰度切换 — 存入 pending，在下一调用边界生效
             if (fn->forceOverride) pendingFnUpdates_[fn->name] = fn;
             else                   functions_[fn->name] = fn;
+        } else if (auto* td = dynamic_cast<TestDecl*>(stmt.get())) {
+            // test func: 在非 --no-test 模式下覆盖已有函数
+            if (!noTest_) {
+                if (auto* fn = dynamic_cast<FnDecl*>(td->inner.get())) {
+                    functions_[fn->name] = fn;
+                }
+            }
         } else if (auto* pb = dynamic_cast<PersistentBlock*>(stmt.get())) {
             for (auto& field : pb->fields) {
                 if (!persistentStore_.count(field.name)) {
@@ -244,7 +259,13 @@ void Interpreter::execute(Program* program) {
     // 第二遍：执行顶层语句（模块声明 + 普通语句）
     for (auto& stmt : program->statements) {
         if (dynamic_cast<FnDecl*>(stmt.get()))          continue;
+        if (dynamic_cast<ProfiledFnDecl*>(stmt.get()))  continue;
         if (dynamic_cast<PersistentBlock*>(stmt.get())) continue;
+        // test 包装的函数已在第一遍处理，跳过含 FnDecl 的 TestDecl
+        if (auto* td = dynamic_cast<TestDecl*>(stmt.get())) {
+            if (noTest_) continue;  // --no-test: 跳过所有 test 声明
+            if (dynamic_cast<FnDecl*>(td->inner.get())) continue;  // 函数已注册
+        }
         try {
             evalNode(stmt.get(), globalEnv_);
         } catch (ReturnSignal&) {
@@ -252,6 +273,9 @@ void Interpreter::execute(Program* program) {
             throw std::runtime_error(p.message);
         }
     }
+
+    // 输出 @profile 性能报告
+    Profiler::instance().report();
 }
 
 // ── REPL 增量执行（保留 globalEnv_ + functions_）──────────
@@ -564,30 +588,51 @@ Value Interpreter::callFunction(const std::string& name,
     for (size_t i = 0; i < fn->params.size(); i++)
         fnEnv->set(fn->params[i].name, i < args.size() ? args[i] : Value::Nil());
 
+    // @profile: 自动计时
+    std::unique_ptr<ProfileScope> profileScope;
+    if (Profiler::instance().isProfiled(name))
+        profileScope = std::make_unique<ProfileScope>(Profiler::instance(), name);
+
     try {
         for (auto& stmt : fn->body)
             evalNode(stmt.get(), fnEnv, mod);
     } catch (ReturnSignal& ret) {
         return ret.value;
     } catch (PanicSignal& p) {
+        lastInlineExceptionDescs_.clear();
+        // 有全局 default → 恢复为默认值
+        auto dfit = defaultBodies_.find(name);
+        if (dfit != defaultBodies_.end()) {
+            auto childEnv = std::make_shared<Environment>(globalEnv_);
+            Value result = Value::Nil();
+            for (auto* stmt : dfit->second)
+                result = evalNode(stmt, childEnv, mod);
+            return result;
+        }
         // 合并 exception 描述到错误信息（全局 + 内联）
         std::string merged = "[自动] " + p.message;
         bool hasDesc = false;
         auto dit = exceptionDescs_.find(name);
         if (dit != exceptionDescs_.end())
             for (auto& d : dit->second) { merged += "\n[描述] " + d; hasDesc = true; }
-        for (auto& d : lastInlineExceptionDescs_) { merged += "\n[描述] " + d; hasDesc = true; }
-        lastInlineExceptionDescs_.clear();
         if (hasDesc) throw PanicSignal{merged};
         throw;
     } catch (std::runtime_error& e) {
+        lastInlineExceptionDescs_.clear();
+        // 有全局 default → 恢复为默认值
+        auto dfit = defaultBodies_.find(name);
+        if (dfit != defaultBodies_.end()) {
+            auto childEnv = std::make_shared<Environment>(globalEnv_);
+            Value result = Value::Nil();
+            for (auto* stmt : dfit->second)
+                result = evalNode(stmt, childEnv, mod);
+            return result;
+        }
         std::string merged = "[自动] " + std::string(e.what());
         bool hasDesc = false;
         auto dit = exceptionDescs_.find(name);
         if (dit != exceptionDescs_.end())
             for (auto& d : dit->second) { merged += "\n[描述] " + d; hasDesc = true; }
-        for (auto& d : lastInlineExceptionDescs_) { merged += "\n[描述] " + d; hasDesc = true; }
-        lastInlineExceptionDescs_.clear();
         if (hasDesc) throw std::runtime_error(merged);
         throw;
     }
@@ -751,6 +796,64 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
                 std::reverse(obj.array->begin(), obj.array->end());
                 return obj;
             }
+            if (n->method == "sort") {
+                std::sort(obj.array->begin(), obj.array->end(),
+                    [](const Value& a, const Value& b) {
+                        if (a.type == Value::Type::Number && b.type == Value::Type::Number)
+                            return a.number < b.number;
+                        return a.toString() < b.toString();
+                    });
+                return obj;
+            }
+            if (n->method == "slice") {
+                int start = margs.empty() ? 0 : (int)margs[0].number;
+                int end = margs.size() > 1 ? (int)margs[1].number : (int)obj.array->size();
+                int sz = (int)obj.array->size();
+                if (start < 0) start = std::max(0, sz + start);
+                if (end < 0) end = std::max(0, sz + end);
+                start = std::min(start, sz);
+                end = std::min(end, sz);
+                auto arr = std::make_shared<std::vector<Value>>(
+                    obj.array->begin() + start, obj.array->begin() + end);
+                return Value::Arr(arr);
+            }
+            if (n->method == "indexOf") {
+                if (margs.empty()) return Value::Num(-1);
+                std::string needle = margs[0].toString();
+                for (size_t i = 0; i < obj.array->size(); i++)
+                    if ((*obj.array)[i].toString() == needle) return Value::Num((double)i);
+                return Value::Num(-1);
+            }
+            if (n->method == "flat") {
+                auto arr = std::make_shared<std::vector<Value>>();
+                for (auto& v : *obj.array) {
+                    if (v.type == Value::Type::Array && v.array)
+                        for (auto& inner : *v.array) arr->push_back(inner);
+                    else
+                        arr->push_back(v);
+                }
+                return Value::Arr(arr);
+            }
+            if (n->method == "clear") {
+                obj.array->clear();
+                return Value::Nil();
+            }
+            if (n->method == "insert") {
+                if (margs.size() < 2) throw std::runtime_error("array.insert(index, value)");
+                int idx = (int)margs[0].number;
+                if (idx < 0 || idx > (int)obj.array->size()) idx = (int)obj.array->size();
+                obj.array->insert(obj.array->begin() + idx, margs[1]);
+                return Value::Num((double)obj.array->size());
+            }
+            if (n->method == "removeAt") {
+                if (margs.empty()) throw std::runtime_error("array.removeAt(index)");
+                int idx = (int)margs[0].number;
+                if (idx < 0 || idx >= (int)obj.array->size())
+                    throw std::runtime_error("array.removeAt: index out of range");
+                Value v = (*obj.array)[idx];
+                obj.array->erase(obj.array->begin() + idx);
+                return v;
+            }
         }
         if (obj.type == Value::Type::String) {
             if (n->method == "len" || n->method == "size")
@@ -785,6 +888,65 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
                 size_t l = s.find_first_not_of(" \t\n\r");
                 size_t r = s.find_last_not_of(" \t\n\r");
                 return Value::Str(l == std::string::npos ? "" : s.substr(l, r - l + 1));
+            }
+            if (n->method == "replace") {
+                if (margs.size() < 2) throw std::runtime_error("str.replace(old, new)");
+                std::string s = obj.string;
+                std::string from = margs[0].toString(), to = margs[1].toString();
+                if (!from.empty()) {
+                    size_t pos = 0;
+                    while ((pos = s.find(from, pos)) != std::string::npos) {
+                        s.replace(pos, from.length(), to);
+                        pos += to.length();
+                    }
+                }
+                return Value::Str(s);
+            }
+            if (n->method == "startsWith") {
+                if (margs.empty()) return Value::Bool(false);
+                std::string p = margs[0].toString();
+                return Value::Bool(obj.string.size() >= p.size()
+                    && obj.string.compare(0, p.size(), p) == 0);
+            }
+            if (n->method == "endsWith") {
+                if (margs.empty()) return Value::Bool(false);
+                std::string p = margs[0].toString();
+                return Value::Bool(obj.string.size() >= p.size()
+                    && obj.string.compare(obj.string.size() - p.size(), p.size(), p) == 0);
+            }
+            if (n->method == "indexOf") {
+                if (margs.empty()) return Value::Num(-1);
+                size_t pos = obj.string.find(margs[0].toString());
+                return Value::Num(pos == std::string::npos ? -1.0 : (double)pos);
+            }
+            if (n->method == "slice") {
+                int start = margs.empty() ? 0 : (int)margs[0].number;
+                int end = margs.size() > 1 ? (int)margs[1].number : (int)obj.string.size();
+                int sz = (int)obj.string.size();
+                if (start < 0) start = std::max(0, sz + start);
+                if (end < 0) end = std::max(0, sz + end);
+                start = std::min(start, sz);
+                end = std::min(end, sz);
+                return Value::Str(start < end ? obj.string.substr(start, end - start) : "");
+            }
+            if (n->method == "charAt") {
+                if (margs.empty()) return Value::Str("");
+                int idx = (int)margs[0].number;
+                if (idx < 0 || idx >= (int)obj.string.size()) return Value::Str("");
+                return Value::Str(std::string(1, obj.string[idx]));
+            }
+            if (n->method == "repeat") {
+                if (margs.empty()) return Value::Str(obj.string);
+                int n2 = (int)margs[0].number;
+                std::string r;
+                r.reserve(obj.string.size() * n2);
+                for (int i = 0; i < n2; i++) r += obj.string;
+                return Value::Str(r);
+            }
+            if (n->method == "reverse") {
+                std::string s = obj.string;
+                std::reverse(s.begin(), s.end());
+                return Value::Str(s);
             }
         }
         // ── Map 方法 ──────────────────────────────────────
@@ -1064,6 +1226,59 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
                 std::reverse(obj.array->begin(), obj.array->end());
                 return obj;
             }
+            if (n->fn == "sort") {
+                std::sort(obj.array->begin(), obj.array->end(),
+                    [](const Value& a, const Value& b) {
+                        if (a.type == Value::Type::Number && b.type == Value::Type::Number)
+                            return a.number < b.number;
+                        return a.toString() < b.toString();
+                    });
+                return obj;
+            }
+            if (n->fn == "slice") {
+                int start2 = margs.empty() ? 0 : (int)margs[0].number;
+                int end2 = margs.size() > 1 ? (int)margs[1].number : (int)obj.array->size();
+                int sz = (int)obj.array->size();
+                if (start2 < 0) start2 = std::max(0, sz + start2);
+                if (end2 < 0) end2 = std::max(0, sz + end2);
+                start2 = std::min(start2, sz); end2 = std::min(end2, sz);
+                auto arr = std::make_shared<std::vector<Value>>(
+                    obj.array->begin() + start2, obj.array->begin() + end2);
+                return Value::Arr(arr);
+            }
+            if (n->fn == "indexOf") {
+                if (margs.empty()) return Value::Num(-1);
+                std::string needle = margs[0].toString();
+                for (size_t i = 0; i < obj.array->size(); i++)
+                    if ((*obj.array)[i].toString() == needle) return Value::Num((double)i);
+                return Value::Num(-1);
+            }
+            if (n->fn == "flat") {
+                auto arr = std::make_shared<std::vector<Value>>();
+                for (auto& v : *obj.array) {
+                    if (v.type == Value::Type::Array && v.array)
+                        for (auto& inner : *v.array) arr->push_back(inner);
+                    else arr->push_back(v);
+                }
+                return Value::Arr(arr);
+            }
+            if (n->fn == "clear") { obj.array->clear(); return Value::Nil(); }
+            if (n->fn == "insert") {
+                if (margs.size() < 2) throw std::runtime_error("array.insert(index, value)");
+                int idx = (int)margs[0].number;
+                if (idx < 0 || idx > (int)obj.array->size()) idx = (int)obj.array->size();
+                obj.array->insert(obj.array->begin() + idx, margs[1]);
+                return Value::Num((double)obj.array->size());
+            }
+            if (n->fn == "removeAt") {
+                if (margs.empty()) throw std::runtime_error("array.removeAt(index)");
+                int idx = (int)margs[0].number;
+                if (idx < 0 || idx >= (int)obj.array->size())
+                    throw std::runtime_error("array.removeAt: index out of range");
+                Value v = (*obj.array)[idx];
+                obj.array->erase(obj.array->begin() + idx);
+                return v;
+            }
         }
         if (obj.type == Value::Type::String) {
             if (n->fn == "len" || n->fn == "size")
@@ -1098,6 +1313,64 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
                 size_t l = s.find_first_not_of(" \t\n\r");
                 size_t r = s.find_last_not_of(" \t\n\r");
                 return Value::Str(l == std::string::npos ? "" : s.substr(l, r - l + 1));
+            }
+            if (n->fn == "replace") {
+                if (margs.size() < 2) throw std::runtime_error("str.replace(old, new)");
+                std::string s = obj.string;
+                std::string from = margs[0].toString(), to = margs[1].toString();
+                if (!from.empty()) {
+                    size_t pos = 0;
+                    while ((pos = s.find(from, pos)) != std::string::npos) {
+                        s.replace(pos, from.length(), to);
+                        pos += to.length();
+                    }
+                }
+                return Value::Str(s);
+            }
+            if (n->fn == "startsWith") {
+                if (margs.empty()) return Value::Bool(false);
+                std::string p = margs[0].toString();
+                return Value::Bool(obj.string.size() >= p.size()
+                    && obj.string.compare(0, p.size(), p) == 0);
+            }
+            if (n->fn == "endsWith") {
+                if (margs.empty()) return Value::Bool(false);
+                std::string p = margs[0].toString();
+                return Value::Bool(obj.string.size() >= p.size()
+                    && obj.string.compare(obj.string.size() - p.size(), p.size(), p) == 0);
+            }
+            if (n->fn == "indexOf") {
+                if (margs.empty()) return Value::Num(-1);
+                size_t pos = obj.string.find(margs[0].toString());
+                return Value::Num(pos == std::string::npos ? -1.0 : (double)pos);
+            }
+            if (n->fn == "slice") {
+                int start2 = margs.empty() ? 0 : (int)margs[0].number;
+                int end2 = margs.size() > 1 ? (int)margs[1].number : (int)obj.string.size();
+                int sz = (int)obj.string.size();
+                if (start2 < 0) start2 = std::max(0, sz + start2);
+                if (end2 < 0) end2 = std::max(0, sz + end2);
+                start2 = std::min(start2, sz); end2 = std::min(end2, sz);
+                return Value::Str(start2 < end2 ? obj.string.substr(start2, end2 - start2) : "");
+            }
+            if (n->fn == "charAt") {
+                if (margs.empty()) return Value::Str("");
+                int idx = (int)margs[0].number;
+                if (idx < 0 || idx >= (int)obj.string.size()) return Value::Str("");
+                return Value::Str(std::string(1, obj.string[idx]));
+            }
+            if (n->fn == "repeat") {
+                if (margs.empty()) return Value::Str(obj.string);
+                int cnt = (int)margs[0].number;
+                std::string r;
+                r.reserve(obj.string.size() * cnt);
+                for (int i = 0; i < cnt; i++) r += obj.string;
+                return Value::Str(r);
+            }
+            if (n->fn == "reverse") {
+                std::string s = obj.string;
+                std::reverse(s.begin(), s.end());
+                return Value::Str(s);
             }
         }
         // ── Map 方法（变量回退路径）──────────────────────
@@ -1272,6 +1545,19 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
         return env->get(n->name);  // 抛出 undefined variable
     }
 
+    // ── test 覆盖声明 ──
+    if (auto* n = dynamic_cast<TestDecl*>(node)) {
+        if (noTest_) return Value::Nil();  // --no-test: 跳过
+        // test var: 执行内部声明并强制覆盖
+        if (auto* vd = dynamic_cast<VarDecl*>(n->inner.get())) {
+            Value v = vd->initializer ? evalNode(vd->initializer.get(), env, mod) : Value::Nil();
+            env->set(vd->name, v);  // 强制覆盖
+            return v;
+        }
+        // test func: 已在 execute() 第一遍处理
+        return Value::Nil();
+    }
+
     // ── 声明 ──
     if (auto* n = dynamic_cast<VarDecl*>(node)) {
         Value v = n->initializer ? evalNode(n->initializer.get(), env, mod) : Value::Nil();
@@ -1307,7 +1593,8 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
         // 创建一个 Map 值来表示枚举：Direction.North → 0 等
         auto enumMap = std::make_shared<std::unordered_map<std::string, Value>>();
         for (auto& variant : n->variants) {
-            (*enumMap)[variant.name] = Value::Num((double)variant.value);
+            Value val = variant.value ? evalNode(variant.value.get(), env, mod) : Value::Num(0);
+            (*enumMap)[variant.name] = val;
         }
         Value enumVal = Value::MapOf(enumMap);
         env->set(n->name, enumVal);
@@ -1616,6 +1903,165 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
         return Value::Nil();
     }
 
+    // ── default funcName { value } 全局默认值声明 ────────────
+    if (auto* n = dynamic_cast<DefaultDecl*>(node)) {
+        // 执行前检查：target 必须存在（同 exception 的检查逻辑）
+        auto colonPos = n->target.find(':');
+        if (colonPos != std::string::npos) {
+            std::string typeName   = n->target.substr(0, colonPos);
+            std::string methodName = n->target.substr(colonPos + 1);
+            bool found = false;
+            if (env->has(typeName)) {
+                try {
+                    Value tv = env->get(typeName);
+                    if (tv.type == Value::Type::StructType && tv.structType)
+                        found = tv.structType->findMethod(methodName) != nullptr;
+                } catch (...) {}
+            }
+            if (!found)
+                throw std::runtime_error("default target not found: " + n->target
+                    + " (struct type or method does not exist)");
+        } else {
+            bool found = functions_.count(n->target) || builtins_.count(n->target);
+            if (!found && env->has(n->target)) {
+                try {
+                    Value tv = env->get(n->target);
+                    if (tv.type == Value::Type::Function) found = true;
+                } catch (...) {}
+            }
+            if (!found)
+                throw std::runtime_error("default target not found: " + n->target
+                    + " (function does not exist)");
+        }
+        // 存储 body 的原始 AST 指针，调用出错时 eval
+        auto& bodies = defaultBodies_[n->target];
+        bodies.clear();
+        for (auto& stmt : n->body)
+            bodies.push_back(stmt.get());
+        return Value::Nil();
+    }
+
+    // ══════════════════════════════════════════════════════
+    // Phase 5-7 新节点
+    // ══════════════════════════════════════════════════════
+
+    // ── @profile 装饰的函数 ─────────────────────────────
+    if (auto* n = dynamic_cast<ProfiledFnDecl*>(node)) {
+        auto* fn = dynamic_cast<FnDecl*>(n->fnDecl.get());
+        if (!fn)
+            throw std::runtime_error("@profile: expected function declaration");
+        // 注册函数
+        functions_[fn->name] = fn;
+        // 标记为需要 profile
+        Profiler::instance().markFunction(fn->name);
+        return Value::Nil();
+    }
+
+    // ── @platform 条件编译 ──────────────────────────────
+    if (auto* n = dynamic_cast<PlatformDecl*>(node)) {
+        // 获取当前平台
+#if defined(__aarch64__) || defined(_M_ARM64)
+        std::string currentPlatform = "arm64";
+#elif defined(__riscv)
+        std::string currentPlatform = "riscv64";
+#elif defined(__x86_64__) || defined(_M_X64)
+        std::string currentPlatform = "x86_64";
+#else
+        std::string currentPlatform = "generic";
+#endif
+        // 只在目标平台上执行
+        if (n->target == currentPlatform || n->target == "generic"
+            || n->target == "any") {
+            for (auto& stmt : n->body)
+                evalNode(stmt.get(), env, mod);
+        }
+        return Value::Nil();
+    }
+
+    // ── enum 枚举 ───────────────────────────────────────
+    if (auto* n = dynamic_cast<EnumDecl*>(node)) {
+        // 创建一个 Map，每个变体名 → 值
+        auto m = std::make_shared<std::unordered_map<std::string, Value>>();
+        for (auto& v : n->variants) {
+            Value val = v.value ? evalNode(v.value.get(), env, mod) : Value::Nil();
+            (*m)[v.name] = val;
+            // 也设置反向映射：值 → 名（方便调试）
+            if (val.type == Value::Type::Number) {
+                (*m)[std::to_string((int)val.number)] = Value::Str(v.name);
+            }
+        }
+        Value enumVal = Value::MapOf(m);
+        env->set(n->name, enumVal);
+        return Value::Nil();
+    }
+
+    // ── append 扩展 ─────────────────────────────────────
+    if (auto* n = dynamic_cast<AppendDecl*>(node)) {
+        // 查找目标类型
+        if (!env->has(n->typeName))
+            throw std::runtime_error("append: type '" + n->typeName + "' not found");
+        Value tv = env->get(n->typeName);
+        if (tv.type != Value::Type::StructType || !tv.structType)
+            throw std::runtime_error("append: '" + n->typeName + "' is not a struct type");
+
+        // 将方法添加到结构体类型
+        for (auto& m : n->methods) {
+            StructTypeInfo::Method method;
+            method.name = m.name;
+            method.params = m.params;
+            method.returnType = m.returnType;
+            for (auto& s : m.body)
+                method.body.push_back(std::shared_ptr<ASTNode>(s.get(), [](ASTNode*){}));
+            tv.structType->methods.push_back(std::move(method));
+        }
+        return Value::Nil();
+    }
+
+    // ── alloc(size) ─────────────────────────────────────
+    if (auto* n = dynamic_cast<AllocExpr*>(node)) {
+        Value sz = evalNode(n->size.get(), env, mod);
+        if (sz.type != Value::Type::Number)
+            throw std::runtime_error("alloc: size must be a Number");
+        size_t bytes = (size_t)sz.number;
+        void* ptr = std::calloc(1, bytes);
+        if (!ptr)
+            throw std::runtime_error("alloc: out of memory");
+        // 返回地址作为 Number（Addr 类型在类型系统中，运行时用 double）
+        return Value::Num((double)(uintptr_t)ptr);
+    }
+
+    // ── free(ptr) ───────────────────────────────────────
+    if (auto* n = dynamic_cast<FreeStmt*>(node)) {
+        Value ptr = evalNode(n->ptr.get(), env, mod);
+        if (ptr.type != Value::Type::Number)
+            throw std::runtime_error("free: argument must be an Addr/Number");
+        void* p = (void*)(uintptr_t)ptr.number;
+        std::free(p);
+        return Value::Nil();
+    }
+
+    // ── asm {} 内联汇编 ─────────────────────────────────
+    if (auto* n = dynamic_cast<AsmBlock*>(node)) {
+        // 在解释器中不执行汇编，仅记录（编译后端使用）
+        // 输出到 stderr 用于调试
+        for (auto& inst : n->instructions) {
+            std::cerr << "\033[90m[asm] " << inst << "\033[0m\n";
+        }
+        return Value::Nil();
+    }
+
+    // ── default { value } 语句级默认值返回 ──────────────────
+    // 与 exception {} 配合，在错误条件分支中返回默认值
+    if (auto* n = dynamic_cast<DefaultStmt*>(node)) {
+        auto childEnv = std::make_shared<Environment>(env);
+        Value result = Value::Nil();
+        for (auto& stmt : n->body) {
+            result = evalNode(stmt.get(), childEnv, mod);
+        }
+        // 像 return 一样退出当前函数
+        throw ReturnSignal{result};
+    }
+
     throw std::runtime_error("unknown AST node");
 }
 
@@ -1652,13 +2098,6 @@ Value Interpreter::evalBinary(BinaryExpr* node, std::shared_ptr<Environment> env
         if (l.isTruthy()) return Value::Bool(true);
         return Value::Bool(evalNode(node->right.get(), env, mod).isTruthy());
     }
-    // ?? nil coalescing: return left if not nil, else right
-    if (node->op == "??") {
-        Value l = evalNode(node->left.get(), env, mod);
-        if (l.type != Value::Type::Nil) return l;
-        return evalNode(node->right.get(), env, mod);
-    }
-
     Value l = evalNode(node->left.get(), env, mod);
     Value r = evalNode(node->right.get(), env, mod);
     const std::string& op = node->op;

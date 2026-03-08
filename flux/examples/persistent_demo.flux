@@ -8,7 +8,7 @@ persistent {
 
 var resetOnReload = 0
 
-fn add(a, b) {
+func add(a, b) {
     var result = a + b
     state.totalAdded = state.totalAdded + result
     return result

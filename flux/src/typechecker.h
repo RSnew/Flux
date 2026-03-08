@@ -13,12 +13,20 @@
 enum class TypeKind {
     Unknown,    // 尚未推断（内部用）
     Any,        // 无类型注解时的动态类型（允许所有操作）
-    Int,
-    Float,
+    Int,        // 有符号整数
+    UInt,       // 无符号整数
+    Float,      // 浮点数
+    Natural,    // 自然数（>= 0）
+    Byte,       // 0-255
+    Addr,       // 内存地址（用于硬件操作）
     String,
     Bool,
     Nil,
+    Array,      // 数组类型
+    Map,        // Map 类型
     Fn,         // 函数类型（含参数/返回类型列表）
+    Struct,     // 结构体类型
+    Interface,  // 接口类型
 };
 
 struct FluxType {
@@ -30,24 +38,40 @@ struct FluxType {
     std::shared_ptr<FluxType> returnType;
 
     // ── 工厂方法 ──────────────────────────────────────────
-    static FluxType Any()     { return FluxType(TypeKind::Any); }
-    static FluxType Int()     { return FluxType(TypeKind::Int); }
-    static FluxType Float()   { return FluxType(TypeKind::Float); }
-    static FluxType String()  { return FluxType(TypeKind::String); }
-    static FluxType Bool()    { return FluxType(TypeKind::Bool); }
-    static FluxType Nil()     { return FluxType(TypeKind::Nil); }
-    static FluxType Unknown() { return FluxType(TypeKind::Unknown); }
+    static FluxType Any()       { return FluxType(TypeKind::Any); }
+    static FluxType Int()       { return FluxType(TypeKind::Int); }
+    static FluxType UInt()      { return FluxType(TypeKind::UInt); }
+    static FluxType Float()     { return FluxType(TypeKind::Float); }
+    static FluxType Natural()   { return FluxType(TypeKind::Natural); }
+    static FluxType Byte()      { return FluxType(TypeKind::Byte); }
+    static FluxType Addr()      { return FluxType(TypeKind::Addr); }
+    static FluxType String()    { return FluxType(TypeKind::String); }
+    static FluxType Bool()      { return FluxType(TypeKind::Bool); }
+    static FluxType Nil()       { return FluxType(TypeKind::Nil); }
+    static FluxType ArrayT()    { return FluxType(TypeKind::Array); }
+    static FluxType MapT()      { return FluxType(TypeKind::Map); }
+    static FluxType StructT()   { return FluxType(TypeKind::Struct); }
+    static FluxType InterfaceT(){ return FluxType(TypeKind::Interface); }
+    static FluxType Unknown()   { return FluxType(TypeKind::Unknown); }
 
     std::string name() const {
         switch (kind) {
-            case TypeKind::Any:     return "Any";
-            case TypeKind::Int:     return "Int";
-            case TypeKind::Float:   return "Float";
-            case TypeKind::String:  return "String";
-            case TypeKind::Bool:    return "Bool";
-            case TypeKind::Nil:     return "Nil";
-            case TypeKind::Fn:      return "Fn";
-            case TypeKind::Unknown: return "Unknown";
+            case TypeKind::Any:       return "Any";
+            case TypeKind::Int:       return "Int";
+            case TypeKind::UInt:      return "UInt";
+            case TypeKind::Float:     return "Float";
+            case TypeKind::Natural:   return "Natural";
+            case TypeKind::Byte:      return "Byte";
+            case TypeKind::Addr:      return "Addr";
+            case TypeKind::String:    return "String";
+            case TypeKind::Bool:      return "Bool";
+            case TypeKind::Nil:       return "Nil";
+            case TypeKind::Array:     return "Array";
+            case TypeKind::Map:       return "Map";
+            case TypeKind::Fn:        return "Fn";
+            case TypeKind::Struct:    return "Struct";
+            case TypeKind::Interface: return "Interface";
+            case TypeKind::Unknown:   return "Unknown";
         }
         return "?";
     }
@@ -56,14 +80,16 @@ struct FluxType {
     bool compatibleWith(const FluxType& other) const {
         if (kind == TypeKind::Any || other.kind == TypeKind::Any) return true;
         if (kind == TypeKind::Unknown || other.kind == TypeKind::Unknown) return true;
-        // Int 和 Float 相互兼容（数值宽化）
-        if ((kind == TypeKind::Int || kind == TypeKind::Float) &&
-            (other.kind == TypeKind::Int || other.kind == TypeKind::Float)) return true;
+        // 所有数字类型相互兼容（数值宽化）
+        if (isNumeric() && other.isNumeric()) return true;
         return kind == other.kind;
     }
 
     bool isNumeric() const {
-        return kind == TypeKind::Int || kind == TypeKind::Float || kind == TypeKind::Any;
+        return kind == TypeKind::Int || kind == TypeKind::UInt ||
+               kind == TypeKind::Float || kind == TypeKind::Natural ||
+               kind == TypeKind::Byte || kind == TypeKind::Addr ||
+               kind == TypeKind::Any;
     }
 
     bool operator==(const FluxType& o) const { return kind == o.kind; }
@@ -72,11 +98,17 @@ struct FluxType {
 
 // ── 从字符串名称解析类型 ────────────────────────────────
 inline FluxType parseTypeName(const std::string& name) {
-    if (name == "Int")    return FluxType::Int();
-    if (name == "Float")  return FluxType::Float();
-    if (name == "String") return FluxType::String();
-    if (name == "Bool")   return FluxType::Bool();
-    if (name == "Nil")    return FluxType::Nil();
+    if (name == "Int")     return FluxType::Int();
+    if (name == "UInt")    return FluxType::UInt();
+    if (name == "Float")   return FluxType::Float();
+    if (name == "Natural") return FluxType::Natural();
+    if (name == "Byte")    return FluxType::Byte();
+    if (name == "Addr")    return FluxType::Addr();
+    if (name == "String")  return FluxType::String();
+    if (name == "Bool")    return FluxType::Bool();
+    if (name == "Nil")     return FluxType::Nil();
+    if (name == "Array")   return FluxType::ArrayT();
+    if (name == "Map")     return FluxType::MapT();
     if (name == "Any" || name.empty()) return FluxType::Any();
     return FluxType::Any(); // 未知类型降级为 Any
 }
@@ -167,6 +199,15 @@ private:
     // 检查语句（不返回类型）
     void checkStmt(ASTNode* node, std::shared_ptr<TypeEnv> env);
     void checkBlock(const std::vector<NodePtr>& stmts, std::shared_ptr<TypeEnv> env);
+
+    // Spec v1.0 检查
+    void checkInterfaceConformance(Program* program, std::shared_ptr<TypeEnv> env);
+    void checkExceptionRefs(Program* program, std::shared_ptr<TypeEnv> env);
+
+    // 接口/结构体注册表（名字 → 方法名列表）
+    std::unordered_map<std::string, std::vector<std::string>> interfaces_;
+    std::unordered_map<std::string, std::vector<std::string>> structTypes_;
+    std::unordered_map<std::string, std::string>              structToIface_; // struct → interface
 
     // 错误收集
     void error(const std::string& msg, int line = 0);

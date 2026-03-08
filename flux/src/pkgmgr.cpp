@@ -575,3 +575,34 @@ void pkgList(const std::string& dir) {
             std::cout << "  " << BLD << name << RST << " → " << DIM << file << RST << "\n";
     }
 }
+
+// ═══════════════════════════════════════════════════════════
+// 中心包仓库支持
+// ═══════════════════════════════════════════════════════════
+
+static std::string registryConfigPath() {
+    const char* home = std::getenv("HOME");
+    if (!home) home = "/tmp";
+    return std::string(home) + "/.flux/registry.conf";
+}
+
+std::string getRegistryUrl() {
+    std::string path = registryConfigPath();
+    std::ifstream f(path);
+    if (f.good()) {
+        std::string url;
+        std::getline(f, url);
+        if (!url.empty()) return url;
+    }
+    return "https://pkg.flux-lang.org";  // 默认中心仓库
+}
+
+void setRegistryUrl(const std::string& url) {
+    std::string path = registryConfigPath();
+    // 确保目录存在
+    fs::create_directories(fs::path(path).parent_path());
+    std::ofstream f(path);
+    if (!f)
+        throw std::runtime_error("cannot write registry config: " + path);
+    f << url << "\n";
+}

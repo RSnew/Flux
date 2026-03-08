@@ -1,17 +1,17 @@
 {
     "Function declaration": {
-        "prefix": "fn",
+        "prefix": "func",
         "body": [
-            "fn ${1:name}(${2:params}) -> ${3:ReturnType} {",
+            "func ${1:name}(${2:params}) -> ${3:ReturnType} {",
             "    ${0}",
             "}"
         ],
         "description": "Declare a Flux function"
     },
     "Function declaration (no return)": {
-        "prefix": "fnv",
+        "prefix": "funcv",
         "body": [
-            "fn ${1:name}(${2:params}) {",
+            "func ${1:name}(${2:params}) {",
             "    ${0}",
             "}"
         ],

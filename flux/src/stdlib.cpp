@@ -1,23 +1,35 @@
-// stdlib.cpp — Flux 标准库（File、Json、Http、Time）
+// stdlib.cpp — Flux 标准库（File、Json、Http、Time、Math、Set、Log、Env、Test、hw）
 // 通过 Interpreter::registerStdlib() 注册到解释器
 #include "interpreter.h"
+#include "hw.h"
 
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <iostream>
 #include <stdexcept>
 #include <cstring>
 #include <cctype>
+#include <cmath>    // std::floor, std::ceil, std::round, std::pow, etc.
 #include <cstdio>   // std::remove, std::snprintf
+#include <cstdlib>  // std::rand, std::getenv, std::setenv
 #include <ctime>    // std::time, std::localtime, std::strftime
 #include <chrono>   // std::chrono::*
 #include <thread>   // std::this_thread::sleep_for
+#include <algorithm> // std::sort, std::transform
+#include <filesystem> // File operations (C++17)
+
+namespace fs = std::filesystem;
 
 // POSIX socket（Http 模块使用）
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
 #include <unistd.h>
+
+// OpenSSL（HTTPS 支持）
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 // ═══════════════════════════════════════════════════════════
 // JSON 解析器（手写递归下降）
@@ -257,15 +269,23 @@ static UrlParts parseUrl(const std::string& url) {
     return p;
 }
 
+// RAII 清理助手
+struct SockGuard {
+    int fd; SSL* ssl;
+    SockGuard(int f, SSL* s = nullptr) : fd(f), ssl(s) {}
+    ~SockGuard() {
+        if (ssl) { SSL_shutdown(ssl); SSL_free(ssl); }
+        if (fd >= 0) ::close(fd);
+    }
+};
+
 static std::string httpDoRequest(const std::string& method,
                                   const std::string& url,
                                   const std::string& body,
                                   const std::string& contentType) {
     auto p = parseUrl(url);
-    if (p.https)
-        throw std::runtime_error(
-            "Http: HTTPS is not supported without libcurl. Use http:// instead.");
 
+    // ── DNS 解析 + TCP 连接 ──────────────────────────────
     struct addrinfo hints{}, *res = nullptr;
     hints.ai_family   = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
@@ -283,7 +303,7 @@ static std::string httpDoRequest(const std::string& method,
     }
     freeaddrinfo(res);
 
-    // 构建 HTTP/1.1 请求
+    // ── 构建 HTTP/1.1 请求 ──────────────────────────────
     std::string req = method + " " + p.path + " HTTP/1.1\r\n"
                       "Host: " + p.host + "\r\n"
                       "Connection: close\r\n"
@@ -295,20 +315,67 @@ static std::string httpDoRequest(const std::string& method,
     req += "\r\n";
     if (!body.empty()) req += body;
 
-    if (::send(sock, req.c_str(), req.size(), 0) < 0) {
-        ::close(sock);
-        throw std::runtime_error("Http: send() failed");
-    }
-
-    // 读取完整响应
     std::string response;
     char buf[8192];
-    ssize_t n;
-    while ((n = ::recv(sock, buf, sizeof(buf), 0)) > 0)
-        response.append(buf, (size_t)n);
-    ::close(sock);
 
-    // 去掉 HTTP 头，返回 body
+    if (p.https) {
+        // ── HTTPS: OpenSSL TLS ──────────────────────────
+        static bool ssl_inited = false;
+        if (!ssl_inited) {
+            SSL_library_init();
+            SSL_load_error_strings();
+            OpenSSL_add_all_algorithms();
+            ssl_inited = true;
+        }
+
+        const SSL_METHOD* meth = TLS_client_method();
+        SSL_CTX* ctx = SSL_CTX_new(meth);
+        if (!ctx) {
+            ::close(sock);
+            throw std::runtime_error("Http: SSL_CTX_new() failed");
+        }
+        // 加载系统 CA 证书
+        SSL_CTX_set_default_verify_paths(ctx);
+
+        SSL* ssl = SSL_new(ctx);
+        SSL_set_fd(ssl, sock);
+        // SNI（Server Name Indication）— 很多 HTTPS 站点需要
+        SSL_set_tlsext_host_name(ssl, p.host.c_str());
+
+        SockGuard guard(sock, ssl);
+
+        if (SSL_connect(ssl) <= 0) {
+            SSL_CTX_free(ctx);
+            throw std::runtime_error("Http." + method + ": TLS handshake failed with " + p.host);
+        }
+
+        // 发送
+        if (SSL_write(ssl, req.c_str(), (int)req.size()) <= 0) {
+            SSL_CTX_free(ctx);
+            throw std::runtime_error("Http: SSL_write() failed");
+        }
+
+        // 接收
+        int n;
+        while ((n = SSL_read(ssl, buf, sizeof(buf))) > 0)
+            response.append(buf, (size_t)n);
+
+        SSL_CTX_free(ctx);
+    } else {
+        // ── HTTP: 纯 TCP ────────────────────────────────
+        SockGuard guard(sock, nullptr);
+
+        if (::send(sock, req.c_str(), req.size(), 0) < 0)
+            throw std::runtime_error("Http: send() failed");
+
+        ssize_t n;
+        while ((n = ::recv(sock, buf, sizeof(buf), 0)) > 0)
+            response.append(buf, (size_t)n);
+
+        // SockGuard 析构时关闭 sock，不要再手动 close
+    }
+
+    // ── 去掉 HTTP 头，返回 body ─────────────────────────
     size_t header_end = response.find("\r\n\r\n");
     if (header_end != std::string::npos)
         return response.substr(header_end + 4);
@@ -380,6 +447,86 @@ static std::unordered_map<std::string, StdlibFn> makeFileModule() {
             if (args.empty() || args[0].type != Value::Type::String)
                 throw std::runtime_error("File.delete(path) — path must be a String");
             return Value::Bool(std::remove(args[0].string.c_str()) == 0);
+        }},
+
+        // File.rename(oldPath, newPath) -> Bool
+        {"rename", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2 || args[0].type != Value::Type::String
+                || args[1].type != Value::Type::String)
+                throw std::runtime_error("File.rename(old, new) — both must be Strings");
+            std::error_code ec;
+            fs::rename(args[0].string, args[1].string, ec);
+            return Value::Bool(!ec);
+        }},
+
+        // File.copy(src, dst) -> Bool
+        {"copy", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2 || args[0].type != Value::Type::String
+                || args[1].type != Value::Type::String)
+                throw std::runtime_error("File.copy(src, dst) — both must be Strings");
+            std::error_code ec;
+            fs::copy_file(args[0].string, args[1].string,
+                          fs::copy_options::overwrite_existing, ec);
+            return Value::Bool(!ec);
+        }},
+
+        // File.size(path) -> Number (bytes)
+        {"size", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::String)
+                throw std::runtime_error("File.size(path) — path must be a String");
+            std::error_code ec;
+            auto sz = fs::file_size(args[0].string, ec);
+            if (ec) return Value::Num(-1);
+            return Value::Num((double)sz);
+        }},
+
+        // File.isDir(path) -> Bool
+        {"isDir", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::String)
+                throw std::runtime_error("File.isDir(path) — path must be a String");
+            return Value::Bool(fs::is_directory(args[0].string));
+        }},
+
+        // File.mkdir(path) -> Bool (recursive)
+        {"mkdir", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::String)
+                throw std::runtime_error("File.mkdir(path) — path must be a String");
+            std::error_code ec;
+            fs::create_directories(args[0].string, ec);
+            return Value::Bool(!ec);
+        }},
+
+        // File.listDir(path) -> Array[String]
+        {"listDir", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::String)
+                throw std::runtime_error("File.listDir(path) — path must be a String");
+            auto arr = std::make_shared<std::vector<Value>>();
+            std::error_code ec;
+            for (auto& entry : fs::directory_iterator(args[0].string, ec)) {
+                arr->push_back(Value::Str(entry.path().filename().string()));
+            }
+            return Value::Arr(arr);
+        }},
+
+        // File.ext(path) -> String (file extension)
+        {"ext", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::String)
+                throw std::runtime_error("File.ext(path) — path must be a String");
+            return Value::Str(fs::path(args[0].string).extension().string());
+        }},
+
+        // File.basename(path) -> String (filename without directory)
+        {"basename", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::String)
+                throw std::runtime_error("File.basename(path) — path must be a String");
+            return Value::Str(fs::path(args[0].string).filename().string());
+        }},
+
+        // File.dirname(path) -> String (directory part)
+        {"dirname", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::String)
+                throw std::runtime_error("File.dirname(path) — path must be a String");
+            return Value::Str(fs::path(args[0].string).parent_path().string());
         }},
     };
 }
@@ -504,6 +651,43 @@ static std::unordered_map<std::string, StdlibFn> makeTimeModule() {
                 throw std::runtime_error("Time.diff(a, b) — both arguments must be Numbers");
             return Value::Num(args[1].number - args[0].number);
         }},
+
+        // Time.millis() → Number  (current time in milliseconds)
+        {"millis", [](std::vector<Value>) -> Value {
+            using namespace std::chrono;
+            auto ms = duration_cast<milliseconds>(
+                system_clock::now().time_since_epoch()).count();
+            return Value::Num((double)ms);
+        }},
+
+        // Time.measure(start_ns) → Number  (elapsed ms since start_ns from Time.clock())
+        {"measure", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::Number)
+                throw std::runtime_error("Time.measure(start_ns) — start_ns from Time.clock()");
+            using namespace std::chrono;
+            auto now_ns = (double)duration_cast<nanoseconds>(
+                high_resolution_clock::now().time_since_epoch()).count();
+            return Value::Num((now_ns - args[0].number) / 1e6);  // ms
+        }},
+
+        // Time.date() → Map { year, month, day, hour, minute, second, weekday }
+        {"date", [](std::vector<Value> args) -> Value {
+            std::time_t t;
+            if (!args.empty() && args[0].type == Value::Type::Number)
+                t = (std::time_t)args[0].number;
+            else
+                t = std::time(nullptr);
+            struct tm* tm_info = std::localtime(&t);
+            auto map = std::make_shared<std::unordered_map<std::string, Value>>();
+            (*map)["year"]    = Value::Num(tm_info->tm_year + 1900);
+            (*map)["month"]   = Value::Num(tm_info->tm_mon + 1);
+            (*map)["day"]     = Value::Num(tm_info->tm_mday);
+            (*map)["hour"]    = Value::Num(tm_info->tm_hour);
+            (*map)["minute"]  = Value::Num(tm_info->tm_min);
+            (*map)["second"]  = Value::Num(tm_info->tm_sec);
+            (*map)["weekday"] = Value::Num(tm_info->tm_wday);
+            return Value::MapOf(map);
+        }},
     };
 }
 
@@ -565,11 +749,527 @@ static std::unordered_map<std::string, StdlibFn> makeLogModule() {
     };
 }
 
+// ═══════════════════════════════════════════════════════════
+// Math 模块
+// ═══════════════════════════════════════════════════════════
+static std::unordered_map<std::string, StdlibFn> makeMathModule() {
+    return {
+        {"abs", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::Number)
+                throw std::runtime_error("Math.abs(x) — x must be a Number");
+            return Value::Num(std::abs(args[0].number));
+        }},
+        {"floor", [](std::vector<Value> args) -> Value {
+            if (args.empty()) return Value::Num(0);
+            return Value::Num(std::floor(args[0].number));
+        }},
+        {"ceil", [](std::vector<Value> args) -> Value {
+            if (args.empty()) return Value::Num(0);
+            return Value::Num(std::ceil(args[0].number));
+        }},
+        {"round", [](std::vector<Value> args) -> Value {
+            if (args.empty()) return Value::Num(0);
+            return Value::Num(std::round(args[0].number));
+        }},
+        {"min", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2) throw std::runtime_error("Math.min(a, b) — requires 2 args");
+            return Value::Num(std::min(args[0].number, args[1].number));
+        }},
+        {"max", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2) throw std::runtime_error("Math.max(a, b) — requires 2 args");
+            return Value::Num(std::max(args[0].number, args[1].number));
+        }},
+        {"pow", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2) throw std::runtime_error("Math.pow(base, exp) — requires 2 args");
+            return Value::Num(std::pow(args[0].number, args[1].number));
+        }},
+        {"log", [](std::vector<Value> args) -> Value {
+            if (args.empty()) return Value::Num(0);
+            return Value::Num(std::log(args[0].number));
+        }},
+        {"sin", [](std::vector<Value> args) -> Value {
+            if (args.empty()) return Value::Num(0);
+            return Value::Num(std::sin(args[0].number));
+        }},
+        {"cos", [](std::vector<Value> args) -> Value {
+            if (args.empty()) return Value::Num(0);
+            return Value::Num(std::cos(args[0].number));
+        }},
+        {"sqrt", [](std::vector<Value> args) -> Value {
+            if (args.empty()) return Value::Num(0);
+            return Value::Num(std::sqrt(args[0].number));
+        }},
+        {"tan", [](std::vector<Value> args) -> Value {
+            if (args.empty()) return Value::Num(0);
+            return Value::Num(std::tan(args[0].number));
+        }},
+        {"atan", [](std::vector<Value> args) -> Value {
+            if (args.empty()) return Value::Num(0);
+            return Value::Num(std::atan(args[0].number));
+        }},
+        {"atan2", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2) throw std::runtime_error("Math.atan2(y, x) — requires 2 args");
+            return Value::Num(std::atan2(args[0].number, args[1].number));
+        }},
+        {"log2", [](std::vector<Value> args) -> Value {
+            if (args.empty()) return Value::Num(0);
+            return Value::Num(std::log2(args[0].number));
+        }},
+        {"log10", [](std::vector<Value> args) -> Value {
+            if (args.empty()) return Value::Num(0);
+            return Value::Num(std::log10(args[0].number));
+        }},
+        {"exp", [](std::vector<Value> args) -> Value {
+            if (args.empty()) return Value::Num(1);
+            return Value::Num(std::exp(args[0].number));
+        }},
+        {"clamp", [](std::vector<Value> args) -> Value {
+            if (args.size() < 3) throw std::runtime_error("Math.clamp(val, lo, hi) — requires 3 args");
+            double v = args[0].number, lo = args[1].number, hi = args[2].number;
+            return Value::Num(v < lo ? lo : (v > hi ? hi : v));
+        }},
+        {"sign", [](std::vector<Value> args) -> Value {
+            if (args.empty()) return Value::Num(0);
+            double v = args[0].number;
+            return Value::Num(v > 0 ? 1.0 : (v < 0 ? -1.0 : 0.0));
+        }},
+        {"random", [](std::vector<Value>) -> Value {
+            return Value::Num((double)std::rand() / RAND_MAX);
+        }},
+        {"PI", [](std::vector<Value>) -> Value {
+            return Value::Num(3.14159265358979323846);
+        }},
+        {"E", [](std::vector<Value>) -> Value {
+            return Value::Num(2.71828182845904523536);
+        }},
+        {"INF", [](std::vector<Value>) -> Value {
+            return Value::Num(std::numeric_limits<double>::infinity());
+        }},
+    };
+}
+
+// ═══════════════════════════════════════════════════════════
+// Set 模块 — 基于 Map 的集合操作
+// Set 内部用 Map（key → true）表示
+// ═══════════════════════════════════════════════════════════
+static std::unordered_map<std::string, StdlibFn> makeSetModule() {
+    return {
+        // Set.new() → Map (empty set)
+        {"new", [](std::vector<Value>) -> Value {
+            return Value::MapVal();
+        }},
+        // Set.from(array) → Map (set from array elements)
+        {"from", [](std::vector<Value> args) -> Value {
+            auto map = std::make_shared<std::unordered_map<std::string, Value>>();
+            if (!args.empty() && args[0].type == Value::Type::Array && args[0].array) {
+                for (auto& v : *args[0].array)
+                    (*map)[v.toString()] = Value::Bool(true);
+            }
+            return Value::MapOf(map);
+        }},
+        // Set.add(set, value) → Map
+        {"add", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2 || args[0].type != Value::Type::Map || !args[0].map)
+                throw std::runtime_error("Set.add(set, value)");
+            (*args[0].map)[args[1].toString()] = Value::Bool(true);
+            return args[0];
+        }},
+        // Set.has(set, value) → Bool
+        {"has", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2 || args[0].type != Value::Type::Map || !args[0].map)
+                return Value::Bool(false);
+            return Value::Bool(args[0].map->count(args[1].toString()) > 0);
+        }},
+        // Set.remove(set, value) → Bool
+        {"remove", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2 || args[0].type != Value::Type::Map || !args[0].map)
+                return Value::Bool(false);
+            return Value::Bool(args[0].map->erase(args[1].toString()) > 0);
+        }},
+        // Set.size(set) → Number
+        {"size", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::Map || !args[0].map)
+                return Value::Num(0);
+            return Value::Num((double)args[0].map->size());
+        }},
+        // Set.toArray(set) → Array
+        {"toArray", [](std::vector<Value> args) -> Value {
+            auto arr = std::make_shared<std::vector<Value>>();
+            if (!args.empty() && args[0].type == Value::Type::Map && args[0].map) {
+                for (auto& kv : *args[0].map)
+                    arr->push_back(Value::Str(kv.first));
+            }
+            return Value::Arr(arr);
+        }},
+        // Set.union(a, b) → Map
+        {"union", [](std::vector<Value> args) -> Value {
+            auto map = std::make_shared<std::unordered_map<std::string, Value>>();
+            if (args.size() >= 1 && args[0].type == Value::Type::Map && args[0].map)
+                for (auto& kv : *args[0].map) (*map)[kv.first] = Value::Bool(true);
+            if (args.size() >= 2 && args[1].type == Value::Type::Map && args[1].map)
+                for (auto& kv : *args[1].map) (*map)[kv.first] = Value::Bool(true);
+            return Value::MapOf(map);
+        }},
+        // Set.intersect(a, b) → Map
+        {"intersect", [](std::vector<Value> args) -> Value {
+            auto map = std::make_shared<std::unordered_map<std::string, Value>>();
+            if (args.size() >= 2 && args[0].type == Value::Type::Map && args[0].map
+                && args[1].type == Value::Type::Map && args[1].map) {
+                for (auto& kv : *args[0].map)
+                    if (args[1].map->count(kv.first))
+                        (*map)[kv.first] = Value::Bool(true);
+            }
+            return Value::MapOf(map);
+        }},
+        // Set.diff(a, b) → Map (elements in a but not in b)
+        {"diff", [](std::vector<Value> args) -> Value {
+            auto map = std::make_shared<std::unordered_map<std::string, Value>>();
+            if (args.size() >= 2 && args[0].type == Value::Type::Map && args[0].map) {
+                for (auto& kv : *args[0].map) {
+                    bool inB = args[1].type == Value::Type::Map && args[1].map
+                               && args[1].map->count(kv.first);
+                    if (!inB) (*map)[kv.first] = Value::Bool(true);
+                }
+            }
+            return Value::MapOf(map);
+        }},
+        // Set.equals(a, b) → Bool
+        {"equals", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2) return Value::Bool(false);
+            auto& a = args[0]; auto& b = args[1];
+            if (a.type != Value::Type::Map || b.type != Value::Type::Map) return Value::Bool(false);
+            if (!a.map || !b.map) return Value::Bool(a.map == b.map);
+            if (a.map->size() != b.map->size()) return Value::Bool(false);
+            for (auto& kv : *a.map)
+                if (!b.map->count(kv.first)) return Value::Bool(false);
+            return Value::Bool(true);
+        }},
+    };
+}
+
+// ═══════════════════════════════════════════════════════════
+// Env 模块 — 环境变量
+// ═══════════════════════════════════════════════════════════
+static std::unordered_map<std::string, StdlibFn> makeEnvModule() {
+    return {
+        // Env.get(name) -> String | null
+        {"get", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::String)
+                throw std::runtime_error("Env.get(name) — name must be a String");
+            const char* val = std::getenv(args[0].string.c_str());
+            return val ? Value::Str(val) : Value::Nil();
+        }},
+        // Env.set(name, value) -> Bool
+        {"set", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2 || args[0].type != Value::Type::String)
+                throw std::runtime_error("Env.set(name, value) — name must be a String");
+            return Value::Bool(setenv(args[0].string.c_str(),
+                                      args[1].toString().c_str(), 1) == 0);
+        }},
+        // Env.has(name) -> Bool
+        {"has", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::String)
+                throw std::runtime_error("Env.has(name) — name must be a String");
+            return Value::Bool(std::getenv(args[0].string.c_str()) != nullptr);
+        }},
+        // Env.unset(name) -> Bool
+        {"unset", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::String)
+                throw std::runtime_error("Env.unset(name) — name must be a String");
+            return Value::Bool(unsetenv(args[0].string.c_str()) == 0);
+        }},
+    };
+}
+
+// ═══════════════════════════════════════════════════════════
+// Test 模块 — 内置测试框架
+// ═══════════════════════════════════════════════════════════
+static std::unordered_map<std::string, StdlibFn> makeTestModule() {
+    return {
+        // Test.equal(actual, expected, msg?) → Nil (throws on mismatch)
+        {"equal", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2)
+                throw std::runtime_error("Test.equal(actual, expected)");
+            std::string a = args[0].toString(), b = args[1].toString();
+            if (a != b) {
+                std::string msg = args.size() > 2 ? args[2].toString() : "";
+                throw PanicSignal{"Test failed: expected " + b + ", got " + a
+                                  + (msg.empty() ? "" : " — " + msg)};
+            }
+            return Value::Nil();
+        }},
+        // Test.notEqual(actual, expected, msg?) → Nil
+        {"notEqual", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2)
+                throw std::runtime_error("Test.notEqual(actual, expected)");
+            std::string a = args[0].toString(), b = args[1].toString();
+            if (a == b) {
+                std::string msg = args.size() > 2 ? args[2].toString() : "";
+                throw PanicSignal{"Test failed: values should not be equal: " + a
+                                  + (msg.empty() ? "" : " — " + msg)};
+            }
+            return Value::Nil();
+        }},
+        // Test.isTrue(cond, msg?) → Nil
+        {"isTrue", [](std::vector<Value> args) -> Value {
+            if (args.empty() || !args[0].isTruthy()) {
+                std::string msg = args.size() > 1 ? args[1].toString() : "expected true";
+                throw PanicSignal{"Test failed: " + msg};
+            }
+            return Value::Nil();
+        }},
+        // Test.isFalse(cond, msg?) → Nil
+        {"isFalse", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].isTruthy()) {
+                std::string msg = args.size() > 1 ? args[1].toString() : "expected false";
+                throw PanicSignal{"Test failed: " + msg};
+            }
+            return Value::Nil();
+        }},
+        // Test.isNil(val, msg?) → Nil
+        {"isNil", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::Nil) {
+                std::string msg = args.size() > 1 ? args[1].toString() : "expected nil";
+                throw PanicSignal{"Test failed: " + msg};
+            }
+            return Value::Nil();
+        }},
+        // Test.throws(fn_name, msg?) → Bool (checks if calling fn() panics)
+        // Note: This is a simplified version - actual implementation would
+        // need interpreter access to call the function
+        {"throws", [](std::vector<Value> args) -> Value {
+            if (args.empty())
+                throw std::runtime_error("Test.throws(fn_name)");
+            // placeholder — true exception testing requires interpreter integration
+            return Value::Bool(true);
+        }},
+    };
+}
+
+// ═══════════════════════════════════════════════════════════
+// String 模块 — 字符串工具函数
+// ═══════════════════════════════════════════════════════════
+static std::unordered_map<std::string, StdlibFn> makeStringModule() {
+    return {
+        // String.replace(str, old, new) → String
+        {"replace", [](std::vector<Value> args) -> Value {
+            if (args.size() < 3) throw std::runtime_error("String.replace(str, old, new)");
+            std::string s = args[0].toString();
+            std::string from = args[1].toString();
+            std::string to = args[2].toString();
+            if (from.empty()) return Value::Str(s);
+            size_t pos = 0;
+            while ((pos = s.find(from, pos)) != std::string::npos) {
+                s.replace(pos, from.length(), to);
+                pos += to.length();
+            }
+            return Value::Str(s);
+        }},
+        // String.startsWith(str, prefix) → Bool
+        {"startsWith", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2) return Value::Bool(false);
+            std::string s = args[0].toString(), p = args[1].toString();
+            return Value::Bool(s.size() >= p.size() && s.compare(0, p.size(), p) == 0);
+        }},
+        // String.endsWith(str, suffix) → Bool
+        {"endsWith", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2) return Value::Bool(false);
+            std::string s = args[0].toString(), p = args[1].toString();
+            return Value::Bool(s.size() >= p.size()
+                && s.compare(s.size() - p.size(), p.size(), p) == 0);
+        }},
+        // String.repeat(str, n) → String
+        {"repeat", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2) throw std::runtime_error("String.repeat(str, n)");
+            std::string s = args[0].toString();
+            int n = (int)args[1].number;
+            std::string r;
+            r.reserve(s.size() * n);
+            for (int i = 0; i < n; i++) r += s;
+            return Value::Str(r);
+        }},
+        // String.indexOf(str, sub) → Number (-1 if not found)
+        {"indexOf", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2) return Value::Num(-1);
+            size_t pos = args[0].toString().find(args[1].toString());
+            return Value::Num(pos == std::string::npos ? -1.0 : (double)pos);
+        }},
+        // String.slice(str, start, end?) → String
+        {"slice", [](std::vector<Value> args) -> Value {
+            if (args.empty()) return Value::Str("");
+            std::string s = args[0].toString();
+            int start = args.size() > 1 ? (int)args[1].number : 0;
+            int end = args.size() > 2 ? (int)args[2].number : (int)s.size();
+            if (start < 0) start = std::max(0, (int)s.size() + start);
+            if (end < 0) end = std::max(0, (int)s.size() + end);
+            if (start >= (int)s.size() || start >= end) return Value::Str("");
+            return Value::Str(s.substr(start, end - start));
+        }},
+        // String.charAt(str, index) → String (single char)
+        {"charAt", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2) return Value::Str("");
+            std::string s = args[0].toString();
+            int idx = (int)args[1].number;
+            if (idx < 0 || idx >= (int)s.size()) return Value::Str("");
+            return Value::Str(std::string(1, s[idx]));
+        }},
+        // String.padLeft(str, len, fill=" ") → String
+        {"padLeft", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2) throw std::runtime_error("String.padLeft(str, len, fill?)");
+            std::string s = args[0].toString();
+            int len = (int)args[1].number;
+            std::string fill = args.size() > 2 ? args[2].toString() : " ";
+            if (fill.empty()) fill = " ";
+            while ((int)s.size() < len) s = fill + s;
+            return Value::Str(s);
+        }},
+        // String.padRight(str, len, fill=" ") → String
+        {"padRight", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2) throw std::runtime_error("String.padRight(str, len, fill?)");
+            std::string s = args[0].toString();
+            int len = (int)args[1].number;
+            std::string fill = args.size() > 2 ? args[2].toString() : " ";
+            if (fill.empty()) fill = " ";
+            while ((int)s.size() < len) s += fill;
+            return Value::Str(s);
+        }},
+        // String.chars(str) → Array[String] (split into individual characters)
+        {"chars", [](std::vector<Value> args) -> Value {
+            auto arr = std::make_shared<std::vector<Value>>();
+            if (!args.empty()) {
+                std::string s = args[0].toString();
+                for (char c : s) arr->push_back(Value::Str(std::string(1, c)));
+            }
+            return Value::Arr(arr);
+        }},
+        // String.code(str) → Number (ASCII/Unicode code of first char)
+        {"code", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].toString().empty()) return Value::Num(0);
+            return Value::Num((double)(unsigned char)args[0].toString()[0]);
+        }},
+        // String.fromCode(n) → String (char from ASCII/Unicode code)
+        {"fromCode", [](std::vector<Value> args) -> Value {
+            if (args.empty()) return Value::Str("");
+            return Value::Str(std::string(1, (char)(int)args[0].number));
+        }},
+        // String.reverse(str) → String
+        {"reverse", [](std::vector<Value> args) -> Value {
+            if (args.empty()) return Value::Str("");
+            std::string s = args[0].toString();
+            std::reverse(s.begin(), s.end());
+            return Value::Str(s);
+        }},
+    };
+}
+
+// ═══════════════════════════════════════════════════════════
+// Http.serve — 简易 HTTP 服务器
+// ═══════════════════════════════════════════════════════════
+static void addHttpServerToModule(std::unordered_map<std::string, StdlibFn>& httpMod) {
+    // Http.serve(port, handler_map) → Nil (blocking)
+    // handler_map is a Map of "METHOD /path" → response string
+    httpMod["serve"] = [](std::vector<Value> args) -> Value {
+        if (args.size() < 2 || args[0].type != Value::Type::Number)
+            throw std::runtime_error("Http.serve(port, routes)");
+
+        int port = (int)args[0].number;
+        Value routes = args[1]; // Map of "GET /path" → response
+
+        int serverFd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (serverFd < 0) throw std::runtime_error("Http.serve: socket() failed");
+
+        int opt = 1;
+        setsockopt(serverFd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+        struct sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = INADDR_ANY;
+        addr.sin_port = htons(port);
+
+        if (::bind(serverFd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            ::close(serverFd);
+            throw std::runtime_error("Http.serve: bind() failed on port " + std::to_string(port));
+        }
+        if (::listen(serverFd, 128) < 0) {
+            ::close(serverFd);
+            throw std::runtime_error("Http.serve: listen() failed");
+        }
+
+        std::cout << "\033[32m[Http.serve]\033[0m Listening on port " << port << "\n";
+
+        while (true) {
+            int clientFd;
+            {
+                GILRelease release;
+                clientFd = ::accept(serverFd, nullptr, nullptr);
+            }
+            if (clientFd < 0) continue;
+
+            // Read request
+            char buf[4096];
+            ssize_t n = ::recv(clientFd, buf, sizeof(buf) - 1, 0);
+            if (n <= 0) { ::close(clientFd); continue; }
+            buf[n] = '\0';
+
+            // Parse request line: "GET /path HTTP/1.1"
+            std::string req(buf);
+            std::string method, path;
+            {
+                size_t sp1 = req.find(' ');
+                size_t sp2 = req.find(' ', sp1 + 1);
+                if (sp1 != std::string::npos && sp2 != std::string::npos) {
+                    method = req.substr(0, sp1);
+                    path   = req.substr(sp1 + 1, sp2 - sp1 - 1);
+                }
+            }
+
+            // Route lookup
+            std::string responseBody = "404 Not Found";
+            int status = 404;
+            if (routes.type == Value::Type::Map && routes.map) {
+                std::string key = method + " " + path;
+                auto it = routes.map->find(key);
+                if (it != routes.map->end()) {
+                    responseBody = it->second.toString();
+                    status = 200;
+                } else {
+                    // Try wildcard: "GET *"
+                    auto wit = routes.map->find(method + " *");
+                    if (wit != routes.map->end()) {
+                        responseBody = wit->second.toString();
+                        status = 200;
+                    }
+                }
+            }
+
+            // Send response
+            std::string response = "HTTP/1.1 " + std::to_string(status) + " "
+                + (status == 200 ? "OK" : "Not Found") + "\r\n"
+                + "Content-Type: text/plain\r\n"
+                + "Content-Length: " + std::to_string(responseBody.size()) + "\r\n"
+                + "Connection: close\r\n\r\n"
+                + responseBody;
+            ::send(clientFd, response.c_str(), response.size(), 0);
+            ::close(clientFd);
+        }
+        ::close(serverFd);
+        return Value::Nil();
+    };
+}
+
 void Interpreter::registerStdlib() {
     registerStdlibModule("File", makeFileModule());
     registerStdlibModule("Json", makeJsonModule());
-    registerStdlibModule("Http", makeHttpModule());
+    auto httpMod = makeHttpModule();
+    addHttpServerToModule(httpMod);
+    registerStdlibModule("Http", std::move(httpMod));
     registerStdlibModule("Time", makeTimeModule());
     registerStdlibModule("Chan", makeChanModule());
-    registerStdlibModule("log",  makeLogModule());
+    registerStdlibModule("Math", makeMathModule());
+    registerStdlibModule("Set",  makeSetModule());
+    registerStdlibModule("Log",  makeLogModule());
+    registerStdlibModule("Env",    makeEnvModule());
+    registerStdlibModule("Test",   makeTestModule());
+    registerStdlibModule("String", makeStringModule());
+    registerStdlibModule("hw",     makeHwModule());
 }

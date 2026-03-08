@@ -32,7 +32,7 @@ cmake .. && cmake --build . -j$(nproc)
 var name = "World"
 print("Hello, \(name)!")
 
-fn factorial(n) {
+func factorial(n) {
     if n <= 1 { return 1 }
     return n * factorial(n - 1)
 }
@@ -78,8 +78,8 @@ print(c.area())   // 78.54
 ```flux
 module Counter {
     persistent { count: 0 }
-    fn increment() { state.count = state.count + 1 }
-    fn getValue()  { return state.count }
+    func increment() { state.count = state.count + 1 }
+    func getValue()  { return state.count }
 }
 
 Counter.increment()
@@ -90,7 +90,7 @@ print(Counter.getValue())
 ```flux
 @supervised(restart: .always, maxRetries: 3)
 module PaymentService {
-    fn charge(amount) {
+    func charge(amount) {
         if amount < 0 { panic("negative amount") }
     }
 }
@@ -102,7 +102,7 @@ module PaymentService {
 
 @concurrent(pool: "cpu-pool")
 module ImageProcessor {
-    fn resize(w, h) { return w * h }
+    func resize(w, h) { return w * h }
 }
 
 var future = ImageProcessor.resize.async(1920, 1080)

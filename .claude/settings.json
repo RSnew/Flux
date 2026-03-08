@@ -1,0 +1,9 @@
+{
+  "skills": {
+    "code-understanding": {
+      "description": "Help AI understand the Flux codebase — architecture, data flow, and implementation details",
+      "path": ".claude/skills/code-understanding.md",
+      "trigger": "when user asks to understand, explain, or analyze Flux code"
+    }
+  }
+}

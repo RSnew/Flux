@@ -5,8 +5,8 @@ enum class TokenType {
     // 字面量
     NUMBER, STRING, IDENTIFIER,
     // 关键字
-    VAR, CONF, FN, FUNC, RETURN, IF, ELSE, WHILE, TRUE, FALSE, NIL,
-    FOR, IN, ENUM,
+    VAR, CONF, FUNC, RETURN, IF, ELSE, WHILE, TRUE, FALSE, NULL_TOKEN,
+    FOR, IN,
     PERSISTENT, STATE, MODULE, MIGRATE,
     SUPERVISED, AT,
     DOT_ALWAYS, DOT_NEVER,
@@ -18,11 +18,21 @@ enum class TokenType {
     // 新关键字 (Spec v1.0)
     INTERFACE,      // interface declaration keyword
     EXCEPTION,      // exception error-description keyword
+    // Phase 5-7 新关键字
+    PROFILE,        // @profile 性能分析装饰器
+    PLATFORM,       // @platform 平台声明
+    ENUM,           // enum 枚举关键字
+    APPEND,         // append 扩展机制
+    ALLOC,          // alloc 手动内存分配
+    FREE,           // free 手动内存释放
+    ASM,            // asm 内联汇编
+    DEFAULT,        // default 错误恢复
+    TEST,           // test 测试覆盖声明
     // 运算符
     PLUS, MINUS, STAR, SLASH, PERCENT,
     EQ, NEQ, LT, GT, LEQ, GEQ,
     AND, OR, NOT,
-    QUESTION_QUESTION, // ?? nil-coalescing
+    // QUESTION_QUESTION removed — ?? syntax removed from Flux v1.0
     // 赋值
     ASSIGN, PLUS_ASSIGN, MINUS_ASSIGN,
     // 分隔符

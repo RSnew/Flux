@@ -4,18 +4,16 @@
 const std::unordered_map<std::string, TokenType> Lexer::keywords_ = {
     {"var",        TokenType::VAR},
     {"conf",       TokenType::CONF},      // 常量声明
-    {"fn",         TokenType::FN},
-    {"func",       TokenType::FUNC},      // Spec v1.0: alias for fn
+    {"func",       TokenType::FUNC},
     {"return",     TokenType::RETURN},
     {"if",         TokenType::IF},
     {"else",       TokenType::ELSE},
     {"while",      TokenType::WHILE},
     {"true",       TokenType::TRUE},
     {"false",      TokenType::FALSE},
-    {"nil",        TokenType::NIL},
+    {"null",       TokenType::NULL_TOKEN},
     {"for",        TokenType::FOR},
     {"in",         TokenType::IN},
-    {"enum",       TokenType::ENUM},
     {"persistent", TokenType::PERSISTENT},
     {"state",      TokenType::STATE},
     {"module",     TokenType::MODULE},
@@ -31,6 +29,16 @@ const std::unordered_map<std::string, TokenType> Lexer::keywords_ = {
     // Spec v1.0 新关键字
     {"interface",  TokenType::INTERFACE},
     {"exception",  TokenType::EXCEPTION},
+    // Phase 5-7 新关键字
+    {"profile",    TokenType::PROFILE},
+    {"platform",   TokenType::PLATFORM},
+    {"enum",       TokenType::ENUM},
+    {"append",     TokenType::APPEND},
+    {"alloc",      TokenType::ALLOC},
+    {"free",       TokenType::FREE},
+    {"asm",        TokenType::ASM},
+    {"default",    TokenType::DEFAULT},
+    {"test",       TokenType::TEST},
 };
 
 Lexer::Lexer(const std::string& source) : source_(source) {}
@@ -201,7 +209,8 @@ std::vector<Token> Lexer::tokenize() {
             case '>': { bool p = peek()=='='; if(p) advance(); tokens.push_back({p ? TokenType::GEQ    : TokenType::GT,     p ? ">=" : ">",  line_}); break; }
             case '&': if (peek()=='&') { advance(); tokens.push_back({TokenType::AND, "&&", line_}); } break;
             case '|': if (peek()=='|') { advance(); tokens.push_back({TokenType::OR,  "||", line_}); } break;
-            case '?': if (peek()=='?') { advance(); tokens.push_back({TokenType::QUESTION_QUESTION, "??", line_}); } break;
+            // '?' — no longer used (??  nil-coalescing removed from Flux v1.0)
+            case '?': break;
             case '(': tokens.push_back({TokenType::LPAREN, "(", line_}); break;
             case ')': tokens.push_back({TokenType::RPAREN, ")", line_}); break;
             case '{': tokens.push_back({TokenType::LBRACE, "{", line_}); break;
@@ -212,7 +221,7 @@ std::vector<Token> Lexer::tokenize() {
                 // .always / .never 枚举值
                 if (pos_ < source_.size() && std::isalpha(peek())) {
                     std::string word;
-                    while (pos_ < source_.size() && std::isalpha(peek()))
+                    while (pos_ < source_.size() && (std::isalnum(peek()) || peek() == '_'))
                         word += advance();
                     if      (word == "always") tokens.push_back({TokenType::DOT_ALWAYS, ".always", line_});
                     else if (word == "never")  tokens.push_back({TokenType::DOT_NEVER,  ".never",  line_});

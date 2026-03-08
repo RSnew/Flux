@@ -7,6 +7,15 @@
 #include "formatter.h"
 #include "watcher.h"
 #include "pkgmgr.h"
+#include "lsp.h"
+#include "debugger.h"
+#include "gc.h"
+#include "hir.h"
+#include "mir.h"
+#include "jit.h"
+#include "codegen.h"
+#include "profiler.h"
+#include "fluz.h"
 
 #include <iostream>
 #include <fstream>
@@ -15,6 +24,7 @@
 #include <vector>
 #include <mutex>
 #include <chrono>
+#include <functional>
 
 // ── ANSI 颜色 ─────────────────────────────────────────────
 #define CLR_RESET  "\033[0m"
@@ -42,9 +52,11 @@ static void printBanner(const std::string& file) {
 }
 
 // ── 编译并执行（热更新时复用解释器状态）──────────────────
-static bool g_useVM = false;   // --vm 标志
+static bool g_useVM  = false;   // --vm 标志
+static bool g_noTest = false;   // --no-test 标志
 
 static void runSource(const std::string& source, Interpreter& interp, bool isReload) {
+    interp.setNoTest(g_noTest);
     try {
         Lexer  lexer(source);
         auto   tokens = lexer.tokenize();
@@ -376,6 +388,380 @@ static void runFile(const std::string& filepath) {
     while (true) std::this_thread::sleep_for(std::chrono::seconds(1));
 }
 
+// ═══════════════════════════════════════════════════════════
+// flux dev <file> — 开发模式：热更新 + 增量编译 + 自动测试
+// ═══════════════════════════════════════════════════════════
+static std::string g_lastSourceHash;
+
+// 全局函数版本哈希表：funcName → FNV hash of function body
+static std::unordered_map<std::string, uint64_t> g_functionHashes;
+
+static std::string hashSource(const std::string& src) {
+    return std::to_string(fnvHash(src));
+}
+
+// 提取每个函数的源码哈希（用于增量更新检测）
+static std::unordered_map<std::string, uint64_t> computeFunctionHashes(Program* program) {
+    std::unordered_map<std::string, uint64_t> hashes;
+    for (auto& stmt : program->statements) {
+        if (auto* fn = dynamic_cast<FnDecl*>(stmt.get())) {
+            // Hash function by name + param count + body statement count
+            // (a proxy for body content since we can't easily serialize AST)
+            std::string sig = fn->name + "(" + std::to_string(fn->params.size()) + "){"
+                            + std::to_string(fn->body.size()) + "}";
+            hashes[fn->name] = fnvHash(sig);
+        }
+    }
+    return hashes;
+}
+
+// Run tests from a test file if it exists
+static void runTestFile(const std::string& mainFile, Interpreter& interp) {
+    // Look for corresponding test file
+    std::string testFile;
+    auto dot = mainFile.rfind('.');
+    if (dot != std::string::npos)
+        testFile = mainFile.substr(0, dot) + "_test" + mainFile.substr(dot);
+    else
+        testFile = mainFile + "_test";
+
+    // Also check tests/ directory
+    std::string testsDir;
+    auto slash = mainFile.rfind('/');
+    if (slash != std::string::npos) {
+        testsDir = mainFile.substr(0, slash) + "/tests/test.flux";
+    } else {
+        testsDir = "tests/test.flux";
+    }
+
+    std::string testSrc;
+    bool foundTest = false;
+    std::string testPath;
+
+    // Try test file variants
+    for (auto& path : {testFile, testsDir}) {
+        std::ifstream f(path);
+        if (f.good()) {
+            testSrc = std::string(std::istreambuf_iterator<char>(f), {});
+            foundTest = true;
+            testPath = path;
+            break;
+        }
+    }
+
+    if (!foundTest) return;
+
+    std::cout << CLR_GRAY << "\n🧪 Running tests: " << testPath << CLR_RESET << "\n";
+
+    auto start = std::chrono::high_resolution_clock::now();
+    try {
+        Lexer  lexer(testSrc);
+        auto   tokens = lexer.tokenize();
+        Parser parser(std::move(tokens));
+        auto   program = parser.parse();
+
+        interp.execute(program.get());
+
+        auto end = std::chrono::high_resolution_clock::now();
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+        std::cout << CLR_GREEN << "✅ All tests passed (" << ms << "ms)" << CLR_RESET << "\n";
+
+    } catch (const PanicSignal& p) {
+        auto end = std::chrono::high_resolution_clock::now();
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+        std::cerr << CLR_RED << "❌ Test failed (" << ms << "ms): "
+                  << p.message << CLR_RESET << "\n";
+    } catch (const std::exception& e) {
+        std::cerr << CLR_RED << "❌ Test error: " << e.what() << CLR_RESET << "\n";
+    }
+}
+
+static void runDevSource(const std::string& source, const std::string& filepath,
+                          Interpreter& interp, bool isReload) {
+    // Incremental compilation: skip if source hasn't changed
+    std::string newHash = hashSource(source);
+    if (isReload && newHash == g_lastSourceHash) {
+        std::cout << CLR_GRAY << "  (no changes detected, skipping)" << CLR_RESET << "\n";
+        return;
+    }
+    g_lastSourceHash = newHash;
+
+    auto compileStart = std::chrono::high_resolution_clock::now();
+
+    try {
+        Lexer  lexer(source);
+        auto   tokens = lexer.tokenize();
+        Parser parser(std::move(tokens));
+        auto   program = parser.parse();
+
+        // Type check
+        TypeChecker checker;
+        auto typeErrors = checker.check(program.get());
+        if (!typeErrors.empty()) {
+            std::cerr << CLR_RED CLR_BOLD
+                      << "\n🔴 Type errors — execution blocked:\n"
+                      << CLR_RESET;
+            for (auto& e : typeErrors) {
+                std::cerr << CLR_RED << "   ";
+                if (e.line > 0) std::cerr << "line " << e.line << ": ";
+                std::cerr << e.message << CLR_RESET << "\n";
+            }
+            return;
+        }
+
+        auto compileEnd = std::chrono::high_resolution_clock::now();
+        auto compileMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            compileEnd - compileStart).count();
+
+        // Per-function incremental change detection
+        auto newHashes = computeFunctionHashes(program.get());
+        int changedFns = 0, totalFns = (int)newHashes.size();
+        std::vector<std::string> changedNames;
+
+        if (isReload) {
+            for (auto& [name, hash] : newHashes) {
+                auto it = g_functionHashes.find(name);
+                if (it == g_functionHashes.end() || it->second != hash) {
+                    changedFns++;
+                    changedNames.push_back(name);
+                }
+            }
+            // Detect removed functions
+            for (auto& [name, hash] : g_functionHashes) {
+                if (newHashes.find(name) == newHashes.end())
+                    changedNames.push_back("-" + name);
+            }
+        } else {
+            changedFns = totalFns;
+        }
+        g_functionHashes = newHashes;
+
+        if (isReload) {
+            std::cout << CLR_YELLOW << "\n🔄 Hot reload detected..."
+                      << CLR_GRAY << " (compiled in " << compileMs << "ms, "
+                      << changedFns << "/" << totalFns << " functions changed)"
+                      << CLR_RESET << "\n";
+            if (!changedNames.empty()) {
+                std::cout << CLR_GRAY << "  changed: ";
+                for (size_t i = 0; i < changedNames.size(); i++) {
+                    if (i > 0) std::cout << ", ";
+                    std::cout << changedNames[i];
+                }
+                std::cout << CLR_RESET << "\n";
+            }
+            std::cout << CLR_GRAY << "─────────────────────────────\n" << CLR_RESET;
+        }
+
+        // Execute
+        interp.execute(program.get());
+
+        if (isReload)
+            std::cout << CLR_GREEN << "✅ Hot reload complete" << CLR_RESET << "\n";
+
+        // Auto-run tests
+        runTestFile(filepath, interp);
+
+    } catch (const ParseError& e) {
+        std::cerr << CLR_RED << "\n❌ Parse error at line " << e.line
+                  << ": " << e.what() << CLR_RESET << "\n";
+    } catch (const std::exception& e) {
+        std::cerr << CLR_RED << "\n❌ Runtime error: " << e.what() << CLR_RESET << "\n";
+    }
+}
+
+static void cmdDev(const std::string& filepath) {
+    Interpreter interp;
+
+    std::cout << CLR_BOLD CLR_CYAN
+              << "╔══════════════════════════════════════╗\n"
+              << "║       Flux Dev Mode                  ║\n"
+              << "║       Hot Reload + Auto Test  🔥     ║\n"
+              << "╚══════════════════════════════════════╝\n"
+              << CLR_RESET;
+    std::cout << CLR_GRAY << "  Watching: " << filepath << CLR_RESET << "\n\n";
+
+    // Initial run
+    try {
+        runDevSource(readFile(filepath), filepath, interp, false);
+    } catch (const std::exception& e) {
+        std::cerr << CLR_RED << "Error reading file: " << e.what() << CLR_RESET << "\n";
+        return;
+    }
+
+    // Watch for changes
+    std::mutex reloadMutex;
+    FileWatcher watcher(filepath, [&](const std::string& path) {
+        std::lock_guard<std::mutex> lock(reloadMutex);
+        try {
+            runDevSource(readFile(path), path, interp, true);
+        } catch (const std::exception& e) {
+            std::cerr << CLR_RED << "File read error: " << e.what() << CLR_RESET << "\n";
+        }
+    });
+
+    watcher.start();
+    std::cout << CLR_GRAY << "\n[Dev mode active — Ctrl+C to exit]\n" << CLR_RESET;
+
+    while (true) std::this_thread::sleep_for(std::chrono::seconds(1));
+}
+
+// ═══════════════════════════════════════════════════════════
+// flux lsp — LSP 语言服务器
+// ═══════════════════════════════════════════════════════════
+static void cmdLsp() {
+    FluxLSP lsp;
+    lsp.run();
+}
+
+// ═══════════════════════════════════════════════════════════
+// flux debug <file> — 交互式调试器
+// ═══════════════════════════════════════════════════════════
+static int cmdDebug(const std::string& filepath) {
+    Interpreter interp;
+    Debugger debugger;
+
+    std::cout << CLR_BOLD CLR_CYAN
+              << "Flux Debugger  (type 'help' for commands)\n"
+              << CLR_RESET;
+    std::cout << CLR_GRAY << "  File: " << filepath << CLR_RESET << "\n\n";
+
+    try {
+        std::string src = readFile(filepath);
+        Lexer  lexer(src);
+        auto   tokens = lexer.tokenize();
+        Parser parser(std::move(tokens));
+        auto   program = parser.parse();
+
+        // Type check first
+        TypeChecker checker;
+        auto typeErrors = checker.check(program.get());
+        if (!typeErrors.empty()) {
+            for (auto& e : typeErrors) {
+                std::cerr << CLR_RED << "  ";
+                if (e.line > 0) std::cerr << "line " << e.line << ": ";
+                std::cerr << e.message << CLR_RESET << "\n";
+            }
+            return 1;
+        }
+
+        // Interactive debugger loop
+        std::string cmd;
+        while (true) {
+            std::cout << CLR_CYAN << "debug> " << CLR_RESET;
+            std::cout.flush();
+            if (!std::getline(std::cin, cmd)) break;
+
+            if (cmd == "quit" || cmd == "q") break;
+            if (cmd == "help" || cmd == "h") {
+                std::cout
+                    << "  b <line>     — set breakpoint at line\n"
+                    << "  d <id>       — delete breakpoint\n"
+                    << "  bl           — list breakpoints\n"
+                    << "  r / run      — run program\n"
+                    << "  c / continue — continue execution\n"
+                    << "  n / next     — step over\n"
+                    << "  s / step     — step into\n"
+                    << "  out          — step out\n"
+                    << "  bt           — show call stack\n"
+                    << "  p <expr>     — evaluate expression\n"
+                    << "  state        — show persistent state\n"
+                    << "  gc           — run cycle detection\n"
+                    << "  q / quit     — exit debugger\n";
+                continue;
+            }
+            if (cmd.substr(0, 2) == "b ") {
+                int line = std::stoi(cmd.substr(2));
+                int id = debugger.addBreakpoint(filepath, line);
+                std::cout << CLR_GREEN << "Breakpoint " << id
+                          << " set at line " << line << CLR_RESET << "\n";
+                continue;
+            }
+            if (cmd.substr(0, 2) == "d ") {
+                int id = std::stoi(cmd.substr(2));
+                if (debugger.removeBreakpoint(id))
+                    std::cout << CLR_GRAY << "Breakpoint " << id << " removed\n" << CLR_RESET;
+                else
+                    std::cout << CLR_RED << "No breakpoint with id " << id << "\n" << CLR_RESET;
+                continue;
+            }
+            if (cmd == "bl") {
+                auto bps = debugger.getBreakpoints();
+                if (bps.empty()) {
+                    std::cout << CLR_GRAY << "(no breakpoints)\n" << CLR_RESET;
+                } else {
+                    for (auto& bp : bps)
+                        std::cout << "  [" << bp.id << "] line " << bp.line
+                                  << (bp.enabled ? "" : " (disabled)") << "\n";
+                }
+                continue;
+            }
+            if (cmd == "r" || cmd == "run") {
+                debugger.setStepMode(StepMode::Continue);
+                try {
+                    interp.execute(program.get());
+                    std::cout << CLR_GREEN << "Program finished\n" << CLR_RESET;
+                } catch (const std::exception& e) {
+                    std::cerr << CLR_RED << "Runtime error: " << e.what() << CLR_RESET << "\n";
+                }
+                continue;
+            }
+            if (cmd == "state") {
+                auto vars = debugger.getPersistentState(interp.persistentStore_);
+                if (vars.empty()) {
+                    std::cout << CLR_GRAY << "(no persistent state)\n" << CLR_RESET;
+                } else {
+                    for (auto& v : vars)
+                        std::cout << "  " << v.name << " = " << v.value
+                                  << " : " << v.type << "\n";
+                }
+                continue;
+            }
+            if (cmd == "gc") {
+                CycleDetector detector;
+                auto cycles = detector.detect(interp.globalEnv_);
+                if (cycles.empty()) {
+                    std::cout << CLR_GREEN << "No cycles detected\n" << CLR_RESET;
+                } else {
+                    for (auto& c : cycles)
+                        std::cout << CLR_YELLOW << "  " << c.description
+                                  << " (refcount=" << c.refCount << ")\n" << CLR_RESET;
+                }
+                continue;
+            }
+            if (cmd == "bt") {
+                auto stack = debugger.getCallStack();
+                if (stack.empty()) {
+                    std::cout << CLR_GRAY << "(no active call stack)\n" << CLR_RESET;
+                } else {
+                    for (auto& f : stack)
+                        std::cout << "  #" << f.id << " " << f.name
+                                  << " at " << f.file << ":" << f.line << "\n";
+                }
+                continue;
+            }
+            if (cmd.substr(0, 2) == "p ") {
+                std::string expr = cmd.substr(2);
+                try {
+                    Lexer  lex(expr);
+                    auto   toks = lex.tokenize();
+                    Parser par(std::move(toks));
+                    auto   prog = par.parse();
+                    interp.executeRepl(prog.get());
+                } catch (const std::exception& e) {
+                    std::cerr << CLR_RED << e.what() << CLR_RESET << "\n";
+                }
+                continue;
+            }
+            std::cout << CLR_GRAY << "Unknown command. Type 'help'.\n" << CLR_RESET;
+        }
+        return 0;
+
+    } catch (const std::exception& e) {
+        std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+        return 1;
+    }
+}
+
 // ── 帮助信息 ──────────────────────────────────────────────
 static void printHelp() {
     std::cout
@@ -387,10 +773,22 @@ static void printHelp() {
         << "  flux dev   <file.flux>      Dev mode — hot-reload + file watcher\n"
         << "  flux run   <file.flux>      Run file once, no file watcher\n"
         << "  flux check <file.flux>      Type-check file, do not execute\n"
+        << "  flux dev   <file.flux>      Dev mode (hot reload + auto test)\n"
         << "  flux fmt   <file.flux>      Format file to stdout\n"
         << "  flux fmt   -w <file.flux>   Format file in-place (overwrite)\n"
         << "  flux --vm  <file.flux>      Run file with bytecode VM (Feature G)\n"
+        << "  flux jit   <file.flux>      JIT compile eligible functions\n"
+        << "  flux pack  <file> [-o app.fluz]  Pack (obfuscated + encrypted)\n"
+        << "  flux pack  <file> --debug   Pack without protection (debuggable)\n"
+        << "  flux profile <file.flux>    Run with profiling on all functions\n"
+        << "  flux codegen <arch> <file>   Generate assembly (arm64, riscv64)\n"
+        << "  flux lsp                    Start Language Server Protocol server\n"
+        << "  flux debug <file.flux>      Start interactive debugger\n"
+        << "  flux registry [url]         Get/set central package registry URL\n"
         << "  flux --help                 Show this help\n"
+        << "\n"
+        << CLR_BOLD << "Flags:\n" << CLR_RESET
+        << "  --no-test                   Strip all test declarations\n"
         << "\n"
         << CLR_BOLD << "Package Manager (Feature L):\n" << CLR_RESET
         << "  flux new    <name>          Create a new Flux project\n"
@@ -422,7 +820,29 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    std::string sub = argv[1];
+    // ── 解析全局标志（在子命令之前）──────────────────────
+    // 将 argv 中的全局标志提取出来，剩余参数前移
+    std::vector<std::string> args;
+    for (int i = 1; i < argc; i++) {
+        std::string a = argv[i];
+        if (a == "--no-test") { g_noTest = true; continue; }
+        args.push_back(a);
+    }
+    if (args.empty()) {
+        cmdRepl();
+        return 0;
+    }
+    std::string sub = args[0];
+
+    // 重建 argc/argv 供后续使用（去除已解析的全局标志）
+    // 注意：args[0] = sub, args[1..] = 子命令参数
+    // 为简化兼容，将 argc 和 argv 指针更新
+    static std::vector<char*> newArgv;
+    static std::string progName = argv[0];
+    newArgv.push_back(&progName[0]);
+    for (auto& s : args) newArgv.push_back(&s[0]);
+    argc = (int)newArgv.size();
+    argv = newArgv.data();
 
     // ── --help ───────────────────────────────────────────
     if (sub == "--help" || sub == "-h" || sub == "help") {
@@ -453,6 +873,31 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         return cmdRun(argv[2]);
+    }
+
+    // ── flux dev <file> — 开发模式 ─────────────────────────
+    if (sub == "dev") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux dev <file.flux>\n";
+            return 1;
+        }
+        cmdDev(argv[2]);
+        return 0;
+    }
+
+    // ── flux lsp — 语言服务器 ────────────────────────────
+    if (sub == "lsp") {
+        cmdLsp();
+        return 0;
+    }
+
+    // ── flux debug <file> — 交互式调试器 ─────────────────
+    if (sub == "debug") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux debug <file.flux>\n";
+            return 1;
+        }
+        return cmdDebug(argv[2]);
     }
 
     // ── flux check <file> ────────────────────────────────
@@ -606,6 +1051,282 @@ int main(int argc, char* argv[]) {
         }
         g_useVM  = true;
         runFile(argv[2]);
+        return 0;
+    }
+
+    // ── flux codegen <arch> <file> — 代码生成 ─────────────
+    if (sub == "codegen") {
+        if (argc < 4) {
+            std::cerr << "Usage: flux codegen <arm64|riscv64> <file.flux>\n";
+            return 1;
+        }
+        try {
+            std::string archStr = argv[2];
+            std::string filepath = argv[3];
+            std::string src = readFile(filepath);
+
+            TargetArch arch;
+            if (archStr == "arm64" || archStr == "aarch64")
+                arch = TargetArch::ARM64;
+            else if (archStr == "riscv64" || archStr == "riscv")
+                arch = TargetArch::RISCV64;
+            else {
+                std::cerr << CLR_RED << "Unknown target: " << archStr
+                          << " (supported: arm64, riscv64)" << CLR_RESET << "\n";
+                return 1;
+            }
+
+            // Pipeline: Source → AST → HIR → MIR → optimize → codegen
+            Lexer  lexer(src);
+            auto   tokens = lexer.tokenize();
+            Parser parser(std::move(tokens));
+            auto   program = parser.parse();
+
+            HIRLowering lowering;
+            auto hir = lowering.lower(program.get());
+
+            MIRBuilder builder;
+            auto mir = builder.build(hir);
+            mirOptimize(mir);
+
+            auto gen = createCodeGenerator(arch);
+            auto result = gen->generate(mir);
+
+            if (!result.ok) {
+                std::cerr << CLR_RED << "Codegen error: " << result.error << CLR_RESET << "\n";
+                return 1;
+            }
+
+            std::cout << result.assembly;
+            std::cerr << CLR_GREEN << "// Generated " << archName(arch)
+                      << " assembly from: " << filepath << CLR_RESET << "\n";
+            return 0;
+
+        } catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
+    }
+
+    // ── flux jit <file> — JIT 编译执行 ────────────────────
+    if (sub == "jit") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux jit <file.flux>\n";
+            return 1;
+        }
+        try {
+            std::string src = readFile(argv[2]);
+
+            Lexer  lexer(src);
+            auto   tokens = lexer.tokenize();
+            Parser parser(std::move(tokens));
+            auto   program = parser.parse();
+
+            // HIR → MIR → optimize
+            HIRLowering lowering;
+            auto hir = lowering.lower(program.get());
+            MIRBuilder builder;
+            auto mir = builder.build(hir);
+            mirOptimize(mir);
+
+            // Try JIT for eligible functions
+            JITCompiler jit;
+            int compiled = 0;
+            for (auto& fn : mir.functions) {
+                if (fn.name == "__main__") continue;
+                auto result = jit.compile(fn);
+                if (result) compiled++;
+            }
+
+            std::cerr << CLR_CYAN << "[JIT] Compiled " << compiled
+                      << " function(s) to native code" << CLR_RESET << "\n";
+            jit.dumpStats();
+
+            // Fall back to interpreter for execution
+            Interpreter interp;
+            runSource(src, interp, false);
+            return 0;
+
+        } catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
+    }
+
+    // ── flux pack <file> [-o out.fluz] [--debug] — 发布打包 ──
+    if (sub == "pack") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux pack <file.flux> [-o output.fluz] [--debug]\n";
+            return 1;
+        }
+        try {
+            std::string filepath = argv[2];
+            std::string output = "app.fluz";  // default output
+            bool debugMode = false;
+            // Parse flags
+            for (int i = 3; i < argc; i++) {
+                if (std::string(argv[i]) == "-o" && i + 1 < argc) {
+                    output = argv[++i];
+                } else if (std::string(argv[i]) == "--debug") {
+                    debugMode = true;
+                }
+            }
+
+            std::string src = readFile(filepath);
+
+            // Pipeline: Source → Lex → Parse → TypeCheck → HIR → MIR → FluzCodeGen
+            Lexer  lexer(src);
+            auto   tokens = lexer.tokenize();
+            Parser parser(std::move(tokens));
+            auto   program = parser.parse();
+
+            TypeChecker checker;
+            auto typeErrors = checker.check(program.get());
+            if (!typeErrors.empty()) {
+                std::cerr << CLR_RED << "Type errors — pack aborted:\n" << CLR_RESET;
+                for (auto& e : typeErrors)
+                    std::cerr << CLR_RED << "  " << e.message << CLR_RESET << "\n";
+                return 1;
+            }
+
+            HIRLowering lowering;
+            auto hir = lowering.lower(program.get());
+            MIRBuilder builder;
+            auto mir = builder.build(hir);
+            mirOptimize(mir);
+
+            FluzCodeGen codegen;
+            auto pkg = codegen.generate(mir, src);
+
+            // 保护：混淆 + 加密（debug 模式跳过）
+            protectPackage(pkg, debugMode);
+
+            writeFluz(output, pkg);
+
+            int unitCount = (int)pkg.units.size();
+            std::cerr << CLR_GREEN << "Packed " << unitCount
+                      << " unit(s) → " << output;
+            if (debugMode)
+                std::cerr << " (debug mode — NOT protected)";
+            else
+                std::cerr << " (obfuscated + encrypted)";
+            std::cerr << CLR_RESET << "\n";
+
+            // 仅 debug 模式显示单元详情
+            if (debugMode) {
+                for (auto& u : pkg.units) {
+                    std::cerr << CLR_GRAY << "  " << u.name
+                              << " (" << u.code.size() << " instructions, hash="
+                              << std::hex << u.versionHash << std::dec << ")"
+                              << CLR_RESET << "\n";
+                }
+            }
+            return 0;
+
+        } catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
+    }
+
+    // ── flux unpack — 已禁用（防止源码泄漏）─────────────────
+    if (sub == "unpack") {
+        // 仅允许反汇编带 debug 标志的 .fluz 文件
+        if (argc < 3) {
+            std::cerr << "Usage: flux unpack <file.fluz>\n";
+            return 1;
+        }
+        try {
+            auto pkg = readFluz(argv[2]);
+
+            // 检查是否为 debug 包
+            if (!(pkg.flags & FLUZ_FLAG_DEBUG)) {
+                std::cerr << CLR_RED
+                    << "Error: this .fluz file is protected (obfuscated + encrypted).\n"
+                    << "Disassembly is not available for production builds.\n"
+                    << "Use `flux pack --debug` to create a debuggable bundle."
+                    << CLR_RESET << "\n";
+                return 1;
+            }
+
+            std::cout << "FLUZ v" << pkg.version
+                      << " (debug, " << pkg.units.size() << " units)\n\n";
+            for (auto& unit : pkg.units) {
+                std::cout << "── " << unit.name << " (hash="
+                          << std::hex << unit.versionHash << std::dec << ") ──\n";
+                Chunk chunk;
+                chunk.code      = unit.code;
+                chunk.constants = unit.constants;
+                chunk.names     = unit.names;
+                chunk.dump(unit.name);
+                std::cout << "\n";
+            }
+            return 0;
+        } catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
+    }
+
+    // ── flux profile <file.flux> — 性能分析运行 ────────────
+    if (sub == "profile") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux profile <file.flux>\n";
+            return 1;
+        }
+        // "report" 子命令兼容
+        std::string target = argv[2];
+        if (target == "report" && argc > 3)
+            target = argv[3];
+
+        try {
+            std::string src = readFile(target);
+            Interpreter interp;
+            interp.setNoTest(g_noTest);
+            Profiler::instance().clear();
+
+            Lexer  lexer(src);
+            auto   tokens = lexer.tokenize();
+            Parser parser(std::move(tokens));
+            auto   program = parser.parse();
+
+            TypeChecker checker;
+            auto typeErrors = checker.check(program.get());
+            if (!typeErrors.empty()) {
+                for (auto& e : typeErrors)
+                    std::cerr << CLR_RED << "  " << e.message << CLR_RESET << "\n";
+                return 1;
+            }
+
+            // Mark ALL user-defined functions for profiling
+            for (auto& stmt : program->statements) {
+                if (auto* fn = dynamic_cast<FnDecl*>(stmt.get()))
+                    Profiler::instance().markFunction(fn->name);
+                if (auto* pfn = dynamic_cast<ProfiledFnDecl*>(stmt.get())) {
+                    auto* fn = dynamic_cast<FnDecl*>(pfn->fnDecl.get());
+                    if (fn) Profiler::instance().markFunction(fn->name);
+                }
+            }
+
+            interp.execute(program.get());
+            Profiler::instance().report();
+            return 0;
+
+        } catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
+    }
+
+    // ── flux registry <url> — 设置中心包仓库 URL ─────────
+    if (sub == "registry") {
+        if (argc < 3) {
+            // 显示当前 registry
+            std::cout << "Current registry: " << getRegistryUrl() << "\n";
+            return 0;
+        }
+        setRegistryUrl(argv[2]);
+        std::cout << CLR_GREEN << "Registry set to: " << argv[2] << CLR_RESET << "\n";
         return 0;
     }
 

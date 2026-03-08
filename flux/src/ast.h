@@ -356,20 +356,88 @@ struct FuncExpr : ASTNode {
 // 方法：exception Point:move { "描述" } target = "Point:move"
 // 内联：exception { "描述" }           target = ""（函数体内部）
 struct ExceptionDecl : ASTNode {
-    std::string              target;    // "" = 内联, "fn" = 全局, "Type:method" = 方法
+    std::string              target;    // "" = 内联, "func" = 全局, "Type:method" = 方法
     std::vector<std::string> messages;
 };
 
-// ── enum 枚举声明（值限制为 Natural 非负整数）─────────────
-// enum Direction { North = 0, South = 1, East = 2, West = 3 }
+// ══════════════════════════════════════════════════════════
+// Phase 5-7 新节点
+// ══════════════════════════════════════════════════════════
+
+// ── @profile 装饰的函数声明 ─────────────────────────────
+struct ProfiledFnDecl : ASTNode {
+    NodePtr fnDecl;   // 包装的 FnDecl
+    explicit ProfiledFnDecl(NodePtr fn) : fnDecl(std::move(fn)) {}
+};
+
+// ── @platform(target) 声明 ──────────────────────────────
+struct PlatformDecl : ASTNode {
+    std::string target;     // "arm64" | "riscv64" | "esp32" | "generic" ...
+    std::vector<NodePtr> body;
+    PlatformDecl(std::string t, std::vector<NodePtr> b)
+        : target(std::move(t)), body(std::move(b)) {}
+};
+
+// ── enum 枚举定义 ───────────────────────────────────────
+// enum Color { Red, Green, Blue }
+// enum Status { Ok = 0, Error = 1 }
 struct EnumVariant {
     std::string name;
-    int         value;
+    NodePtr     value;    // 可为 null（自动递增）
 };
 
 struct EnumDecl : ASTNode {
-    std::string              name;
+    std::string name;
     std::vector<EnumVariant> variants;
-    EnumDecl(std::string n, std::vector<EnumVariant> v)
-        : name(std::move(n)), variants(std::move(v)) {}
+};
+
+// ── append 扩展 ─────────────────────────────────────────
+// append Array { func sum() { ... } }
+struct AppendDecl : ASTNode {
+    std::string typeName;       // 被扩展的类型名
+    std::vector<StructMethodDef> methods;
+};
+
+// ── alloc(size) 表达式 ──────────────────────────────────
+struct AllocExpr : ASTNode {
+    NodePtr size;
+    explicit AllocExpr(NodePtr s) : size(std::move(s)) {}
+};
+
+// ── free(ptr) 语句 ──────────────────────────────────────
+struct FreeStmt : ASTNode {
+    NodePtr ptr;
+    explicit FreeStmt(NodePtr p) : ptr(std::move(p)) {}
+};
+
+// ── asm { "指令" } 内联汇编 ─────────────────────────────
+struct AsmBlock : ASTNode {
+    std::vector<std::string> instructions;
+};
+
+// ── default { value } 语句级默认值返回 ──────────────────
+// 写在 if 条件分支中，与 exception {} 配合使用
+// 语义：评估块中最后一个表达式，作为函数返回值
+struct DefaultStmt : ASTNode {
+    std::vector<NodePtr> body;   // 默认值块
+    explicit DefaultStmt(std::vector<NodePtr> b) : body(std::move(b)) {}
+};
+
+// ── default funcName { value } 全局默认值声明 ───────────
+// 写在函数外面，为函数附加默认返回值
+// 函数出错时自动返回此默认值而非 panic
+struct DefaultDecl : ASTNode {
+    std::string          target;  // 函数名 或 "Type:method"
+    std::vector<NodePtr> body;    // 默认值块
+    DefaultDecl(std::string t, std::vector<NodePtr> b)
+        : target(std::move(t)), body(std::move(b)) {}
+};
+
+// ── test 测试覆盖声明 ────────────────────────────────────
+// test func add(a, b) { ... }  → 替换已有的 add 函数
+// test var x = 99              → 替换已有的 x 变量
+// --no-test 模式下自动跳过所有 TestDecl
+struct TestDecl : ASTNode {
+    NodePtr inner;   // 被包装的声明（FnDecl / VarDecl）
+    explicit TestDecl(NodePtr n) : inner(std::move(n)) {}
 };

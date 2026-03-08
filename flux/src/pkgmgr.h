@@ -67,3 +67,8 @@ void pkgInfo(const std::string& name);
 
 // flux list — 列出当前项目依赖
 void pkgList(const std::string& dir = ".");
+
+// ── 中心包仓库支持 ──────────────────────────────────────
+// flux registry [url] — 获取/设置中心仓库 URL
+std::string getRegistryUrl();
+void setRegistryUrl(const std::string& url);
