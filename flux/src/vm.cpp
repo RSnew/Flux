@@ -1,5 +1,6 @@
 // vm.cpp — Flux 字节码虚拟机实现
 #include "vm.h"
+#include "compiler.h"
 #include <stdexcept>
 #include <iostream>
 #include <algorithm>
@@ -10,6 +11,17 @@
 // ── 构造 ─────────────────────────────────────────────────
 VM::VM(Interpreter& interp) : interp_(interp) {
     stack_.reserve(256);
+}
+
+// ── 预编译所有用户函数 ────────────────────────────────────
+void VM::compileFunctions() {
+    for (auto& [name, fn] : interp_.functions_) {
+        if (!fn || compiledFns_.count(name)) continue;
+        Chunk fnChunk;
+        Compiler compiler(fnChunk, interp_);
+        compiler.compileFunctionBody(fn->body);
+        compiledFns_[name] = std::move(fnChunk);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -107,27 +119,57 @@ Value VM::run(Chunk& chunk,
             }
             break;
         }
-        case OpCode::SUB: { Value r=pop(),l=pop(); push(Value::Num(l.number-r.number)); break; }
-        case OpCode::MUL: { Value r=pop(),l=pop(); push(Value::Num(l.number*r.number)); break; }
+        case OpCode::SUB: {
+            Value& r = peek(0); Value& l = peek(1);
+            l.type = Value::Type::Number;
+            l.number = l.number - r.number;
+            stack_.pop_back();
+            break;
+        }
+        case OpCode::MUL: {
+            Value& r = peek(0); Value& l = peek(1);
+            l.type = Value::Type::Number;
+            l.number = l.number * r.number;
+            stack_.pop_back();
+            break;
+        }
         case OpCode::DIV: {
-            Value r=pop(),l=pop();
+            Value& r = peek(0); Value& l = peek(1);
             if (r.number == 0) throw std::runtime_error("division by zero");
-            push(Value::Num(l.number/r.number));
+            l.type = Value::Type::Number;
+            l.number = l.number / r.number;
+            stack_.pop_back();
             break;
         }
         case OpCode::MOD: {
-            Value r=pop(),l=pop();
-            push(Value::Num(std::fmod(l.number, r.number)));
+            Value& r = peek(0); Value& l = peek(1);
+            l.type = Value::Type::Number;
+            l.number = std::fmod(l.number, r.number);
+            stack_.pop_back();
             break;
         }
-        case OpCode::NEG: { Value v=pop(); push(Value::Num(-v.number)); break; }
-        case OpCode::NOT: { Value v=pop(); push(Value::Bool(!v.isTruthy())); break; }
+        case OpCode::NEG: { peek(0).number = -peek(0).number; break; }
+        case OpCode::NOT: {
+            bool t = peek(0).isTruthy();
+            Value& top = peek(0);
+            top.type = Value::Type::Bool;
+            top.boolean = !t;
+            break;
+        }
 
         // ── 比较 ─────────────────────────────────────────
         case OpCode::EQ:  {
             Value r=pop(),l=pop();
             if (l.type==Value::Type::Number && r.type==Value::Type::Number)
                 push(Value::Bool(l.number == r.number));
+            else if (l.type==Value::Type::Bool && r.type==Value::Type::Bool)
+                push(Value::Bool(l.boolean == r.boolean));
+            else if (l.type==Value::Type::String && r.type==Value::Type::String)
+                push(Value::Bool(l.string == r.string));
+            else if (l.type==Value::Type::Nil && r.type==Value::Type::Nil)
+                push(Value::Bool(true));
+            else if (l.type != r.type)
+                push(Value::Bool(false));
             else
                 push(Value::Bool(l.toString() == r.toString()));
             break;
@@ -136,14 +178,42 @@ Value VM::run(Chunk& chunk,
             Value r=pop(),l=pop();
             if (l.type==Value::Type::Number && r.type==Value::Type::Number)
                 push(Value::Bool(l.number != r.number));
+            else if (l.type==Value::Type::Bool && r.type==Value::Type::Bool)
+                push(Value::Bool(l.boolean != r.boolean));
+            else if (l.type==Value::Type::String && r.type==Value::Type::String)
+                push(Value::Bool(l.string != r.string));
+            else if (l.type==Value::Type::Nil && r.type==Value::Type::Nil)
+                push(Value::Bool(false));
+            else if (l.type != r.type)
+                push(Value::Bool(true));
             else
                 push(Value::Bool(l.toString() != r.toString()));
             break;
         }
-        case OpCode::LT:  { Value r=pop(),l=pop(); push(Value::Bool(l.number <  r.number)); break; }
-        case OpCode::GT:  { Value r=pop(),l=pop(); push(Value::Bool(l.number >  r.number)); break; }
-        case OpCode::LEQ: { Value r=pop(),l=pop(); push(Value::Bool(l.number <= r.number)); break; }
-        case OpCode::GEQ: { Value r=pop(),l=pop(); push(Value::Bool(l.number >= r.number)); break; }
+        case OpCode::LT:  {
+            bool res = peek(1).number < peek(0).number;
+            stack_.pop_back();
+            Value& top = peek(0); top.type = Value::Type::Bool; top.boolean = res;
+            break;
+        }
+        case OpCode::GT:  {
+            bool res = peek(1).number > peek(0).number;
+            stack_.pop_back();
+            Value& top = peek(0); top.type = Value::Type::Bool; top.boolean = res;
+            break;
+        }
+        case OpCode::LEQ: {
+            bool res = peek(1).number <= peek(0).number;
+            stack_.pop_back();
+            Value& top = peek(0); top.type = Value::Type::Bool; top.boolean = res;
+            break;
+        }
+        case OpCode::GEQ: {
+            bool res = peek(1).number >= peek(0).number;
+            stack_.pop_back();
+            Value& top = peek(0); top.type = Value::Type::Bool; top.boolean = res;
+            break;
+        }
 
         // ── 作用域 ───────────────────────────────────────
         case OpCode::PUSH_SCOPE:
@@ -177,6 +247,35 @@ Value VM::run(Chunk& chunk,
             int argc = inst.b;
             std::vector<Value> args(argc);
             for (int i = argc - 1; i >= 0; --i) args[i] = pop();
+
+            // 优先使用 VM 编译的函数字节码执行
+            auto cit = compiledFns_.find(name);
+            if (cit != compiledFns_.end()) {
+                // 查找用户函数声明以获取参数名
+                FnDecl* fn = nullptr;
+                if (mod) {
+                    auto fit = mod->functions.find(name);
+                    if (fit != mod->functions.end()) fn = fit->second;
+                }
+                if (!fn) {
+                    auto fit = interp_.functions_.find(name);
+                    if (fit != interp_.functions_.end()) fn = fit->second;
+                }
+                if (fn) {
+                    auto fnEnv = std::make_shared<Environment>(curEnv);
+                    for (size_t i = 0; i < fn->params.size(); ++i)
+                        fnEnv->set(fn->params[i].name,
+                                   i < args.size() ? std::move(args[i]) : Value::Nil());
+                    // 保存栈帧边界，函数返回后清理残留值
+                    size_t stackBase = stack_.size();
+                    Value result = run(cit->second, fnEnv, mod);
+                    // 清理函数体中可能残留的栈值
+                    stack_.resize(stackBase);
+                    push(result);
+                    break;
+                }
+            }
+            // 回退到解释器（内置函数、结构体构造等）
             Value result = interp_.callFunction(name, std::move(args), mod);
             push(result);
             break;

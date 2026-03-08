@@ -23,6 +23,15 @@ void Compiler::compile(Program* program) {
 }
 
 // ═══════════════════════════════════════════════════════════
+// 编译函数体（供 VM 预编译函数用）
+// ═══════════════════════════════════════════════════════════
+void Compiler::compileFunctionBody(const std::vector<NodePtr>& body) {
+    for (auto& stmt : body)
+        compileNode(stmt.get());
+    chunk_.emit(OpCode::RETURN_NIL);
+}
+
+// ═══════════════════════════════════════════════════════════
 // 节点分发
 // ═══════════════════════════════════════════════════════════
 void Compiler::compileNode(ASTNode* node) {
@@ -267,26 +276,26 @@ void Compiler::compileBinary(BinaryExpr* n) {
     const std::string& op = n->op;
 
     // 短路 &&
+    // JUMP_IF_FALSE 已弹出条件值，无需额外 POP
     if (op == "&&") {
         compileNode(n->left.get());
-        int jf = chunk_.emitJump(OpCode::JUMP_IF_FALSE);   // 若 false 跳走
-        chunk_.emit(OpCode::POP);                           // 弹掉 true 的左值
-        compileNode(n->right.get());
+        int jf = chunk_.emitJump(OpCode::JUMP_IF_FALSE);   // 弹出并检查：若 false 跳走
+        compileNode(n->right.get());                        // 左值已被弹出，直接求右值
         int jend = chunk_.emitJump(OpCode::JUMP);
         chunk_.patchJump(jf, chunk_.here());
-        chunk_.emit(OpCode::PUSH_FALSE);
+        chunk_.emit(OpCode::PUSH_FALSE);                    // false 分支：压入 false
         chunk_.patchJump(jend, chunk_.here());
         return;
     }
     // 短路 ||
+    // JUMP_IF_TRUE 已弹出条件值，无需额外 POP
     if (op == "||") {
         compileNode(n->left.get());
-        int jt = chunk_.emitJump(OpCode::JUMP_IF_TRUE);    // 若 true 跳走
-        chunk_.emit(OpCode::POP);
-        compileNode(n->right.get());
+        int jt = chunk_.emitJump(OpCode::JUMP_IF_TRUE);    // 弹出并检查：若 true 跳走
+        compileNode(n->right.get());                        // 左值已被弹出，直接求右值
         int jend = chunk_.emitJump(OpCode::JUMP);
         chunk_.patchJump(jt, chunk_.here());
-        chunk_.emit(OpCode::PUSH_TRUE);
+        chunk_.emit(OpCode::PUSH_TRUE);                     // true 分支：压入 true
         chunk_.patchJump(jend, chunk_.here());
         return;
     }
@@ -347,31 +356,29 @@ void Compiler::compileForIn(ForIn* n) {
     int id = iterNonce_++;
     std::string iterName = "__iter_" + std::to_string(id);
     std::string idxName  = "__idx_"  + std::to_string(id);
+    std::string lenName  = "__len_"  + std::to_string(id);
 
     // 1. 求迭代对象（Array / String / Map → 统一转 Array）
-    //    使用 CALL_MODULE "$$toArray" 的方式会很复杂，
-    //    这里直接 emit MAKE_ARRAY 0（即空数组占位），
-    //    在 VM 中用特殊处理：将 iterable 转为 key 列表
-    //    ── 实际：直接压入 iterable，VM 中 DEFINE_ITER 识别
     compileNode(n->iterable.get());
-    // 转换为可迭代数组（VM 端特殊处理 DEFINE 前的 iterable）
-    // 我们用一个特殊标记名字 "$$iter" 让 VM 知道需要转换
     chunk_.emit(OpCode::DEFINE, chunk_.addName(iterName));
 
     // 2. 索引 = 0
     chunk_.emit(OpCode::PUSH_CONST, chunk_.addConst(Value::Num(0)));
     chunk_.emit(OpCode::DEFINE, chunk_.addName(idxName));
 
-    // 3. 循环头：检查 idx < iter.len()
+    // 3. 预先缓存数组长度，避免每次迭代调用 .len()
+    chunk_.emit(OpCode::LOAD, chunk_.addName(iterName));
+    chunk_.emit(OpCode::CALL_METHOD, chunk_.addName("len"), 0);
+    chunk_.emit(OpCode::DEFINE, chunk_.addName(lenName));
+
+    // 4. 循环头：检查 idx < cachedLen
     int loopStart = chunk_.here();
     chunk_.emit(OpCode::LOAD, chunk_.addName(idxName));
-    chunk_.emit(OpCode::LOAD, chunk_.addName(iterName));
-    // 调用 iter.len()
-    chunk_.emit(OpCode::CALL_METHOD, chunk_.addName("len"), 0);
+    chunk_.emit(OpCode::LOAD, chunk_.addName(lenName));
     chunk_.emit(OpCode::LT);
     int jf = chunk_.emitJump(OpCode::JUMP_IF_FALSE);
 
-    // 4. 循环体（新作用域）
+    // 5. 循环体（新作用域）
     chunk_.emit(OpCode::PUSH_SCOPE);
 
     //    取 iter[idx] → 定义循环变量
@@ -384,13 +391,13 @@ void Compiler::compileForIn(ForIn* n) {
 
     chunk_.emit(OpCode::POP_SCOPE);
 
-    // 5. idx = idx + 1
+    // 6. idx = idx + 1
     chunk_.emit(OpCode::LOAD,  chunk_.addName(idxName));
     chunk_.emit(OpCode::PUSH_CONST, chunk_.addConst(Value::Num(1)));
     chunk_.emit(OpCode::ADD);
     chunk_.emit(OpCode::STORE, chunk_.addName(idxName));
 
-    // 6. 回到循环头
+    // 7. 回到循环头
     chunk_.emit(OpCode::JUMP, loopStart);
     chunk_.patchJump(jf, chunk_.here());
 }

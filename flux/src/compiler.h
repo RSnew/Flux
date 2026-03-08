@@ -14,6 +14,12 @@ public:
     // 编译整个 Program（两遍：先注册函数，再编译语句）
     void compile(Program* program);
 
+    // 编译单个函数体到当前 chunk（供 VM 预编译函数用）
+    void compileFunctionBody(const std::vector<NodePtr>& body);
+
+    // 公开 compileNode 供 VM 编译函数体
+    void compileNodePublic(ASTNode* node) { compileNode(node); }
+
 private:
     Chunk&       chunk_;
     Interpreter& interp_;

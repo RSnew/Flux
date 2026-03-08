@@ -6,6 +6,7 @@
 #include <string>
 #include <cstdint>
 #include <iostream>
+#include <unordered_map>
 
 // ═══════════════════════════════════════════════════════════
 // 指令集
@@ -89,9 +90,30 @@ struct Chunk {
     std::vector<std::string> names;       // 名字池（变量、函数、方法名）
     std::vector<ASTNode*>    ast_nodes;   // AST 节点引用（EVAL_AST 用）
 
-    // 向常量池添加值（自动去重数字与字符串）
+    // 常量池去重索引
+    std::unordered_map<double, int>      numConstIdx_;   // 数字常量去重
+    std::unordered_map<std::string, int> strConstIdx_;   // 字符串常量去重
+    // 名字池去重索引
+    std::unordered_map<std::string, int> nameIdx_;       // O(1) 名字查找
+
+    // 向常量池添加值（数字和字符串自动去重）
     int addConst(const Value& v) {
-        // 简单追加（不去重，保证正确性；优化可后续加入）
+        if (v.type == Value::Type::Number) {
+            auto it = numConstIdx_.find(v.number);
+            if (it != numConstIdx_.end()) return it->second;
+            int idx = (int)constants.size();
+            constants.push_back(v);
+            numConstIdx_[v.number] = idx;
+            return idx;
+        }
+        if (v.type == Value::Type::String) {
+            auto it = strConstIdx_.find(v.string);
+            if (it != strConstIdx_.end()) return it->second;
+            int idx = (int)constants.size();
+            constants.push_back(v);
+            strConstIdx_[v.string] = idx;
+            return idx;
+        }
         constants.push_back(v);
         return (int)constants.size() - 1;
     }
@@ -102,12 +124,14 @@ struct Chunk {
         return (int)ast_nodes.size() - 1;
     }
 
-    // 向名字池添加名字（去重）
+    // 向名字池添加名字（O(1) 去重）
     int addName(const std::string& s) {
-        for (int i = 0; i < (int)names.size(); ++i)
-            if (names[i] == s) return i;
+        auto it = nameIdx_.find(s);
+        if (it != nameIdx_.end()) return it->second;
+        int idx = (int)names.size();
         names.push_back(s);
-        return (int)names.size() - 1;
+        nameIdx_[s] = idx;
+        return idx;
     }
 
     // 发射一条指令
@@ -145,9 +169,15 @@ public:
               std::shared_ptr<Environment> env,
               ModuleRuntime* mod = nullptr);
 
+    // 预编译所有已注册的用户函数为字节码（在 run 之前调用）
+    void compileFunctions();
+
 private:
     Interpreter& interp_;
     std::vector<Value> stack_;
+
+    // 已编译的函数字节码缓存
+    std::unordered_map<std::string, Chunk> compiledFns_;
 
     void  push(Value v)          { stack_.push_back(std::move(v)); }
     Value pop()                  { Value v = std::move(stack_.back()); stack_.pop_back(); return v; }
