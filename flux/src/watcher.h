@@ -4,7 +4,7 @@
 #include <thread>
 #include <atomic>
 
-// 使用 Linux inotify 监听文件变更
+// 跨平台文件监听：Linux 使用 inotify，macOS 使用 kqueue
 // 回调在独立线程触发，调用方负责线程安全
 class FileWatcher {
 public:
@@ -21,7 +21,7 @@ private:
     Callback          callback_;
     std::thread       thread_;
     std::atomic<bool> running_{false};
-    int               inotifyFd_ = -1;
+    int               watchFd_ = -1;
 
     void watchLoop();
 };
