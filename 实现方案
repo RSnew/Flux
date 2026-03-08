@@ -962,7 +962,69 @@ FNV-1a 哈希比较（跳过未变化文件）
 
 -----
 
-## 八、实现路线图
+## 八、当前原型实现状态
+
+> C++17 原型实现，约 10,700 行代码，验证了核心设计可行性。
+
+### 8.1 已实现组件
+
+|组件      |实现状态  |说明                                      |
+|--------|------|----------------------------------------|
+|Lexer   |✅ 完成 |32+ Token 类型，字符串插值 `\()`，关键字完整           |
+|Parser  |✅ 完成 |递归下降，支持所有语法结构                           |
+|TypeChecker|✅ 完成|类型推断 + 注解检查、接口完整性验证、枚举值验证              |
+|Interpreter|✅ 完成|树遍历解释器，热更新、模块隔离、监督恢复                   |
+|Bytecode VM|✅ 完成|41 条指令栈式 VM，`--vm` 标志                   |
+|Formatter|✅ 完成|AST → 源码美化输出                             |
+|File Watcher|✅ 完成|inotify 文件监听，支持热更新                      |
+|Concurrency|✅ 完成|线程池、@concurrent、.async()/.await()、Chan 通道|
+|Package Mgr|✅ 完成|flux.toml、依赖解析、本地仓库                      |
+|VSCode Ext|✅ 完成|TextMate 语法高亮、代码片段、折叠                   |
+|conf 常量 |✅ 完成|`conf` 关键字，运行时只读保护                      |
+|enum 枚举 |✅ 完成|Natural-only 值验证，执行前检查                   |
+|log 日志  |✅ 完成|内置 log.info/warn/error/debug，结构化输出       |
+|HIR/MIR |✅ 完成|高层/中层中间表示，含优化 Pass                     |
+|LSP     |✅ 完成|诊断/补全/悬停/跳转定义                          |
+|Debugger|✅ 完成|断点/单步/变量检查/栈帧                          |
+|JIT     |✅ 完成|x86-64 纯数值函数 JIT                        |
+
+### 8.2 当前标准库
+
+|模块  |函数                                           |
+|-----|---------------------------------------------|
+|File |read, write, append, exists, lines, delete    |
+|Json |parse (零依赖), stringify, pretty               |
+|Http |get, post, put, delete, serve (HTTP + HTTPS)  |
+|Time |now, clock, sleep, format, diff               |
+|Chan |make, make(cap)                               |
+|Math |abs, floor, ceil, round, min, max, pow, log, sin, cos, random, PI |
+|Set  |new, from, add, has, remove, size, toArray, union, intersect |
+|Log  |info, warn, error, debug                      |
+|Env  |get, set, has, unset                          |
+|Test |equal, notEqual, isTrue, isFalse, isNil, throws |
+|String|replace, startsWith, endsWith, repeat, indexOf, slice, charAt |
+|hw   |gpio_*, uart_*, platform_*                    |
+
+### 8.3 CLI 命令
+
+```
+flux                          REPL 交互模式
+flux dev <file>               开发模式（热更新 + 文件监听）
+flux <file>                   运行 + 热更新
+flux run <file>               单次运行
+flux check <file>             类型检查
+flux fmt [-w] <file>          格式化
+flux --vm <file>              字节码 VM 运行
+flux lsp                      LSP 语言服务器
+flux debug <file>             交互式调试器
+flux pack / flux unpack       .fluz 字节码打包与反汇编
+flux profile <file>           全函数性能分析
+flux new/add/install/build/publish   包管理器
+```
+
+-----
+
+## 九、实现路线图
 
 ### Phase 1：基础可用（MVP）— ✅ 大部分完成
 
@@ -1068,6 +1130,7 @@ FNV-1a 哈希比较（跳过未变化文件）
 - [x] 循环引用检测（gc.h：DFS 标记法扫描 Value 图）
 - [x] JIT 编译器（x86-64 纯数值函数 JIT，`flux jit`，mmap 可执行内存）
 - [x] 完整枚举（enum 声明 + Natural-only 值验证，类型检查器负值报错）
+- [x] `conf` 常量声明（运行时只读）
 - [x] append 扩展机制（运行时为现有 struct 类型注入新方法）
 - [x] 中心包仓库（pkg.flux-lang.org）— `flux registry` CLI
 - [x] 完整文档（实现方案 + 代码内注释 + CLI --help）
@@ -1109,18 +1172,21 @@ C++ 原型验证了以下关键设计：
 
 -----
 
-## 附录：关键设计决策记录
+## 附录 A：关键设计决策记录
 
 | 决策 | 选择 | 原因 | 原型状态 |
 |------|------|------|---------|
-| 变量声明 | `var`，无 `let` / `conf` | 减少关键字 | ✅ 已实现 |
-| 热更新灰度 | 保留 `!var` / `!func` | 调用边界切换保证运行中任务用旧版本完成 | ✅ 已实现（注：原文档称已移除，但代码保留） |
+| 变量声明 | `var` / `conf`，无 `let` | 减少关键字，conf 语义更明确 | ✅ 已实现 |
+| 热更新灰度 | 保留 `!var` / `!func` | 调用边界切换保证运行中任务用旧版本完成 | ✅ 已实现 |
 | 错误描述 | `exception funcName { "msg" }` | 将错误描述绑定到函数/方法 | ✅ 已实现 |
 | 泛型 | 不暴露 `<T>` 语法 | 通过类型推断支持，降低语言复杂度 | 🔶 当前 Any fallback |
 | 并发 | GIL + 线程池 + Actor，无显式锁 | 消除竞态条件 | ✅ 已实现 |
 | 接口检查时机 | 执行前（不是编译期） | 配合热更新：失败时拒绝更新，继续运行旧代码 | 🔶 运行时检查 |
+| 枚举值类型 | 只允许 Natural | 避免负数/小数枚举带来的歧义 | ✅ 已实现 |
 | 数字类型 | 统一 double（原型） | 生产版需完整类型层级 | ✅ 原型 / ⬚ 生产 |
 | HTTP | 内置命名空间，无需 import | 降低常见场景的使用门槛 | ✅ 已实现 |
+| 日志 | 内置 `log` 命名空间 | 零配置日志，格式统一含时间戳 | ✅ 已实现 |
+| 常量 | `conf` 关键字 | 语义清晰，与 `var` 对称 | ✅ 已实现 |
 | 执行后端 | 双后端（树遍历 + VM） | 树遍历保证功能完整，VM 提升性能 | ✅ 已实现 |
 | 包管理 | 本地注册表优先 | 快速验证工作流，远程仓库后续扩展 | ✅ 已实现 |
 

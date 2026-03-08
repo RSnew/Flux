@@ -65,6 +65,15 @@ struct VarDecl : ASTNode {
         , typeAnnotation(std::move(ta)), initializer(std::move(init)) {}
 };
 
+// ── conf MAX = 100（常量声明，运行时只读）──────────────────
+struct ConfDecl : ASTNode {
+    std::string name;
+    std::string typeAnnotation;
+    NodePtr     initializer;
+    ConfDecl(std::string n, std::string ta, NodePtr init)
+        : name(std::move(n)), typeAnnotation(std::move(ta)), initializer(std::move(init)) {}
+};
+
 struct Assign : ASTNode {
     std::string name;
     NodePtr     value;

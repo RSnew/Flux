@@ -117,5 +117,40 @@
         "prefix": "jstr",
         "body": "let ${1:s} = Json.stringify(${2:obj})",
         "description": "Stringify to JSON"
+    },
+    "Constant declaration": {
+        "prefix": "conf",
+        "body": "conf ${1:NAME} = ${0}",
+        "description": "Declare a constant (read-only)"
+    },
+    "Enum declaration": {
+        "prefix": "enum",
+        "body": [
+            "enum ${1:Name} {",
+            "    ${2:Variant1} = ${3:0},",
+            "    ${4:Variant2} = ${5:1}",
+            "}"
+        ],
+        "description": "Declare an enum with Natural-only values"
+    },
+    "Log info": {
+        "prefix": "logi",
+        "body": "log.info(\"${0}\")",
+        "description": "Log info message"
+    },
+    "Log warn": {
+        "prefix": "logw",
+        "body": "log.warn(\"${0}\")",
+        "description": "Log warning message"
+    },
+    "Log error": {
+        "prefix": "loge",
+        "body": "log.error(\"${0}\")",
+        "description": "Log error message"
+    },
+    "Log debug": {
+        "prefix": "logd",
+        "body": "log.debug(\"${0}\")",
+        "description": "Log debug message"
     }
 }

@@ -165,6 +165,26 @@ void TypeChecker::checkStmt(ASTNode* node, std::shared_ptr<TypeEnv> env) {
         return;
     }
 
+    // ── conf 常量声明 ───────────────────────────────────────
+    if (auto* n = dynamic_cast<ConfDecl*>(node)) {
+        FluxType initType = n->initializer
+            ? inferExpr(n->initializer.get(), env)
+            : FluxType::Nil();
+        if (!n->typeAnnotation.empty()) {
+            FluxType declared = parseTypeName(n->typeAnnotation);
+            if (!initType.compatibleWith(declared)) {
+                std::ostringstream oss;
+                oss << "type error: conf '" << n->name << "' declared as "
+                    << declared.name() << " but initialized with " << initType.name();
+                error(oss.str());
+            }
+            env->define(n->name, declared);
+        } else {
+            env->define(n->name, initType);
+        }
+        return;
+    }
+
     // ── 赋值 ─────────────────────────────────────────────
     if (auto* n = dynamic_cast<Assign*>(node)) {
         FluxType declared = env->lookup(n->name);

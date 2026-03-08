@@ -41,12 +41,24 @@ print("10! = \(factorial(10))")
 
 ## Language Highlights
 
-**Variables & Types**
+**Variables, Constants & Types**
 ```flux
 var x = 42                    // inferred
 var name: String = "Flux"     // annotated
+conf MAX = 100                // constant (read-only)
 var nums = [1, 2, 3, 4, 5]   // arrays
 var m = Map()                 // hash map
+```
+
+**Enums (Natural-only values)**
+```flux
+enum Direction {
+    North = 0,
+    South = 1,
+    East = 2,
+    West = 3
+}
+var heading = Direction.North
 ```
 
 **Structs & Interfaces**
@@ -110,11 +122,20 @@ Time.sleep(100)
 print("elapsed: \(Time.diff(t0, Time.now())) ms")
 ```
 
+**Built-in Structured Logging**
+```flux
+log.info("Server started on port 8080")
+log.warn("Connection pool running low")
+log.error("Failed to connect to database")
+log.debug("Request payload: \(payload)")
+```
+
 ## Toolchain
 
 | Command | Description |
 |---------|-------------|
 | `flux <file>` | Run with hot-reload (file watcher) |
+| `flux dev <file>` | Dev mode — hot-reload + file watcher |
 | `flux run <file>` | Run once |
 | `flux --vm <file>` | Run with bytecode VM |
 | `flux check <file>` | Type-check only |
@@ -142,7 +163,10 @@ flux publish            # publish to local registry
 | J  | Toolchain | `check` / `fmt` / `run` / REPL / VSCode extension | Done |
 | K  | Concurrency | Thread pools, `@concurrent`, `.async()` / `.await()`, channels | Done |
 | L  | Package Manager | `flux.toml`, dependency resolution, local registry | Done |
-| v1 | Spec v1.0 | Structs, interfaces, `func`, `!var`, intervals, `exception` | Done |
+| v1 | Spec v1.0 | Structs, interfaces, `??`, `func`, `!var`, intervals, `exception` | Done |
+| v2 | Constants & Enums | `conf` constants, `enum` with Natural-only values | Done |
+| v2 | Logging | Built-in `log.info/warn/error/debug` namespace | Done |
+| v2 | Pre-exec Checks | Interface completeness, enum validation | Done |
 | M  | Self-hosting | Flux compiles Flux | Planned |
 
 ## Project Structure
@@ -160,7 +184,7 @@ Flux/
 │   │   ├── interpreter.h/.cpp  Tree-walking interpreter (hot reload, modules)
 │   │   ├── compiler.h/.cpp     AST → bytecode compiler
 │   │   ├── vm.h/.cpp           Stack-based bytecode VM
-│   │   ├── stdlib.cpp          File, Json, Http, Time, Chan
+│   │   ├── stdlib.cpp          File, Json, Http, Time, Chan, log
 │   │   ├── concurrency.h       GIL + thread safety
 │   │   ├── threadpool.h        Thread pools with overflow policies
 │   │   ├── formatter.h         AST → source pretty-printer

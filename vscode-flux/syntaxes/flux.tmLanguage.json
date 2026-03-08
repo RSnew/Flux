@@ -68,13 +68,13 @@
         },
         "keywords-declaration": {
             "name": "storage.type.flux",
-            "match": "\\b(let|var|func|module|test)\\b"
+            "match": "\\b(let|var|conf|fn|func|module|enum|test)\\b"
         },
         "keywords-other": {
             "patterns": [
                 {
                     "name": "keyword.other.flux",
-                    "match": "\\b(persistent|state|migrate)\\b"
+                    "match": "\\b(persistent|state|migrate|interface|exception|spawn|async|await)\\b"
                 }
             ]
         },

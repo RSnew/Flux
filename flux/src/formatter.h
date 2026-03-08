@@ -183,6 +183,30 @@ private:
             return s + "\n";
         }
 
+        // ── conf 常量声明 ─────────────────────────────────────
+        if (auto* n = dynamic_cast<ConfDecl*>(node)) {
+            std::string s = ind() + "conf " + n->name;
+            if (!n->typeAnnotation.empty()) s += ": " + n->typeAnnotation;
+            if (n->initializer) s += " = " + fmtExpr(n->initializer.get());
+            return s + "\n";
+        }
+
+        // ── enum 枚举声明 ─────────────────────────────────────
+        if (auto* n = dynamic_cast<EnumDecl*>(node)) {
+            std::string s = ind() + "enum " + n->name + " {\n";
+            indent_++;
+            for (size_t i = 0; i < n->variants.size(); i++) {
+                s += ind() + n->variants[i].name;
+                if (n->variants[i].value)
+                    s += " = " + fmtExpr(n->variants[i].value.get());
+                if (i + 1 < n->variants.size()) s += ",";
+                s += "\n";
+            }
+            indent_--;
+            s += ind() + "}\n";
+            return s;
+        }
+
         // ── 赋值 ────────────────────────────────────────────
         if (auto* n = dynamic_cast<Assign*>(node)) {
             return ind() + n->name + " = " + fmtExpr(n->value.get()) + "\n";

@@ -39,12 +39,24 @@ print("10! = \(factorial(10))")
 
 ## 语言亮点
 
-**变量与类型**
+**变量、常量与类型**
 ```flux
 var x = 42                    // 自动推断
 var name: String = "Flux"     // 类型标注
+conf MAX = 100                // 常量（运行时只读）
 var nums = [1, 2, 3, 4, 5]   // 数组
 var m = Map()                 // 哈希表
+```
+
+**枚举（仅允许自然数值）**
+```flux
+enum Direction {
+    North = 0,
+    South = 1,
+    East = 2,
+    West = 3
+}
+var heading = Direction.North
 ```
 
 **结构体与接口**
@@ -108,11 +120,20 @@ Time.sleep(100)
 print("elapsed: \(Time.diff(t0, Time.now())) ms")
 ```
 
+**内置结构化日志**
+```flux
+log.info("服务器启动于端口 8080")
+log.warn("连接池即将耗尽")
+log.error("数据库连接失败")
+log.debug("请求内容: \(payload)")
+```
+
 ## 工具链
 
 | 命令 | 描述 |
 |------|------|
 | `flux <file>` | 以热重载模式运行（文件监听） |
+| `flux dev <file>` | 开发模式 — 热重载 + 文件监听 |
 | `flux run <file>` | 单次运行 |
 | `flux --vm <file>` | 使用字节码虚拟机运行 |
 | `flux check <file>` | 仅进行类型检查 |
@@ -140,7 +161,10 @@ flux publish            # 发布到本地仓库
 | J  | 工具链 | `check` / `fmt` / `run` / REPL / VSCode 扩展 | 已完成 |
 | K  | 并发 | 线程池、`@concurrent`、`.async()` / `.await()`、通道 | 已完成 |
 | L  | 包管理器 | `flux.toml`、依赖解析、本地仓库 | 已完成 |
-| v1 | 规范 v1.0 | 结构体、接口、`func`、`!var`、区间、`exception` | 已完成 |
+| v1 | 规范 v1.0 | 结构体、接口、`??`、`func`、`!var`、区间、`exception` | 已完成 |
+| v2 | 常量与枚举 | `conf` 常量、`enum` 自然数枚举 | 已完成 |
+| v2 | 日志 | 内置 `log.info/warn/error/debug` 命名空间 | 已完成 |
+| v2 | 执行前检查 | 接口完整性验证、枚举值验证 | 已完成 |
 | M  | 自举 | Flux 编译 Flux | 计划中 |
 
 ## 项目结构
@@ -158,7 +182,7 @@ Flux/
 │   │   ├── interpreter.h/.cpp  树遍历解释器（热重载，模块）
 │   │   ├── compiler.h/.cpp     AST → 字节码编译器
 │   │   ├── vm.h/.cpp           基于栈的字节码虚拟机
-│   │   ├── stdlib.cpp          File, Json, Http, Time, Chan
+│   │   ├── stdlib.cpp          File, Json, Http, Time, Chan, log
 │   │   ├── concurrency.h       GIL + 线程安全
 │   │   ├── threadpool.h        线程池与溢出策略
 │   │   ├── formatter.h         AST → 源码美化输出

@@ -3,6 +3,7 @@
 
 const std::unordered_map<std::string, TokenType> Lexer::keywords_ = {
     {"var",        TokenType::VAR},
+    {"conf",       TokenType::CONF},      // 常量声明
     {"func",       TokenType::FUNC},
     {"return",     TokenType::RETURN},
     {"if",         TokenType::IF},

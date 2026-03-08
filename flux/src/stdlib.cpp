@@ -3,6 +3,7 @@
 #include "interpreter.h"
 #include "hw.h"
 
+#include <iostream>
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -708,6 +709,47 @@ static std::unordered_map<std::string, StdlibFn> makeChanModule() {
 }
 
 // ═══════════════════════════════════════════════════════════
+// log 模块 — 内置结构化日志
+// ═══════════════════════════════════════════════════════════
+// 格式: [LEVEL] HH:MM:SS  {消息}
+static std::string logTimestamp() {
+    auto now = std::time(nullptr);
+    struct tm* tm_info = std::localtime(&now);
+    char buf[16];
+    std::strftime(buf, sizeof(buf), "%H:%M:%S", tm_info);
+    return buf;
+}
+
+static Value logAtLevel(const std::string& level, const std::string& color,
+                        const std::vector<Value>& args) {
+    std::string msg;
+    for (size_t i = 0; i < args.size(); i++) {
+        if (i > 0) msg += " ";
+        msg += args[i].toString();
+    }
+    std::cout << color << "[" << level << "] " << logTimestamp()
+              << "  " << msg << "\033[0m\n";
+    return Value::Nil();
+}
+
+static std::unordered_map<std::string, StdlibFn> makeLogModule() {
+    return {
+        {"info", [](std::vector<Value> args) -> Value {
+            return logAtLevel("INFO", "\033[32m", args);
+        }},
+        {"warn", [](std::vector<Value> args) -> Value {
+            return logAtLevel("WARN", "\033[33m", args);
+        }},
+        {"error", [](std::vector<Value> args) -> Value {
+            return logAtLevel("ERROR", "\033[31m", args);
+        }},
+        {"debug", [](std::vector<Value> args) -> Value {
+            return logAtLevel("DEBUG", "\033[90m", args);
+        }},
+    };
+}
+
+// ═══════════════════════════════════════════════════════════
 // Math 模块
 // ═══════════════════════════════════════════════════════════
 static std::unordered_map<std::string, StdlibFn> makeMathModule() {
@@ -901,50 +943,6 @@ static std::unordered_map<std::string, StdlibFn> makeSetModule() {
             for (auto& kv : *a.map)
                 if (!b.map->count(kv.first)) return Value::Bool(false);
             return Value::Bool(true);
-        }},
-    };
-}
-
-// ═══════════════════════════════════════════════════════════
-// Log 模块 — 结构化日志
-// ═══════════════════════════════════════════════════════════
-static std::unordered_map<std::string, StdlibFn> makeLogModule() {
-    return {
-        {"info", [](std::vector<Value> args) -> Value {
-            std::cout << "\033[36m[INFO]\033[0m ";
-            for (size_t i = 0; i < args.size(); i++) {
-                if (i > 0) std::cout << " ";
-                std::cout << args[i].toString();
-            }
-            std::cout << "\n";
-            return Value::Nil();
-        }},
-        {"warn", [](std::vector<Value> args) -> Value {
-            std::cout << "\033[33m[WARN]\033[0m ";
-            for (size_t i = 0; i < args.size(); i++) {
-                if (i > 0) std::cout << " ";
-                std::cout << args[i].toString();
-            }
-            std::cout << "\n";
-            return Value::Nil();
-        }},
-        {"error", [](std::vector<Value> args) -> Value {
-            std::cerr << "\033[31m[ERROR]\033[0m ";
-            for (size_t i = 0; i < args.size(); i++) {
-                if (i > 0) std::cerr << " ";
-                std::cerr << args[i].toString();
-            }
-            std::cerr << "\n";
-            return Value::Nil();
-        }},
-        {"debug", [](std::vector<Value> args) -> Value {
-            std::cout << "\033[90m[DEBUG]\033[0m ";
-            for (size_t i = 0; i < args.size(); i++) {
-                if (i > 0) std::cout << " ";
-                std::cout << args[i].toString();
-            }
-            std::cout << "\n";
-            return Value::Nil();
         }},
     };
 }
