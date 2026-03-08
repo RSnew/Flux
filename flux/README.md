@@ -119,10 +119,9 @@ var Circle = Shape {
 var c = Circle(radius: 5)
 print(c.area())   // → 78.54
 
-// ── Spec v1.0: Interval loops & nil-coalescing ─────────────
+// ── Spec v1.0: Interval loops ────────────────────────────────
 for i in [1, 5]  { print(i) }   // 1 2 3 4 5 (closed)
 for i in [1, 5)  { print(i) }   // 1 2 3 4   (half-open)
-var name = nil ?? "Guest"        // "Guest"
 
 // ── Spec v1.0: exception descriptions ──────────────────────
 exception divide { "Denominator must be non-zero" }
@@ -141,7 +140,7 @@ func divide(a, b) { if b == 0 { panic("div0") }; return a / b }
 | J  | 工具链   | `flux check`, `flux fmt`, `flux run`, improved REPL, VSCode extension | ✅ Done |
 | K  | 并发模型 | `async`/`await`, GIL-based threads, `Chan` channels, `spawn` | ✅ Done |
 | L  | 包管理器 | `flux.toml`, dep resolution, local registry, `flux new/add/install/build` | ✅ Done |
-| v1 | Spec v1.0 | Structs, interfaces, `??`, `func`, `!var`, interval loops, `exception` | ✅ Done |
+| v1 | Spec v1.0 | Structs, interfaces, `func`, `!var`, interval loops, `exception` | ✅ Done |
 | M  | 自举编译器 | Flux compiles Flux (self-hosting) | 🔭 Future |
 
 ---
@@ -315,14 +314,12 @@ test = "tests/test.flux"
 
 New language constructs added by the formal spec:
 
-**`func` keyword** — alias for `fn`:
+**`func` keyword** — dedicated keyword for defining methods inside structs and interfaces:
 ```flux
-func greet(name) { return "Hello, " + name + "!" }
-```
-
-**`??` nil-coalescing operator** — returns left if non-nil, else right:
-```flux
-var display = username ?? "Guest"
+var Point = {
+    x: 0, y: 0,
+    func dist() { return self.x * self.x + self.y * self.y }
+}
 ```
 
 **`!var` / `!func` hot-reload force override** — always re-initialize on reload:

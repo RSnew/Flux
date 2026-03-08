@@ -140,7 +140,7 @@ flux publish            # 发布到本地仓库
 | J  | 工具链 | `check` / `fmt` / `run` / REPL / VSCode 扩展 | 已完成 |
 | K  | 并发 | 线程池、`@concurrent`、`.async()` / `.await()`、通道 | 已完成 |
 | L  | 包管理器 | `flux.toml`、依赖解析、本地仓库 | 已完成 |
-| v1 | 规范 v1.0 | 结构体、接口、`??`、`func`、`!var`、区间、`exception` | 已完成 |
+| v1 | 规范 v1.0 | 结构体、接口、`func`、`!var`、区间、`exception` | 已完成 |
 | M  | 自举 | Flux 编译 Flux | 计划中 |
 
 ## 项目结构
