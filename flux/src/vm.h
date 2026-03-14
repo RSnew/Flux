@@ -1,5 +1,6 @@
 // vm.h — Flux 字节码虚拟机（栈式 VM）
 // Feature G: 替换树遍历解释器，提升 5-10x 性能
+// Turbo Mode: NaN-boxing + 内联调用栈 + computed goto → 逼近原生性能
 #pragma once
 #include "interpreter.h"   // Value, Environment, ModuleRuntime, Interpreter
 #include <vector>
@@ -7,6 +8,8 @@
 #include <cstdint>
 #include <iostream>
 #include <unordered_map>
+#include <cstring>
+#include "jit.h"  // MachineCode
 
 // ═══════════════════════════════════════════════════════════
 // 指令集
@@ -72,6 +75,8 @@ enum class OpCode : uint8_t {
     FIELD_SET,       // 弹出 val，弹出 obj，obj.field=val，压入 val
     STRUCT_CREATE,   // names[a]=类型名，b=字段数（栈: 类型值, name1, val1, ...)
     SPAWN_TASK,      // ast_nodes[a] = SpawnStmt，fire-and-forget
+
+    OP_COUNT         // 操作码总数（用于 dispatch table 大小）
 };
 
 // ── 单条指令 ──────────────────────────────────────────────
@@ -79,6 +84,75 @@ struct Instruction {
     OpCode  op;
     int32_t a = 0;   // 主操作数（常量 / 名字下标 / 跳转目标）
     int32_t b = 0;   // 次操作数（参数个数 / 元素个数）
+};
+
+// ═══════════════════════════════════════════════════════════
+// NaN-boxing — 将所有值压缩到 8 字节
+// ═══════════════════════════════════════════════════════════
+// IEEE 754 double: 如果指数全1且尾数非0 → NaN
+// 我们用 quiet NaN 空间编码非 double 值：
+//   普通 double → 原样存储
+//   Nil:    0x7FFC000000000000
+//   True:   0x7FFE000000000001
+//   False:  0x7FFE000000000000
+//   Object: 0xFFFA000000000000 | 48-bit pointer → Value*（堆上的完整 Value）
+
+class NanVal {
+public:
+    static constexpr uint64_t TAG_NAN     = 0x7FF8000000000000ULL; // quiet NaN base
+    static constexpr uint64_t TAG_NIL     = 0x7FFC000000000000ULL;
+    static constexpr uint64_t TAG_TRUE    = 0x7FFE000000000001ULL;
+    static constexpr uint64_t TAG_FALSE   = 0x7FFE000000000000ULL;
+    static constexpr uint64_t TAG_UNSET   = 0x7FFD000000000000ULL; // 未初始化槽标记
+    static constexpr uint64_t TAG_OBJ     = 0xFFFA000000000000ULL; // object pointer
+    static constexpr uint64_t MASK_PTR    = 0x0000FFFFFFFFFFFFULL; // 48-bit pointer mask
+
+    uint64_t bits;
+
+    NanVal() : bits(TAG_NIL) {}
+    NanVal(uint64_t b) : bits(b) {}
+
+    // ── 构造 ──
+    static NanVal fromDouble(double d) {
+        NanVal v;
+        std::memcpy(&v.bits, &d, 8);
+        return v;
+    }
+    static NanVal nil()         { return NanVal(TAG_NIL); }
+    static NanVal unset()       { return NanVal(TAG_UNSET); }
+    static NanVal boolean(bool b) { return NanVal(b ? TAG_TRUE : TAG_FALSE); }
+    static NanVal fromObj(Value* ptr) {
+        return NanVal(TAG_OBJ | (reinterpret_cast<uint64_t>(ptr) & MASK_PTR));
+    }
+
+    // ── 类型检查 ──
+    bool isDouble() const { return (bits & TAG_NAN) != TAG_NAN || bits == 0x7FF8000000000000ULL; }
+    bool isNil()    const { return bits == TAG_NIL; }
+    bool isUnset()  const { return bits == TAG_UNSET; }
+    bool isBool()   const { return (bits & 0xFFFE000000000000ULL) == 0x7FFE000000000000ULL; }
+    bool isTrue()   const { return bits == TAG_TRUE; }
+    bool isFalse()  const { return bits == TAG_FALSE; }
+    bool isObj()    const { return (bits & 0xFFFF000000000000ULL) == TAG_OBJ; }
+
+    // ── 取值 ──
+    double asDouble() const {
+        double d;
+        std::memcpy(&d, &bits, 8);
+        return d;
+    }
+    bool asBool() const { return bits == TAG_TRUE; }
+    Value* asObj() const {
+        return reinterpret_cast<Value*>(bits & MASK_PTR);
+    }
+
+    // ── 真值判断 ──
+    bool isTruthy() const {
+        if (isNil() || isFalse()) return false;
+        if (isTrue()) return true;
+        if (isDouble()) return asDouble() != 0.0;
+        if (isObj()) return asObj()->isTruthy();
+        return true;
+    }
 };
 
 // ═══════════════════════════════════════════════════════════
@@ -95,6 +169,29 @@ struct Chunk {
     std::unordered_map<std::string, int> strConstIdx_;   // 字符串常量去重
     // 名字池去重索引
     std::unordered_map<std::string, int> nameIdx_;       // O(1) 名字查找
+
+    // Turbo 模式预编译：NaN-boxed 常量池
+    std::vector<NanVal> nanConstants;
+
+    // JIT 缓存：names[i] 对应的 JIT 函数指针（nullptr = 无 JIT）
+    using JitFn = double(*)(double*, int);
+    std::vector<JitFn> jitCache;
+
+    // 预编译 NaN 常量池
+    void prepareNanConstants() {
+        nanConstants.resize(constants.size());
+        for (size_t i = 0; i < constants.size(); ++i) {
+            auto& c = constants[i];
+            if (c.type == Value::Type::Number)
+                nanConstants[i] = NanVal::fromDouble(c.number);
+            else if (c.type == Value::Type::Bool)
+                nanConstants[i] = NanVal::boolean(c.boolean);
+            else if (c.type == Value::Type::Nil)
+                nanConstants[i] = NanVal::nil();
+            else
+                nanConstants[i] = NanVal::nil(); // 非基础类型用 nil 占位（通过慢路径处理）
+        }
+    }
 
     // 向常量池添加值（数字和字符串自动去重）
     int addConst(const Value& v) {
@@ -158,8 +255,52 @@ struct Chunk {
 };
 
 // ═══════════════════════════════════════════════════════════
+// Turbo 模式调用栈帧
+// ═══════════════════════════════════════════════════════════
+struct TurboFrame {
+    Chunk*  chunk;       // 当前执行的字节码块
+    size_t  ip;          // 保存的指令指针
+    int     localsBase;  // 局部变量基地址（在 locals_ 数组中的偏移）
+    int     numLocals;   // 该帧的局部变量槽数
+    size_t  stackBase;   // 保存的栈基（用于返回时清理）
+};
+
+// ═══════════════════════════════════════════════════════════
 // 栈式虚拟机
 // ═══════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
+// 字节码 JIT — Chunk 直接编译为 x86-64 原生代码
+// ═══════════════════════════════════════════════════════════
+struct NativeFunc {
+    // 函数签名：double(double* args, int nargs)
+    // args[0] = 第一个参数，args[1] = 第二个参数...
+    using Fn = double(*)(double*, int);
+    std::shared_ptr<MachineCode> code;
+    Fn fn = nullptr;
+};
+
+class BytecodeJIT {
+public:
+    // 尝试将一个纯数值函数的 Chunk 编译为 x86-64 原生代码
+    // 返回 nullptr 如果函数不适合 JIT（含字符串/数组/对象操作等）
+    std::shared_ptr<NativeFunc> compile(const std::string& name,
+                                        Chunk& chunk, FnDecl* fnDecl);
+
+    // 查找已编译的原生函数
+    NativeFunc::Fn find(const std::string& name) const {
+        auto it = compiled_.find(name);
+        return it != compiled_.end() ? it->second->fn : nullptr;
+    }
+
+private:
+    std::unordered_map<std::string, std::shared_ptr<NativeFunc>> compiled_;
+
+    bool canJIT(Chunk& chunk, const std::string& selfName) const;
+    // 检测简单累积递归并编译为循环
+    std::shared_ptr<NativeFunc> compileAsLoop(const std::string& name,
+                                              Chunk& chunk, FnDecl* fnDecl);
+};
+
 class VM {
 public:
     explicit VM(Interpreter& interp);
@@ -178,6 +319,21 @@ private:
 
     // 已编译的函数字节码缓存
     std::unordered_map<std::string, Chunk> compiledFns_;
+
+    // 字节码 JIT 编译器
+    BytecodeJIT jit_;
+
+    // ── Turbo 模式成员 ──
+    static constexpr int TURBO_MAX_LOCALS = 8192;  // 局部变量槽总数
+    static constexpr int TURBO_MAX_FRAMES = 512;   // 最大调用深度
+    std::vector<NanVal>      locals_;      // 平坦局部变量数组
+    std::vector<TurboFrame>  frames_;      // 调用栈
+    std::vector<NanVal>      nanStack_;    // NaN-boxed 值栈
+
+    // Turbo 模式：高性能执行编译后的函数
+    // 使用 NaN-boxing + 平坦局部变量 + 内联调用栈
+    Value runTurbo(Chunk& chunk, FnDecl* fn,
+                   std::vector<Value>& args, ModuleRuntime* mod);
 
     void  push(Value v)          { stack_.push_back(std::move(v)); }
     Value pop()                  { Value v = std::move(stack_.back()); stack_.pop_back(); return v; }
