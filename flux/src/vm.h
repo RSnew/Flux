@@ -177,6 +177,12 @@ struct Chunk {
     using JitFn = double(*)(double*, int);
     std::vector<JitFn> jitCache;
 
+    // 热循环 JIT: 编译后的原生循环函数
+    using HotLoopFn = void(*)(JitFn*, int, void*);
+    HotLoopFn hotLoopFn = nullptr;
+    int hotLoopStart = -1;     // 循环起始指令索引
+    int hotLoopExit = -1;      // 循环出口指令索引
+
     // 预编译 NaN 常量池
     void prepareNanConstants() {
         nanConstants.resize(constants.size());
@@ -291,6 +297,18 @@ public:
         auto it = compiled_.find(name);
         return it != compiled_.end() ? it->second->fn : nullptr;
     }
+
+    // 编译 chunk 中的热循环（loopStart..loopEnd）为原生代码
+    // 签名: void(*)(JitFn* jitCache, int cacheSize, NanVal* locals)
+    // locals 是 turbo VM 的局部变量数组
+    using HotLoopFn = void(*)(Chunk::JitFn*, int, NanVal*);
+    struct HotLoop {
+        int loopStart;      // 循环条件起始指令索引
+        int loopExitTarget; // 循环出口指令索引
+        HotLoopFn fn;
+    };
+    // 尝试编译热循环，返回 true 并填充 loop 信息
+    bool compileHotLoop(Chunk& chunk, HotLoop& loop);
 
 private:
     std::unordered_map<std::string, std::shared_ptr<NativeFunc>> compiled_;

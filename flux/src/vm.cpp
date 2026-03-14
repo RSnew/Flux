@@ -701,6 +701,342 @@ std::shared_ptr<NativeFunc> BytecodeJIT::compile(
 }
 
 
+
+// ── 热循环 JIT: 将 chunk 中的 while 循环编译为原生 x86-64 ──
+// 仅编译循环部分 (loopStart..loopEnd)
+// 签名: void hotLoop(JitFn* jitCache, int cacheSize, NanVal* locals)
+// locals 是 turbo VM 的 NanVal 局部变量数组
+bool BytecodeJIT::compileHotLoop(Chunk& chunk, HotLoop& loop) {
+    auto& code = chunk.code;
+    int n = (int)code.size();
+
+    // 1. 检测循环: 找最后一条 JUMP 回跳指令 (back-edge)
+    int loopStart = -1, loopEnd = -1;
+    for (int i = n - 1; i >= 0; --i) {
+        if (code[i].op == OpCode::JUMP && code[i].a < i) {
+            loopEnd = i;
+            loopStart = code[i].a;
+            break;
+        }
+    }
+    if (loopStart < 0) return false;
+
+    // 2. 找循环出口
+    int exitTarget = -1;
+    for (int i = loopStart; i <= loopEnd; ++i) {
+        if (code[i].op == OpCode::JUMP_IF_FALSE && code[i].a > loopEnd) {
+            exitTarget = code[i].a;
+            break;
+        }
+    }
+    if (exitTarget < 0) return false;
+
+    // 3. 检查循环体是否可以 JIT
+    for (int i = loopStart; i <= loopEnd; ++i) {
+        auto op = code[i].op;
+        switch (op) {
+        case OpCode::LOAD: case OpCode::STORE: case OpCode::DEFINE:
+        case OpCode::PUSH_CONST: case OpCode::PUSH_NIL:
+        case OpCode::PUSH_TRUE: case OpCode::PUSH_FALSE:
+        case OpCode::ADD: case OpCode::SUB:
+        case OpCode::MUL: case OpCode::DIV: case OpCode::MOD:
+        case OpCode::NEG: case OpCode::NOT:
+        case OpCode::EQ: case OpCode::NEQ:
+        case OpCode::LT: case OpCode::GT:
+        case OpCode::LEQ: case OpCode::GEQ:
+        case OpCode::JUMP: case OpCode::JUMP_IF_FALSE: case OpCode::JUMP_IF_TRUE:
+        case OpCode::POP:
+        case OpCode::PUSH_SCOPE: case OpCode::POP_SCOPE:
+            break;
+        case OpCode::CALL:
+            if (code[i].a >= (int)chunk.jitCache.size() || !chunk.jitCache[code[i].a])
+                return false;
+            break;
+        default:
+            return false;
+        }
+        if (op == OpCode::PUSH_CONST) {
+            if (code[i].a >= 0 && code[i].a < (int)chunk.constants.size() &&
+                chunk.constants[code[i].a].type != Value::Type::Number)
+                return false;
+        }
+    }
+
+    // ── 编译原生代码 ──
+    auto mc = std::make_shared<MachineCode>();
+
+    // 序言: 保存 callee-saved, 设置 rbx=jitCache, r14=locals
+    mc->emit8(0x55);                                    // push rbp
+    mc->emit8(0x48); mc->emit8(0x89); mc->emit8(0xE5);  // mov rbp, rsp
+    mc->emit8(0x53);                                    // push rbx
+    mc->emit8(0x41); mc->emit8(0x54);                   // push r12
+    mc->emit8(0x41); mc->emit8(0x55);                   // push r13
+    mc->emit8(0x41); mc->emit8(0x56);                   // push r14
+    mc->emit8(0x48); mc->emit8(0x89); mc->emit8(0xFB);  // mov rbx, rdi (jitCache)
+    mc->emit8(0x49); mc->emit8(0x89); mc->emit8(0xD6);  // mov r14, rdx (locals)
+    // 栈空间: 8 sim stack + 8 arg slots = 136 bytes (16-aligned with 5 pushes)
+    mc->emit8(0x48); mc->emit8(0x81); mc->emit8(0xEC);
+    mc->emit32(136);
+
+    int sp = 0;
+    std::vector<size_t> instOffsets(n + 1, 0);
+    struct PatchInfo { size_t patchOffset; int targetInst; };
+    std::vector<PatchInfo> patches;
+
+    // ── 编码辅助: r14 = NanVal* locals (uint64_t array) ──
+    // NanVal::fromDouble stores double bits directly, so movsd works
+    auto emitLoadFromR14 = [&](int xmmReg, int slot) {
+        int disp = slot * 8;
+        mc->emit8(0xF2);
+        mc->emit8(xmmReg >= 8 ? 0x45 : 0x41);
+        mc->emit8(0x0F); mc->emit8(0x10);
+        if (disp == 0)      { mc->emit8(0x06 | ((xmmReg & 7) << 3)); }
+        else if (disp < 128){ mc->emit8(0x46 | ((xmmReg & 7) << 3)); mc->emit8((uint8_t)disp); }
+        else                { mc->emit8(0x86 | ((xmmReg & 7) << 3)); mc->emit32(disp); }
+    };
+    auto emitStoreToR14 = [&](int slot, int xmmReg) {
+        int disp = slot * 8;
+        mc->emit8(0xF2);
+        mc->emit8(xmmReg >= 8 ? 0x45 : 0x41);
+        mc->emit8(0x0F); mc->emit8(0x11);
+        if (disp == 0)      { mc->emit8(0x06 | ((xmmReg & 7) << 3)); }
+        else if (disp < 128){ mc->emit8(0x46 | ((xmmReg & 7) << 3)); mc->emit8((uint8_t)disp); }
+        else                { mc->emit8(0x86 | ((xmmReg & 7) << 3)); mc->emit32(disp); }
+    };
+    auto emitLoadFromStack = [&](int xmmReg, int stackPos) {
+        int disp = stackPos * 8;
+        mc->emit8(0xF2);
+        if (xmmReg >= 8) mc->emit8(0x44);
+        mc->emit8(0x0F); mc->emit8(0x10);
+        if (disp == 0)       { mc->emit8(0x04 | ((xmmReg & 7) << 3)); mc->emit8(0x24); }
+        else if (disp < 128) { mc->emit8(0x44 | ((xmmReg & 7) << 3)); mc->emit8(0x24); mc->emit8((uint8_t)disp); }
+        else                 { mc->emit8(0x84 | ((xmmReg & 7) << 3)); mc->emit8(0x24); mc->emit32(disp); }
+    };
+    auto emitStoreToStack = [&](int stackPos, int xmmReg) {
+        int disp = stackPos * 8;
+        mc->emit8(0xF2);
+        if (xmmReg >= 8) mc->emit8(0x44);
+        mc->emit8(0x0F); mc->emit8(0x11);
+        if (disp == 0)       { mc->emit8(0x04 | ((xmmReg & 7) << 3)); mc->emit8(0x24); }
+        else if (disp < 128) { mc->emit8(0x44 | ((xmmReg & 7) << 3)); mc->emit8(0x24); mc->emit8((uint8_t)disp); }
+        else                 { mc->emit8(0x84 | ((xmmReg & 7) << 3)); mc->emit8(0x24); mc->emit32(disp); }
+    };
+    auto emitLoadImm = [&](int xmmReg, double val) {
+        uint64_t bits; std::memcpy(&bits, &val, 8);
+        mc->emit8(0x48); mc->emit8(0xB8); mc->emit64(bits);
+        mc->emit8(0x66); mc->emit8(xmmReg >= 8 ? 0x4C : 0x48);
+        mc->emit8(0x0F); mc->emit8(0x6E); mc->emit8(0xC0 | ((xmmReg & 7) << 3));
+    };
+    auto emitSSEBinop = [&](int dst, int src, uint8_t opcode) {
+        mc->emit8(0xF2);
+        uint8_t rex = 0x40;
+        if (dst >= 8) rex |= 0x04;
+        if (src >= 8) rex |= 0x01;
+        if (rex != 0x40) mc->emit8(rex);
+        mc->emit8(0x0F); mc->emit8(opcode);
+        mc->emit8(0xC0 | ((dst & 7) << 3) | (src & 7));
+    };
+
+    // ── 编译循环指令 (loopStart..loopEnd) ──
+    for (int i = loopStart; i <= loopEnd; ++i) {
+        instOffsets[i] = mc->here();
+        const auto& inst = code[i];
+
+        switch (inst.op) {
+        case OpCode::PUSH_CONST:
+            emitLoadImm(0, chunk.constants[inst.a].number);
+            emitStoreToStack(sp, 0);
+            sp++;
+            break;
+        case OpCode::PUSH_NIL: case OpCode::PUSH_FALSE:
+            emitLoadImm(0, 0.0);
+            emitStoreToStack(sp, 0);
+            sp++;
+            break;
+        case OpCode::PUSH_TRUE:
+            emitLoadImm(0, 1.0);
+            emitStoreToStack(sp, 0);
+            sp++;
+            break;
+        case OpCode::LOAD:
+            emitLoadFromR14(0, inst.a);
+            emitStoreToStack(sp, 0);
+            sp++;
+            break;
+        case OpCode::STORE:
+            emitLoadFromStack(0, sp - 1);
+            emitStoreToR14(inst.a, 0);
+            break;
+        case OpCode::DEFINE:
+            sp--;
+            emitLoadFromStack(0, sp);
+            emitStoreToR14(inst.a, 0);
+            break;
+        case OpCode::ADD: case OpCode::SUB:
+        case OpCode::MUL: case OpCode::DIV: {
+            emitLoadFromStack(0, sp - 2);
+            emitLoadFromStack(1, sp - 1);
+            uint8_t opc = 0x58;
+            switch (inst.op) {
+                case OpCode::ADD: opc = 0x58; break;
+                case OpCode::SUB: opc = 0x5C; break;
+                case OpCode::MUL: opc = 0x59; break;
+                case OpCode::DIV: opc = 0x5E; break;
+                default: break;
+            }
+            emitSSEBinop(0, 1, opc);
+            sp--;
+            emitStoreToStack(sp - 1, 0);
+            break;
+        }
+        case OpCode::LT: case OpCode::GT: case OpCode::LEQ:
+        case OpCode::GEQ: case OpCode::EQ: case OpCode::NEQ: {
+            bool fused = false;
+            if (i + 1 <= loopEnd) {
+                auto nextOp = code[i+1].op;
+                if (nextOp == OpCode::JUMP_IF_FALSE || nextOp == OpCode::JUMP_IF_TRUE) {
+                    emitLoadFromStack(0, sp - 2);
+                    emitLoadFromStack(1, sp - 1);
+                    sp -= 2;
+                    mc->emit8(0x66); mc->emit8(0x0F); mc->emit8(0x2E); mc->emit8(0xC1);
+                    bool jumpOnTrue = (nextOp == OpCode::JUMP_IF_TRUE);
+                    uint8_t jcc;
+                    switch (inst.op) {
+                    case OpCode::EQ:  jcc = jumpOnTrue ? 0x84 : 0x85; break;
+                    case OpCode::NEQ: jcc = jumpOnTrue ? 0x85 : 0x84; break;
+                    case OpCode::LT:  jcc = jumpOnTrue ? 0x82 : 0x83; break;
+                    case OpCode::GT:  jcc = jumpOnTrue ? 0x87 : 0x86; break;
+                    case OpCode::LEQ: jcc = jumpOnTrue ? 0x86 : 0x87; break;
+                    case OpCode::GEQ: jcc = jumpOnTrue ? 0x83 : 0x82; break;
+                    default: jcc = 0x84; break;
+                    }
+                    mc->emit8(0x0F); mc->emit8(jcc);
+                    i++;
+                    instOffsets[i] = mc->here() - 2;
+                    patches.push_back({mc->here(), code[i].a});
+                    mc->emit32(0);
+                    fused = true;
+                }
+            }
+            if (!fused) {
+                emitLoadFromStack(0, sp - 2);
+                emitLoadFromStack(1, sp - 1);
+                sp--;
+                mc->emit8(0x66); mc->emit8(0x0F); mc->emit8(0x2E); mc->emit8(0xC1);
+                uint8_t setcc;
+                switch (inst.op) {
+                case OpCode::EQ:  setcc = 0x94; break;
+                case OpCode::NEQ: setcc = 0x95; break;
+                case OpCode::LT:  setcc = 0x92; break;
+                case OpCode::GT:  setcc = 0x97; break;
+                case OpCode::LEQ: setcc = 0x96; break;
+                case OpCode::GEQ: setcc = 0x93; break;
+                default: setcc = 0x94; break;
+                }
+                mc->emit8(0x0F); mc->emit8(setcc); mc->emit8(0xC0);
+                mc->emit8(0x0F); mc->emit8(0xB6); mc->emit8(0xC0);
+                mc->emit8(0xF2); mc->emit8(0x0F); mc->emit8(0x2A); mc->emit8(0xC0);
+                emitStoreToStack(sp - 1, 0);
+            }
+            break;
+        }
+        case OpCode::JUMP:
+            mc->emit8(0xE9);
+            patches.push_back({mc->here(), inst.a});
+            mc->emit32(0);
+            break;
+        case OpCode::JUMP_IF_FALSE: {
+            sp--;
+            emitLoadFromStack(0, sp);
+            mc->emit8(0x66); mc->emit8(0x0F); mc->emit8(0x57); mc->emit8(0xC9);
+            mc->emit8(0x66); mc->emit8(0x0F); mc->emit8(0x2E); mc->emit8(0xC1);
+            mc->emit8(0x0F); mc->emit8(0x84);
+            patches.push_back({mc->here(), inst.a});
+            mc->emit32(0);
+            break;
+        }
+        case OpCode::JUMP_IF_TRUE: {
+            sp--;
+            emitLoadFromStack(0, sp);
+            mc->emit8(0x66); mc->emit8(0x0F); mc->emit8(0x57); mc->emit8(0xC9);
+            mc->emit8(0x66); mc->emit8(0x0F); mc->emit8(0x2E); mc->emit8(0xC1);
+            mc->emit8(0x0F); mc->emit8(0x85);
+            patches.push_back({mc->here(), inst.a});
+            mc->emit32(0);
+            break;
+        }
+        case OpCode::CALL: {
+            int argc = inst.b;
+            int argsBase = 64;
+            for (int a = 0; a < argc; ++a) {
+                emitLoadFromStack(0, sp - argc + a);
+                int disp = argsBase + a * 8;
+                mc->emit8(0xF2); mc->emit8(0x0F); mc->emit8(0x11);
+                mc->emit8(0x84); mc->emit8(0x24); mc->emit32(disp);
+            }
+            sp -= argc;
+            int fnDisp = inst.a * 8;
+            mc->emit8(0x48); mc->emit8(0x8B);
+            if (fnDisp < 128) { mc->emit8(0x43); mc->emit8((uint8_t)fnDisp); }
+            else              { mc->emit8(0x83); mc->emit32(fnDisp); }
+            mc->emit8(0x48); mc->emit8(0x8D); mc->emit8(0x7C); mc->emit8(0x24);
+            mc->emit8((uint8_t)argsBase);
+            mc->emit8(0xBE); mc->emit32(argc);
+            mc->emit8(0xFF); mc->emit8(0xD0);
+            emitStoreToStack(sp, 0);
+            sp++;
+            break;
+        }
+        case OpCode::POP:
+            sp--;
+            break;
+        case OpCode::PUSH_SCOPE: case OpCode::POP_SCOPE:
+            break;
+        default:
+            return false;
+        }
+    }
+
+    // 出口标签
+    instOffsets[exitTarget] = mc->here();
+    instOffsets[loopEnd + 1] = mc->here();
+
+    // 尾声
+    mc->emit8(0x48); mc->emit8(0x81); mc->emit8(0xC4); mc->emit32(136);
+    mc->emit8(0x41); mc->emit8(0x5E);  // pop r14
+    mc->emit8(0x41); mc->emit8(0x5D);  // pop r13
+    mc->emit8(0x41); mc->emit8(0x5C);  // pop r12
+    mc->emit8(0x5B);                    // pop rbx
+    mc->emit8(0x5D);                    // pop rbp
+    mc->emit8(0xC3);                    // ret
+
+    // 回填跳转
+    for (auto& p : patches) {
+        size_t target;
+        if (p.targetInst >= 0 && p.targetInst <= n && instOffsets[p.targetInst] != 0)
+            target = instOffsets[p.targetInst];
+        else if (p.targetInst > loopEnd)
+            target = instOffsets[exitTarget];
+        else
+            target = instOffsets[loopStart];
+        int32_t rel = (int32_t)(target - (p.patchOffset + 4));
+        mc->patch32(p.patchOffset, rel);
+    }
+
+    if (!mc->finalize()) return false;
+
+    static std::vector<std::shared_ptr<MachineCode>> hotLoopCodes;
+    hotLoopCodes.push_back(mc);
+
+    loop.loopStart = loopStart;
+    loop.loopExitTarget = exitTarget;
+    loop.fn = (HotLoopFn)mc->ptr();
+
+    std::cerr << "\033[36m[JIT] hot loop [" << loopStart << ".." << loopEnd
+              << "] → native x86-64 (" << mc->size() << " bytes)\033[0m\n";
+    return true;
+}
+
 // ── 构造 ─────────────────────────────────────────────────
 VM::VM(Interpreter& interp) : interp_(interp) {
     stack_.reserve(256);
@@ -766,6 +1102,15 @@ Value VM::run(Chunk& chunk,
                 for (size_t i = 0; i < chunk.names.size(); ++i)
                     chunk.jitCache[i] = jit_.find(chunk.names[i]);
             }
+
+            // 尝试热循环 JIT: 编译 while 循环为原生代码
+            BytecodeJIT::HotLoop hotLoop;
+            if (jit_.compileHotLoop(chunk, hotLoop)) {
+                chunk.hotLoopFn = (Chunk::HotLoopFn)hotLoop.fn;
+                chunk.hotLoopStart = hotLoop.loopStart;
+                chunk.hotLoopExit = hotLoop.loopExitTarget;
+            }
+
             FnDecl dummyFn("__main__", {}, "", {});
             std::vector<Value> emptyArgs;
             return runTurbo(chunk, &dummyFn, emptyArgs, mod);
@@ -1605,9 +1950,23 @@ Value VM::runTurbo(Chunk& topChunk, FnDecl* topFn,
         DISPATCH();
 
     // ── 控制流 ─────────────────────────────────────────
-    op_JUMP:
-        frame->ip = (size_t)inst->a;
+    op_JUMP: {
+        int target = inst->a;
+        // 热循环 JIT: 当回跳到热循环入口时，调用原生循环
+        if (target < (int)frame->ip && frame->chunk->hotLoopFn &&
+            target == frame->chunk->hotLoopStart) {
+            // 调用原生循环: void hotLoop(JitFn*, int, NanVal*)
+            frame->chunk->hotLoopFn(
+                frame->chunk->jitCache.data(),
+                (int)frame->chunk->jitCache.size(),
+                &locals[frame->localsBase]);
+            // 跳到循环出口
+            frame->ip = (size_t)frame->chunk->hotLoopExit;
+            DISPATCH();
+        }
+        frame->ip = (size_t)target;
         DISPATCH();
+    }
     op_JUMP_IF_FALSE: {
         NanVal cond = NPOP();
         if (!cond.isTruthy()) frame->ip = (size_t)inst->a;
