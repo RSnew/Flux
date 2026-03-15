@@ -40,6 +40,10 @@ public:
         for (int i = 0; i < 4; i++)
             code_[offset + i] = (uint8_t)((value >> (i * 8)) & 0xFF);
     }
+    void patch32(size_t offset, int32_t value) {
+        uint32_t uv; std::memcpy(&uv, &value, 4);
+        patch32(offset, uv);
+    }
 
     size_t size() const { return code_.size(); }
     size_t here() const { return code_.size(); }

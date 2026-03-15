@@ -92,6 +92,7 @@ static void runSource(const std::string& source, Interpreter& interp, bool isRel
             Compiler compiler(chunk, interp);
             compiler.compile(program.get());
             VM vm(interp);
+            vm.compileFunctions();
             vm.run(chunk, interp.globalEnv_);
         } else {
             interp.execute(program.get());
@@ -1050,7 +1051,16 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         g_useVM  = true;
-        runFile(argv[2]);
+        // VM 模式：直接执行，不启动文件监听（run-and-exit）
+        try {
+            Interpreter interp;
+            interp.setNoTest(g_noTest);
+            std::string source = readFile(argv[2]);
+            runSource(source, interp, false);
+        } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << "\n";
+            return 1;
+        }
         return 0;
     }
 
