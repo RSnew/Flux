@@ -365,13 +365,375 @@ private:
 };
 
 // ═══════════════════════════════════════════════════════════
+// x86-64 代码生成器 (System V ABI)
+// ═══════════════════════════════════════════════════════════
+class X86_64CodeGen : public CodeGenerator {
+public:
+    TargetArch target() const override { return TargetArch::X86_64; }
+
+    CodegenResult generate(const MIRProgram& prog) override {
+        CodegenResult result;
+        result.arch = TargetArch::X86_64;
+        out_.str("");
+
+        emitLine(".text");
+        emitLine(".global _start");
+        emitLine("");
+
+        for (auto& fn : prog.functions) {
+            generateFunction(fn);
+        }
+
+        // Entry point: call __main__ then exit(0)
+        emitLine("_start:");
+        emitInst("call __main__");
+        emitInst("movq $60, %rax");      // exit syscall
+        emitInst("xorq %rdi, %rdi");     // status = 0
+        emitInst("syscall");
+
+        result.assembly = out_.str();
+        result.ok = true;
+        return result;
+    }
+
+private:
+    int nextReg_ = 0;
+    std::unordered_map<int, int> regMap_;  // SSA value → xmm register slot
+
+    int allocReg(int valueId) {
+        auto it = regMap_.find(valueId);
+        if (it != regMap_.end()) return it->second;
+        int r = nextReg_++ % 16;
+        regMap_[valueId] = r;
+        return r;
+    }
+
+    std::string xmm(int r) { return "%xmm" + std::to_string(r % 16); }
+
+    void generateFunction(const MIRFunction& fn) {
+        emitLine(".global " + fn.name);
+        emitLabel(fn.name);
+
+        // Function prologue (System V ABI)
+        emitInst("pushq %rbp");
+        emitInst("movq %rsp, %rbp");
+
+        regMap_.clear();
+        nextReg_ = 0;
+
+        // Parameters arrive in xmm0-xmm7 (System V floating-point ABI)
+        for (int i = 0; i < (int)fn.params.size() && i < 8; i++) {
+            regMap_[i] = i;
+        }
+
+        for (auto& bb : fn.blocks) {
+            emitLabel(".L" + fn.name + "_bb" + std::to_string(bb.id));
+            for (auto& inst : bb.instructions) {
+                generateInst(inst, fn);
+            }
+        }
+
+        emitLine("");
+    }
+
+    void generateInst(const MIRInst& inst, const MIRFunction& fn) {
+        switch (inst.op) {
+        case MIROp::Const: {
+            if (inst.dest < 0) break;
+            int r = allocReg(inst.dest);
+            // Load double constant via integer register then move to xmm
+            union { double d; uint64_t u; } conv;
+            conv.d = inst.constNum;
+            emitComment("const " + std::to_string(inst.constNum));
+            emitInst("movabsq $" + std::to_string(conv.u) + ", %rax");
+            emitInst("movq %rax, " + xmm(r));
+            break;
+        }
+        case MIROp::Add: {
+            if (inst.operands.size() < 2 || inst.dest < 0) break;
+            int d = allocReg(inst.dest);
+            int l = allocReg(inst.operands[0]);
+            int rv = allocReg(inst.operands[1]);
+            if (d != l) emitInst("movsd " + xmm(l) + ", " + xmm(d));
+            emitInst("addsd " + xmm(rv) + ", " + xmm(d));
+            break;
+        }
+        case MIROp::Sub: {
+            if (inst.operands.size() < 2 || inst.dest < 0) break;
+            int d = allocReg(inst.dest);
+            int l = allocReg(inst.operands[0]);
+            int rv = allocReg(inst.operands[1]);
+            if (d != l) emitInst("movsd " + xmm(l) + ", " + xmm(d));
+            emitInst("subsd " + xmm(rv) + ", " + xmm(d));
+            break;
+        }
+        case MIROp::Mul: {
+            if (inst.operands.size() < 2 || inst.dest < 0) break;
+            int d = allocReg(inst.dest);
+            int l = allocReg(inst.operands[0]);
+            int rv = allocReg(inst.operands[1]);
+            if (d != l) emitInst("movsd " + xmm(l) + ", " + xmm(d));
+            emitInst("mulsd " + xmm(rv) + ", " + xmm(d));
+            break;
+        }
+        case MIROp::Div: {
+            if (inst.operands.size() < 2 || inst.dest < 0) break;
+            int d = allocReg(inst.dest);
+            int l = allocReg(inst.operands[0]);
+            int rv = allocReg(inst.operands[1]);
+            if (d != l) emitInst("movsd " + xmm(l) + ", " + xmm(d));
+            emitInst("divsd " + xmm(rv) + ", " + xmm(d));
+            break;
+        }
+        case MIROp::Mod: {
+            // x86-64 没有浮点求余指令，用 a - floor(a/b)*b
+            if (inst.operands.size() < 2 || inst.dest < 0) break;
+            int d = allocReg(inst.dest);
+            int l = allocReg(inst.operands[0]);
+            int rv = allocReg(inst.operands[1]);
+            emitComment("mod via a - floor(a/b)*b");
+            if (d != l) emitInst("movsd " + xmm(l) + ", " + xmm(d));
+            emitInst("divsd " + xmm(rv) + ", " + xmm(d));
+            emitInst("roundsd $1, " + xmm(d) + ", " + xmm(d));  // floor
+            emitInst("mulsd " + xmm(rv) + ", " + xmm(d));
+            // result = l - d
+            emitInst("movsd " + xmm(l) + ", %xmm15");
+            emitInst("subsd " + xmm(d) + ", %xmm15");
+            emitInst("movsd %xmm15, " + xmm(d));
+            break;
+        }
+        case MIROp::Eq: case MIROp::Ne:
+        case MIROp::Lt: case MIROp::Le:
+        case MIROp::Gt: case MIROp::Ge: {
+            if (inst.operands.size() < 2 || inst.dest < 0) break;
+            int d = allocReg(inst.dest);
+            int l = allocReg(inst.operands[0]);
+            int rv = allocReg(inst.operands[1]);
+            emitInst("ucomisd " + xmm(rv) + ", " + xmm(l));
+            std::string setcc;
+            switch (inst.op) {
+                case MIROp::Eq: setcc = "sete"; break;
+                case MIROp::Ne: setcc = "setne"; break;
+                case MIROp::Lt: setcc = "setb"; break;
+                case MIROp::Le: setcc = "setbe"; break;
+                case MIROp::Gt: setcc = "seta"; break;
+                case MIROp::Ge: setcc = "setae"; break;
+                default: setcc = "sete"; break;
+            }
+            emitInst(setcc + " %al");
+            emitInst("movzbq %al, %rax");
+            emitInst("cvtsi2sd %rax, " + xmm(d));
+            break;
+        }
+        case MIROp::Negate: {
+            if (inst.operands.empty() || inst.dest < 0) break;
+            int d = allocReg(inst.dest);
+            int s = allocReg(inst.operands[0]);
+            // Negate by XOR with sign bit
+            emitInst("xorpd " + xmm(d) + ", " + xmm(d));
+            emitInst("subsd " + xmm(s) + ", " + xmm(d));
+            break;
+        }
+        case MIROp::Not: {
+            if (inst.operands.empty() || inst.dest < 0) break;
+            int d = allocReg(inst.dest);
+            int s = allocReg(inst.operands[0]);
+            // not: 0.0 → 1.0, nonzero → 0.0
+            emitInst("xorpd %xmm15, %xmm15");
+            emitInst("ucomisd %xmm15, " + xmm(s));
+            emitInst("sete %al");
+            emitInst("movzbq %al, %rax");
+            emitInst("cvtsi2sd %rax, " + xmm(d));
+            break;
+        }
+        case MIROp::And: {
+            if (inst.operands.size() < 2 || inst.dest < 0) break;
+            int d = allocReg(inst.dest);
+            int l = allocReg(inst.operands[0]);
+            int rv = allocReg(inst.operands[1]);
+            emitInst("andpd " + xmm(rv) + ", " + xmm(l));
+            if (d != l) emitInst("movsd " + xmm(l) + ", " + xmm(d));
+            break;
+        }
+        case MIROp::Or: {
+            if (inst.operands.size() < 2 || inst.dest < 0) break;
+            int d = allocReg(inst.dest);
+            int l = allocReg(inst.operands[0]);
+            int rv = allocReg(inst.operands[1]);
+            emitInst("orpd " + xmm(rv) + ", " + xmm(l));
+            if (d != l) emitInst("movsd " + xmm(l) + ", " + xmm(d));
+            break;
+        }
+        case MIROp::Load: {
+            if (inst.dest < 0) break;
+            int r = allocReg(inst.dest);
+            for (int i = 0; i < (int)fn.params.size(); i++) {
+                if (fn.params[i].first == inst.name) {
+                    if (r != i) emitInst("movsd " + xmm(i) + ", " + xmm(r));
+                    break;
+                }
+            }
+            break;
+        }
+        case MIROp::Store: {
+            emitComment("store " + inst.name);
+            break;
+        }
+        case MIROp::Call: {
+            if (inst.dest < 0) break;
+            int d = allocReg(inst.dest);
+            // Place arguments in xmm0-xmm7
+            for (int i = 0; i < (int)inst.operands.size() && i < 8; i++) {
+                int src = allocReg(inst.operands[i]);
+                if (src != i) emitInst("movsd " + xmm(src) + ", " + xmm(i));
+            }
+            emitInst("call " + inst.name);
+            if (d != 0) emitInst("movsd %xmm0, " + xmm(d));
+            break;
+        }
+        case MIROp::Branch: {
+            if (inst.operands.empty()) break;
+            int cond = allocReg(inst.operands[0]);
+            emitInst("xorpd %xmm15, %xmm15");
+            emitInst("ucomisd %xmm15, " + xmm(cond));
+            emitInst("je .L" + fn.name + "_bb" + std::to_string(inst.falseBlock));
+            emitInst("jmp .L" + fn.name + "_bb" + std::to_string(inst.targetBlock));
+            break;
+        }
+        case MIROp::Jump: {
+            emitInst("jmp .L" + fn.name + "_bb" + std::to_string(inst.targetBlock));
+            break;
+        }
+        case MIROp::Return: {
+            if (!inst.operands.empty()) {
+                int r = allocReg(inst.operands[0]);
+                if (r != 0) emitInst("movsd " + xmm(r) + ", %xmm0");
+            }
+            emitInst("popq %rbp");
+            emitInst("ret");
+            break;
+        }
+        default:
+            emitComment("unsupported MIR op: " + std::to_string((int)inst.op));
+            break;
+        }
+    }
+};
+
+// ═══════════════════════════════════════════════════════════
 // 工厂函数
 // ═══════════════════════════════════════════════════════════
 inline std::unique_ptr<CodeGenerator> createCodeGenerator(TargetArch arch) {
     switch (arch) {
+    case TargetArch::X86_64:  return std::make_unique<X86_64CodeGen>();
     case TargetArch::ARM64:   return std::make_unique<ARM64CodeGen>();
     case TargetArch::RISCV64: return std::make_unique<RISCV64CodeGen>();
-    default:
-        throw std::runtime_error("codegen: unsupported target architecture: " + archName(arch));
     }
+    throw std::runtime_error("codegen: unsupported target architecture: " + archName(arch));
+}
+
+// ═══════════════════════════════════════════════════════════
+// 编译到二进制 — 生成汇编 → 汇编器 → 链接器 → 可执行文件
+// ═══════════════════════════════════════════════════════════
+#include <cstdlib>
+#include <cstdio>
+#include <fstream>
+#include <iostream>
+
+struct CompileOptions {
+    TargetArch arch = TargetArch::X86_64;
+    std::string output = "a.out";
+    bool keepAsm = false;       // 保留 .s 文件
+    bool verbose = false;
+};
+
+inline TargetArch detectHostArch() {
+#if defined(__x86_64__) || defined(_M_X64)
+    return TargetArch::X86_64;
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    return TargetArch::ARM64;
+#elif defined(__riscv) && __riscv_xlen == 64
+    return TargetArch::RISCV64;
+#else
+    return TargetArch::X86_64;
+#endif
+}
+
+inline bool compileToBinary(const MIRProgram& mir, const CompileOptions& opts) {
+    // 1) 代码生成 → 汇编
+    auto gen = createCodeGenerator(opts.arch);
+    auto result = gen->generate(mir);
+    if (!result.ok) {
+        std::cerr << "Codegen error: " << result.error << "\n";
+        return false;
+    }
+
+    // 2) 写入临时 .s 文件
+    std::string asmFile = opts.output + ".s";
+    {
+        std::ofstream f(asmFile);
+        if (!f) {
+            std::cerr << "Cannot write assembly file: " << asmFile << "\n";
+            return false;
+        }
+        f << result.assembly;
+    }
+
+    if (opts.verbose) {
+        std::cerr << "[compile] Generated " << archName(opts.arch) << " assembly → " << asmFile << "\n";
+    }
+
+    // 3) 选择汇编器和链接器命令
+    std::string assembler, linker;
+    switch (opts.arch) {
+    case TargetArch::X86_64:
+        assembler = "as";
+        linker = "ld";
+        break;
+    case TargetArch::ARM64:
+        assembler = "aarch64-linux-gnu-as";
+        linker = "aarch64-linux-gnu-ld";
+        break;
+    case TargetArch::RISCV64:
+        assembler = "riscv64-linux-gnu-as";
+        linker = "riscv64-linux-gnu-ld";
+        break;
+    }
+
+    // 4) 汇编: .s → .o
+    std::string objFile = opts.output + ".o";
+    std::string asmCmd = assembler + " -o " + objFile + " " + asmFile + " 2>&1";
+    if (opts.verbose) {
+        std::cerr << "[compile] " << asmCmd << "\n";
+    }
+    int rc = std::system(asmCmd.c_str());
+    if (rc != 0) {
+        std::cerr << "Assembly failed (exit " << rc << ")\n";
+        return false;
+    }
+
+    // 5) 链接: .o → binary
+    std::string linkCmd;
+    if (opts.arch == TargetArch::X86_64) {
+        // 静态链接，无 libc 依赖（使用 _start）
+        linkCmd = linker + " -static -o " + opts.output + " " + objFile + " 2>&1";
+    } else {
+        linkCmd = linker + " -static -o " + opts.output + " " + objFile + " 2>&1";
+    }
+    if (opts.verbose) {
+        std::cerr << "[compile] " << linkCmd << "\n";
+    }
+    rc = std::system(linkCmd.c_str());
+    if (rc != 0) {
+        std::cerr << "Linking failed (exit " << rc << ")\n";
+        return false;
+    }
+
+    // 6) 清理临时文件
+    if (!opts.keepAsm) {
+        std::remove(asmFile.c_str());
+    }
+    std::remove(objFile.c_str());
+
+    return true;
 }
