@@ -306,6 +306,7 @@ void TypeChecker::checkStmt(ASTNode* node, std::shared_ptr<TypeEnv> env) {
     // ── alloc/free ──────────────────────────────────────
     if (dynamic_cast<AllocExpr*>(node)) return;
     if (dynamic_cast<FreeStmt*>(node)) return;
+    if (dynamic_cast<DelStmt*>(node)) return;
     // ── asm ─────────────────────────────────────────────
     if (dynamic_cast<AsmBlock*>(node)) return;
     // ── default {} 默认值返回（语句级）─────────────────────

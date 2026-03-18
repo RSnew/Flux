@@ -481,9 +481,14 @@ private:
             return s + ind() + "}\n";
         }
 
-        // ── free ─────────────────────────────────────────────
+        // ── free（向后兼容）────────────────────────────────────
         if (auto* n = dynamic_cast<FreeStmt*>(node)) {
             return ind() + "free(" + fmtExpr(n->ptr.get()) + ")\n";
+        }
+
+        // ── del ─────────────────────────────────────────────
+        if (auto* n = dynamic_cast<DelStmt*>(node)) {
+            return ind() + "del " + fmtExpr(n->target.get()) + "\n";
         }
 
         // ── default {} 默认值返回（语句级）─────────────────────

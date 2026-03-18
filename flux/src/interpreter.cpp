@@ -2049,6 +2049,43 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
         return Value::Nil();
     }
 
+    // ── del 统一删除/释放 ────────────────────────────────
+    if (auto* n = dynamic_cast<DelStmt*>(node)) {
+        // del arr[i] / del map[key] — 目标是 IndexExpr
+        if (auto* idx = dynamic_cast<IndexExpr*>(n->target.get())) {
+            Value obj = evalNode(idx->object.get(), env, mod);
+            Value key = evalNode(idx->index.get(), env, mod);
+            if (obj.type == Value::Type::Array) {
+                if (key.type != Value::Type::Number)
+                    throw std::runtime_error("del: array index must be a Number");
+                size_t i = (size_t)key.number;
+                if (!obj.array || i >= obj.array->size())
+                    throw std::runtime_error("del: array index out of range");
+                obj.array->erase(obj.array->begin() + i);
+            } else if (obj.type == Value::Type::Map) {
+                if (key.type != Value::Type::String)
+                    throw std::runtime_error("del: map key must be a String");
+                if (!obj.map)
+                    throw std::runtime_error("del: map is null");
+                obj.map->erase(key.string);
+            } else {
+                throw std::runtime_error("del: subscript target must be an Array or Map");
+            }
+            return Value::Nil();
+        }
+        // del ptr — 目标是普通表达式（Addr 释放）
+        Value target = evalNode(n->target.get(), env, mod);
+        if (target.type == Value::Type::Addr) {
+            std::free(reinterpret_cast<void*>(target.addr));
+        } else if (target.type == Value::Type::Number) {
+            // 向后兼容
+            std::free(reinterpret_cast<void*>(static_cast<uintptr_t>(target.number)));
+        } else {
+            throw std::runtime_error("del: target must be an Addr, or use del arr[i] / del map[key]");
+        }
+        return Value::Nil();
+    }
+
     // ── asm {} 内联汇编 ─────────────────────────────────
     if (auto* n = dynamic_cast<AsmBlock*>(node)) {
 #if defined(__x86_64__) && defined(__GNUC__)
