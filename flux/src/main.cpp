@@ -14,6 +14,7 @@
 #include "mir.h"
 #include "jit.h"
 #include "codegen.h"
+#include "hotswap.h"
 #include "profiler.h"
 #include "fluz.h"
 
@@ -783,6 +784,7 @@ static void printHelp() {
         << "  flux pack  <file> --debug   Pack without protection (debuggable)\n"
         << "  flux profile <file.flux>    Run with profiling on all functions\n"
         << "  flux compile <file> [-o out]  Compile to native binary (x86_64, arm64, riscv64)\n"
+        << "  flux live   <file.flux>      AOT compile + hot-swap (dlopen reload)\n"
         << "  flux codegen <arch> <file>   Generate assembly (x86_64, arm64, riscv64)\n"
         << "  flux lsp                    Start Language Server Protocol server\n"
         << "  flux debug <file.flux>      Start interactive debugger\n"
@@ -1063,6 +1065,51 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         return 0;
+    }
+
+    // ── flux live <file.flux> [-v] — AOT 编译 + 热替换运行 ──
+    if (sub == "live") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux live <file.flux> [-v]\n";
+            return 1;
+        }
+        try {
+            std::string filepath = argv[2];
+            bool verbose = false;
+            for (int i = 3; i < argc; i++) {
+                if (std::string(argv[i]) == "-v" || std::string(argv[i]) == "--verbose")
+                    verbose = true;
+            }
+
+            HotSwapEngine engine(verbose);
+
+            std::cerr << CLR_CYAN << "[live] Compiling " << filepath
+                      << " → native .so ..." << CLR_RESET << "\n";
+
+            if (!engine.loadFromSource(filepath)) {
+                std::cerr << CLR_RED << "[live] Initial compilation failed." << CLR_RESET << "\n";
+                return 1;
+            }
+
+            std::cerr << CLR_GREEN << "[live] Running (native AOT)..." << CLR_RESET << "\n";
+            engine.executeMain();
+
+            std::cerr << CLR_CYAN << "\n[live] Watching " << filepath
+                      << " for changes (Ctrl+C to quit)" << CLR_RESET << "\n";
+            std::cerr << CLR_GRAY << "[live] Edit & save → auto recompile → dlopen hot-swap"
+                      << CLR_RESET << "\n\n";
+
+            engine.startWatching();
+
+            // 主线程等待，直到 Ctrl+C
+            while (true) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+
+        } catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
     }
 
     // ── flux compile <file> [-o output] [--arch <arch>] [--keep-asm] [-v] — 编译到二进制

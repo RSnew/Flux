@@ -369,6 +369,8 @@ private:
 // ═══════════════════════════════════════════════════════════
 class X86_64CodeGen : public CodeGenerator {
 public:
+    bool sharedLib = false;  // true → 生成 .so（无 _start，导出所有函数）
+
     TargetArch target() const override { return TargetArch::X86_64; }
 
     CodegenResult generate(const MIRProgram& prog) override {
@@ -377,19 +379,23 @@ public:
         out_.str("");
 
         emitLine(".text");
-        emitLine(".global _start");
+        if (!sharedLib) {
+            emitLine(".global _start");
+        }
         emitLine("");
 
         for (auto& fn : prog.functions) {
             generateFunction(fn);
         }
 
-        // Entry point: call __main__ then exit(0)
-        emitLine("_start:");
-        emitInst("call __main__");
-        emitInst("movq $60, %rax");      // exit syscall
-        emitInst("xorq %rdi, %rdi");     // status = 0
-        emitInst("syscall");
+        if (!sharedLib) {
+            // Entry point: call __main__ then exit(0)
+            emitLine("_start:");
+            emitInst("call __main__");
+            emitInst("movq $60, %rax");      // exit syscall
+            emitInst("xorq %rdi, %rdi");     // status = 0
+            emitInst("syscall");
+        }
 
         result.assembly = out_.str();
         result.ok = true;
@@ -645,6 +651,7 @@ struct CompileOptions {
     std::string output = "a.out";
     bool keepAsm = false;       // 保留 .s 文件
     bool verbose = false;
+    bool sharedLib = false;     // 生成 .so 而非可执行文件
 };
 
 inline TargetArch detectHostArch() {
@@ -662,6 +669,11 @@ inline TargetArch detectHostArch() {
 inline bool compileToBinary(const MIRProgram& mir, const CompileOptions& opts) {
     // 1) 代码生成 → 汇编
     auto gen = createCodeGenerator(opts.arch);
+    // 设置 shared lib 模式
+    if (opts.sharedLib) {
+        if (auto* x86 = dynamic_cast<X86_64CodeGen*>(gen.get()))
+            x86->sharedLib = true;
+    }
     auto result = gen->generate(mir);
     if (!result.ok) {
         std::cerr << "Codegen error: " << result.error << "\n";
@@ -688,19 +700,19 @@ inline bool compileToBinary(const MIRProgram& mir, const CompileOptions& opts) {
     switch (opts.arch) {
     case TargetArch::X86_64:
         assembler = "as";
-        linker = "ld";
+        linker = "gcc";  // 用 gcc 驱动链接，简化 .so 生成
         break;
     case TargetArch::ARM64:
         assembler = "aarch64-linux-gnu-as";
-        linker = "aarch64-linux-gnu-ld";
+        linker = "aarch64-linux-gnu-gcc";
         break;
     case TargetArch::RISCV64:
         assembler = "riscv64-linux-gnu-as";
-        linker = "riscv64-linux-gnu-ld";
+        linker = "riscv64-linux-gnu-gcc";
         break;
     }
 
-    // 4) 汇编: .s → .o
+    // 4) 汇编: .s → .o（.so 模式需要 -fPIC）
     std::string objFile = opts.output + ".o";
     std::string asmCmd = assembler + " -o " + objFile + " " + asmFile + " 2>&1";
     if (opts.verbose) {
@@ -712,13 +724,20 @@ inline bool compileToBinary(const MIRProgram& mir, const CompileOptions& opts) {
         return false;
     }
 
-    // 5) 链接: .o → binary
+    // 5) 链接: .o → binary 或 .so
     std::string linkCmd;
-    if (opts.arch == TargetArch::X86_64) {
-        // 静态链接，无 libc 依赖（使用 _start）
-        linkCmd = linker + " -static -o " + opts.output + " " + objFile + " 2>&1";
+    if (opts.sharedLib) {
+        // 生成共享库
+        linkCmd = linker + " -shared -nostdlib -o " + opts.output + " " + objFile + " 2>&1";
     } else {
-        linkCmd = linker + " -static -o " + opts.output + " " + objFile + " 2>&1";
+        // 生成可执行文件（静态链接，用 ld 直接链接）
+        std::string ld;
+        switch (opts.arch) {
+        case TargetArch::X86_64:  ld = "ld"; break;
+        case TargetArch::ARM64:   ld = "aarch64-linux-gnu-ld"; break;
+        case TargetArch::RISCV64: ld = "riscv64-linux-gnu-ld"; break;
+        }
+        linkCmd = ld + " -static -o " + opts.output + " " + objFile + " 2>&1";
     }
     if (opts.verbose) {
         std::cerr << "[compile] " << linkCmd << "\n";
