@@ -169,6 +169,21 @@ flux publish            # publish to local registry
 | v2 | Pre-exec Checks | Interface completeness, enum validation | Done |
 | M  | Self-hosting | Flux compiles Flux | Planned |
 
+## Design Philosophy — Why Not Rust / C++?
+
+Flux is not a systems language. Every "missing" feature is an intentional trade-off
+for hot-reload-first development. See [`docs/design-comparison.md`](docs/design-comparison.md) for full details.
+
+| Design Choice | Rust / C++ | Flux | Why |
+|---------------|-----------|------|-----|
+| Type system | Static, generics / templates | Dynamic + HM inference (no `<T>` syntax) | Faster save→effect loop; type complexity hidden from user |
+| Memory | Ownership / RAII | GC (shared_ptr + cycle detection) | GC overhead ≪ compile-time cost of borrow checking for scripting |
+| Concurrency | No GIL, true parallelism | GIL + thread pools + channels | GIL structurally eliminates data races; I/O parallelism unaffected |
+| Error handling | `Result<T,E>` / exceptions | `exception` + `default` + `@supervised` | Errors isolated at module boundary; supervisor auto-recovers |
+| Polymorphism | Traits / virtual functions | Duck-typed interfaces | No `impl` boilerplate; hot-reload friendly |
+| Branching | `match` / `switch` | `if value { else: pattern { } }` | Covers value matching; persistent state handles state machines |
+| Dev feedback | Edit → compile → run | Edit → save → **instant effect** | The reason Flux exists |
+
 ## Project Structure
 
 ```
