@@ -36,6 +36,7 @@ const std::unordered_map<std::string, TokenType> Lexer::keywords_ = {
     {"append",     TokenType::APPEND},
     {"alloc",      TokenType::ALLOC},
     {"free",       TokenType::FREE},
+    {"del",        TokenType::DEL},
     {"asm",        TokenType::ASM},
     {"default",    TokenType::DEFAULT},
     {"test",       TokenType::TEST},

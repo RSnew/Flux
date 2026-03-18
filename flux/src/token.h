@@ -24,7 +24,8 @@ enum class TokenType {
     ENUM,           // enum 枚举关键字
     APPEND,         // append 扩展机制
     ALLOC,          // alloc 手动内存分配
-    FREE,           // free 手动内存释放
+    FREE,           // free 手动内存释放（已废弃，由 del 替代）
+    DEL,            // del 统一删除/释放
     ASM,            // asm 内联汇编
     DEFAULT,        // default 错误恢复
     TEST,           // test 测试覆盖声明

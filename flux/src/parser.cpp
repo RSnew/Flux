@@ -300,13 +300,22 @@ NodePtr Parser::parseStatement() {
     }
     // inline exception { "..." }
     if (check(TokenType::EXCEPTION)) return parseExceptionDecl();
-    // free(ptr) 语句
+    // free(ptr) 语句（向后兼容，已废弃）
     if (check(TokenType::FREE)) {
         consume();
         expect(TokenType::LPAREN, "expected '(' after free");
         auto ptr = parseExpr();
         expect(TokenType::RPAREN, "expected ')'");
         return std::make_unique<FreeStmt>(std::move(ptr));
+    }
+    // del 统一删除/释放语句
+    // del ptr       → 释放 Addr 内存
+    // del arr[i]    → 删除数组元素
+    // del map[key]  → 删除 Map 键值对
+    if (check(TokenType::DEL)) {
+        consume();
+        auto target = parseExpr();
+        return std::make_unique<DelStmt>(std::move(target));
     }
     // default — 全局声明 or 语句级默认值
     if (check(TokenType::DEFAULT)) {

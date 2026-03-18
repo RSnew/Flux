@@ -404,10 +404,19 @@ struct AllocExpr : ASTNode {
     explicit AllocExpr(NodePtr s) : size(std::move(s)) {}
 };
 
-// ── free(ptr) 语句 ──────────────────────────────────────
+// ── free(ptr) 语句（已废弃，由 del 替代）─────────────────
 struct FreeStmt : ASTNode {
     NodePtr ptr;
     explicit FreeStmt(NodePtr p) : ptr(std::move(p)) {}
+};
+
+// ── del 统一删除/释放语句 ─────────────────────────────────
+// del ptr         → Addr 类型：释放内存（等价于 free）
+// del arr[i]      → Array 类型：删除第 i 个元素
+// del map[key]    → Map 类型：删除键值对
+struct DelStmt : ASTNode {
+    NodePtr target;    // 简单表达式（Addr 释放）或 IndexExpr（数组/Map 删除）
+    explicit DelStmt(NodePtr t) : target(std::move(t)) {}
 };
 
 // ── asm { "指令" } 内联汇编 ─────────────────────────────
