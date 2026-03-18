@@ -5,6 +5,10 @@
 #include <cmath>
 #include <cstdlib>
 #include <algorithm>
+#if defined(__x86_64__) && defined(__GNUC__)
+#include <sys/mman.h>   // mmap, munmap
+#include <unistd.h>     // write, close, unlink
+#endif
 
 // ── ChanVal 方法实现 ──────────────────────────────────────
 // 锁顺序约束：先释放 GIL，再持有 channel 锁。
@@ -143,6 +147,7 @@ void Interpreter::registerBuiltins() {
             case Value::Type::Bool:   return Value::Str("Bool");
             case Value::Type::Array:  return Value::Str("Array");
             case Value::Type::Map:    return Value::Str("Map");
+            case Value::Type::Addr:   return Value::Str("Addr");
             default:                  return Value::Str("Nil");
         }
     });
@@ -2026,27 +2031,123 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
         void* ptr = std::calloc(1, bytes);
         if (!ptr)
             throw std::runtime_error("alloc: out of memory");
-        // 返回地址作为 Number（Addr 类型在类型系统中，运行时用 double）
-        return Value::Num((double)(uintptr_t)ptr);
+        // 返回 Addr 类型，使用 uintptr_t 存储，无精度损失
+        return Value::AddrVal(ptr);
     }
 
     // ── free(ptr) ───────────────────────────────────────
     if (auto* n = dynamic_cast<FreeStmt*>(node)) {
         Value ptr = evalNode(n->ptr.get(), env, mod);
-        if (ptr.type != Value::Type::Number)
-            throw std::runtime_error("free: argument must be an Addr/Number");
-        void* p = (void*)(uintptr_t)ptr.number;
-        std::free(p);
+        if (ptr.type == Value::Type::Addr) {
+            std::free(reinterpret_cast<void*>(ptr.addr));
+        } else if (ptr.type == Value::Type::Number) {
+            // 向后兼容：允许 Number 类型（但会警告精度风险）
+            std::free(reinterpret_cast<void*>(static_cast<uintptr_t>(ptr.number)));
+        } else {
+            throw std::runtime_error("free: argument must be an Addr");
+        }
         return Value::Nil();
     }
 
     // ── asm {} 内联汇编 ─────────────────────────────────
     if (auto* n = dynamic_cast<AsmBlock*>(node)) {
-        // 在解释器中不执行汇编，仅记录（编译后端使用）
-        // 输出到 stderr 用于调试
+#if defined(__x86_64__) && defined(__GNUC__)
+        // 在 x86_64 上真正执行内联汇编
+        // 拼接所有指令为单个汇编块
+        std::string asmCode;
+        for (size_t i = 0; i < n->instructions.size(); i++) {
+            if (i > 0) asmCode += "\n";
+            asmCode += n->instructions[i];
+        }
+        if (!asmCode.empty()) {
+            __asm__ volatile (".att_syntax prefix\n" : : : "memory");
+            // 使用 GCC 扩展在运行时执行汇编字符串：
+            // 将指令编码为机器码并通过 mmap+execute 执行
+            // 分配可执行内存页
+            void* execMem = mmap(nullptr, 4096,
+                                 PROT_READ | PROT_WRITE | PROT_EXEC,
+                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (execMem == MAP_FAILED)
+                throw std::runtime_error("asm: mmap failed for executable memory");
+
+            // 使用内置汇编器：调用 as 将汇编文本编译为机器码
+            // 写入临时 .s 文件
+            char tmplS[] = "/tmp/flux_asm_XXXXXX.s";
+            int fdS = mkstemps(tmplS, 2);
+            if (fdS < 0) { munmap(execMem, 4096); throw std::runtime_error("asm: mkstemp failed"); }
+            // 添加返回指令（ret）以确保控制流返回
+            std::string fullAsm = ".text\n.globl _flux_asm\n_flux_asm:\n" + asmCode + "\nret\n";
+            if (write(fdS, fullAsm.c_str(), fullAsm.size()) < 0) {
+                close(fdS); unlink(tmplS); munmap(execMem, 4096);
+                throw std::runtime_error("asm: write failed");
+            }
+            close(fdS);
+
+            // 汇编 → .o 文件
+            std::string tmplO = std::string(tmplS) + ".o";
+            std::string cmd = "as -o " + tmplO + " " + tmplS + " 2>&1";
+            FILE* pipe = popen(cmd.c_str(), "r");
+            std::string errMsg;
+            if (pipe) {
+                char buf[256];
+                while (fgets(buf, sizeof(buf), pipe)) errMsg += buf;
+                int rc = pclose(pipe);
+                if (rc != 0) {
+                    unlink(tmplS);
+                    munmap(execMem, 4096);
+                    throw std::runtime_error("asm: assembler error: " + errMsg);
+                }
+            }
+
+            // 提取 .text 节的机器码
+            cmd = "objcopy -O binary -j .text " + tmplO + " " + tmplO + ".bin 2>&1";
+            pipe = popen(cmd.c_str(), "r");
+            if (pipe) {
+                char buf[256];
+                errMsg.clear();
+                while (fgets(buf, sizeof(buf), pipe)) errMsg += buf;
+                int rc = pclose(pipe);
+                if (rc != 0) {
+                    unlink(tmplS); unlink(tmplO.c_str());
+                    munmap(execMem, 4096);
+                    throw std::runtime_error("asm: objcopy error: " + errMsg);
+                }
+            }
+
+            // 读取机器码到可执行内存
+            std::string binPath = tmplO + ".bin";
+            FILE* binFile = fopen(binPath.c_str(), "rb");
+            if (!binFile) {
+                unlink(tmplS); unlink(tmplO.c_str()); unlink(binPath.c_str());
+                munmap(execMem, 4096);
+                throw std::runtime_error("asm: cannot read binary output");
+            }
+            size_t codeSize = fread(execMem, 1, 4096, binFile);
+            fclose(binFile);
+
+            // 清理临时文件
+            unlink(tmplS);
+            unlink(tmplO.c_str());
+            unlink(binPath.c_str());
+
+            if (codeSize == 0) {
+                munmap(execMem, 4096);
+                throw std::runtime_error("asm: empty machine code output");
+            }
+
+            // 执行机器码
+            using AsmFunc = void(*)();
+            auto fn = reinterpret_cast<AsmFunc>(execMem);
+            fn();
+
+            munmap(execMem, 4096);
+        }
+#else
+        // 非 x86_64 平台：仅记录，不执行
         for (auto& inst : n->instructions) {
             std::cerr << "\033[90m[asm] " << inst << "\033[0m\n";
         }
+#endif
         return Value::Nil();
     }
 
@@ -2118,6 +2219,26 @@ Value Interpreter::evalBinary(BinaryExpr* node, std::shared_ptr<Environment> env
         if (op == ">=") return Value::Bool(a >= b);
         if (op == "==") return Value::Bool(a == b);
         if (op == "!=") return Value::Bool(a != b);
+    }
+
+    // ── Addr 指针算术 ──────────────────────────────────
+    // Addr +/- Number → Addr（指针偏移）
+    if (l.type == Value::Type::Addr && r.type == Value::Type::Number) {
+        if (op == "+")  return Value::AddrVal(l.addr + (uintptr_t)r.number);
+        if (op == "-")  return Value::AddrVal(l.addr - (uintptr_t)r.number);
+    }
+    if (l.type == Value::Type::Number && r.type == Value::Type::Addr && op == "+") {
+        return Value::AddrVal((uintptr_t)l.number + r.addr);
+    }
+    // Addr - Addr → Number（指针距离）
+    if (l.type == Value::Type::Addr && r.type == Value::Type::Addr) {
+        if (op == "-")  return Value::Num((double)((ptrdiff_t)(l.addr - r.addr)));
+        if (op == "==") return Value::Bool(l.addr == r.addr);
+        if (op == "!=") return Value::Bool(l.addr != r.addr);
+        if (op == "<")  return Value::Bool(l.addr <  r.addr);
+        if (op == ">")  return Value::Bool(l.addr >  r.addr);
+        if (op == "<=") return Value::Bool(l.addr <= r.addr);
+        if (op == ">=") return Value::Bool(l.addr >= r.addr);
     }
 
     if (op == "==") return Value::Bool(l.toString() == r.toString());

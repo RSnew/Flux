@@ -37,10 +37,11 @@ using ValueFunc       = std::shared_ptr<FuncVal>;
 
 struct Value {
     enum class Type { Nil, Number, String, Bool, Array, Map, Future, Chan,
-                      StructType, StructInst, Interface, Function };
+                      StructType, StructInst, Interface, Function, Addr };
     Type type = Type::Nil;
 
     double      number  = 0;
+    uintptr_t   addr    = 0;    // Addr 类型：无精度损失的指针地址
     std::string string;
     bool        boolean = false;
     ValueArray      array;       // Array 类型
@@ -54,6 +55,8 @@ struct Value {
 
     static Value Nil()    { return {}; }
     static Value Num(double n)       { Value v; v.type = Type::Number; v.number = n; return v; }
+    static Value AddrVal(uintptr_t a){ Value v; v.type = Type::Addr;   v.addr = a;   return v; }
+    static Value AddrVal(void* p)    { Value v; v.type = Type::Addr;   v.addr = reinterpret_cast<uintptr_t>(p); return v; }
     static Value Str(std::string s)  { Value v; v.type = Type::String; v.string = std::move(s); return v; }
     static Value Bool(bool b)        { Value v; v.type = Type::Bool;   v.boolean = b; return v; }
     static Value Arr(ValueArray a)   { Value v; v.type = Type::Array;  v.array = std::move(a); return v; }
@@ -102,6 +105,7 @@ struct Value {
         if (type == Type::StructInst) return structInst != nullptr;
         if (type == Type::Interface)  return iface      != nullptr;
         if (type == Type::Function)  return func       != nullptr;
+        if (type == Type::Addr)      return addr       != 0;
         return false;
     }
 
@@ -143,6 +147,11 @@ struct Value {
         if (type == Type::StructInst) return "<StructInst>";
         if (type == Type::Interface)  return "<Interface>";
         if (type == Type::Function)  return "<Function>";
+        if (type == Type::Addr) {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "0x%lx", (unsigned long)addr);
+            return std::string(buf);
+        }
         return "null";
     }
 
