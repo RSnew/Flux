@@ -14,6 +14,7 @@
 #include "mir.h"
 #include "jit.h"
 #include "codegen.h"
+#include "hotswap.h"
 #include "profiler.h"
 #include "fluz.h"
 
@@ -782,7 +783,9 @@ static void printHelp() {
         << "  flux pack  <file> [-o app.fluz]  Pack (obfuscated + encrypted)\n"
         << "  flux pack  <file> --debug   Pack without protection (debuggable)\n"
         << "  flux profile <file.flux>    Run with profiling on all functions\n"
-        << "  flux codegen <arch> <file>   Generate assembly (arm64, riscv64)\n"
+        << "  flux compile <file> [-o out]  Compile to native binary (x86_64, arm64, riscv64)\n"
+        << "  flux live   <file.flux>      AOT compile + hot-swap (dlopen reload)\n"
+        << "  flux codegen <arch> <file>   Generate assembly (x86_64, arm64, riscv64)\n"
         << "  flux lsp                    Start Language Server Protocol server\n"
         << "  flux debug <file.flux>      Start interactive debugger\n"
         << "  flux registry [url]         Get/set central package registry URL\n"
@@ -1064,10 +1067,130 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
+    // ── flux live <file.flux> [-v] — AOT 编译 + 热替换运行 ──
+    if (sub == "live") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux live <file.flux> [-v]\n";
+            return 1;
+        }
+        try {
+            std::string filepath = argv[2];
+            bool verbose = false;
+            for (int i = 3; i < argc; i++) {
+                if (std::string(argv[i]) == "-v" || std::string(argv[i]) == "--verbose")
+                    verbose = true;
+            }
+
+            HotSwapEngine engine(verbose);
+
+            std::cerr << CLR_CYAN << "[live] Compiling " << filepath
+                      << " → native .so ..." << CLR_RESET << "\n";
+
+            if (!engine.loadFromSource(filepath)) {
+                std::cerr << CLR_RED << "[live] Initial compilation failed." << CLR_RESET << "\n";
+                return 1;
+            }
+
+            std::cerr << CLR_GREEN << "[live] Running (native AOT)..." << CLR_RESET << "\n";
+            engine.executeMain();
+
+            std::cerr << CLR_CYAN << "\n[live] Watching " << filepath
+                      << " for changes (Ctrl+C to quit)" << CLR_RESET << "\n";
+            std::cerr << CLR_GRAY << "[live] Edit & save → auto recompile → dlopen hot-swap"
+                      << CLR_RESET << "\n\n";
+
+            engine.startWatching();
+
+            // 主线程等待，直到 Ctrl+C
+            while (true) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+
+        } catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
+    }
+
+    // ── flux compile <file> [-o output] [--arch <arch>] [--keep-asm] [-v] — 编译到二进制
+    if (sub == "compile") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux compile <file.flux> [-o output] [--arch x86_64|arm64|riscv64] [--keep-asm] [-v]\n";
+            return 1;
+        }
+        try {
+            std::string filepath = argv[2];
+            CompileOptions opts;
+            opts.arch = detectHostArch();
+            opts.output = "a.out";
+
+            // Parse flags
+            for (int i = 3; i < argc; i++) {
+                std::string flag = argv[i];
+                if ((flag == "-o" || flag == "--output") && i + 1 < argc) {
+                    opts.output = argv[++i];
+                } else if (flag == "--arch" && i + 1 < argc) {
+                    std::string a = argv[++i];
+                    if (a == "x86_64" || a == "x86-64" || a == "x64")
+                        opts.arch = TargetArch::X86_64;
+                    else if (a == "arm64" || a == "aarch64")
+                        opts.arch = TargetArch::ARM64;
+                    else if (a == "riscv64" || a == "riscv")
+                        opts.arch = TargetArch::RISCV64;
+                    else {
+                        std::cerr << CLR_RED << "Unknown arch: " << a
+                                  << " (supported: x86_64, arm64, riscv64)" << CLR_RESET << "\n";
+                        return 1;
+                    }
+                } else if (flag == "--keep-asm") {
+                    opts.keepAsm = true;
+                } else if (flag == "-v" || flag == "--verbose") {
+                    opts.verbose = true;
+                }
+            }
+
+            std::string src = readFile(filepath);
+
+            // Pipeline: Source → AST → TypeCheck → HIR → MIR → optimize → codegen → assemble → link
+            Lexer  lexer(src);
+            auto   tokens = lexer.tokenize();
+            Parser parser(std::move(tokens));
+            auto   program = parser.parse();
+
+            TypeChecker checker;
+            auto typeErrors = checker.check(program.get());
+            if (!typeErrors.empty()) {
+                std::cerr << CLR_RED << "Type errors — compile aborted:\n" << CLR_RESET;
+                for (auto& e : typeErrors)
+                    std::cerr << CLR_RED << "  " << e.message << CLR_RESET << "\n";
+                return 1;
+            }
+
+            HIRLowering lowering;
+            auto hir = lowering.lower(program.get());
+            MIRBuilder builder;
+            auto mir = builder.build(hir);
+            mirOptimize(mir);
+
+            if (compileToBinary(mir, opts)) {
+                std::cerr << CLR_GREEN << "Compiled " << filepath << " → " << opts.output
+                          << " (" << archName(opts.arch) << ")" << CLR_RESET << "\n";
+                return 0;
+            } else {
+                std::cerr << CLR_RED << "Compilation failed." << CLR_RESET << "\n";
+                return 1;
+            }
+
+        } catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
+    }
+
     // ── flux codegen <arch> <file> — 代码生成 ─────────────
     if (sub == "codegen") {
         if (argc < 4) {
-            std::cerr << "Usage: flux codegen <arm64|riscv64> <file.flux>\n";
+            std::cerr << "Usage: flux codegen <x86_64|arm64|riscv64> <file.flux>\n";
             return 1;
         }
         try {
@@ -1076,13 +1199,15 @@ int main(int argc, char* argv[]) {
             std::string src = readFile(filepath);
 
             TargetArch arch;
-            if (archStr == "arm64" || archStr == "aarch64")
+            if (archStr == "x86_64" || archStr == "x86-64" || archStr == "x64")
+                arch = TargetArch::X86_64;
+            else if (archStr == "arm64" || archStr == "aarch64")
                 arch = TargetArch::ARM64;
             else if (archStr == "riscv64" || archStr == "riscv")
                 arch = TargetArch::RISCV64;
             else {
                 std::cerr << CLR_RED << "Unknown target: " << archStr
-                          << " (supported: arm64, riscv64)" << CLR_RESET << "\n";
+                          << " (supported: x86_64, arm64, riscv64)" << CLR_RESET << "\n";
                 return 1;
             }
 
