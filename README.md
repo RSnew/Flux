@@ -2,10 +2,16 @@
 
 [简体中文](README.zh-CN.md)
 
-A hot-reload-first scripting language with persistent state, module isolation,
+A hot-reload-first programming language with persistent state, module isolation,
 supervised crash recovery, and an optional bytecode VM.
 
 Built in **~5,000 lines of C++17**. No external dependencies beyond pthreads.
+
+> **Flux is not a scripting language.**
+> It features a complete type system with HM inference, a bytecode compiler and stack-based VM,
+> multi-level IR optimization (HIR → MIR → JIT/Codegen), module isolation with supervised crash recovery,
+> and a full toolchain (type checker, formatter, package manager, LSP, debugger).
+> Hot reload is a design choice, not a limitation.
 
 ---
 
@@ -177,7 +183,7 @@ for hot-reload-first development. See [`docs/design-comparison.md`](docs/design-
 | Design Choice | Rust / C++ | Flux | Why |
 |---------------|-----------|------|-----|
 | Type system | Static, generics / templates | Dynamic + HM inference (no `<T>` syntax) | Faster save→effect loop; type complexity hidden from user |
-| Memory | Ownership / RAII | GC (shared_ptr + cycle detection) | GC overhead ≪ compile-time cost of borrow checking for scripting |
+| Memory | Ownership / RAII | GC (shared_ptr + cycle detection) | GC overhead ≪ compile-time cost of borrow checking for hot-reload workflows |
 | Concurrency | No GIL, true parallelism | GIL + thread pools + channels | GIL structurally eliminates data races; I/O parallelism unaffected |
 | Error handling | `Result<T,E>` / exceptions | `exception` + `default` + `@supervised` | Errors isolated at module boundary; supervisor auto-recovers |
 | Polymorphism | Traits / virtual functions | Duck-typed interfaces | No `impl` boilerplate; hot-reload friendly |
