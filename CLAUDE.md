@@ -2,7 +2,7 @@
 
 ## Overview
 
-Flux is a hot-reload-first scripting language built in ~5,000 lines of C++17.
+Flux is a hot-reload-first programming language built in ~5,000 lines of C++17.
 Key features: persistent state, module isolation, supervised crash recovery, optional bytecode VM.
 No external dependencies beyond pthreads and OpenSSL.
 
