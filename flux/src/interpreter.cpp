@@ -58,10 +58,10 @@ void ChanVal::close() {
     cv_send.notify_all();
 }
 
-// ── AI toString（在 AITypeInfo 完整定义之后）──────────────
-std::string Value::toStringAI() const {
-    if (ai) return "<AI:" + ai->name + " intent=\"" + ai->intent + "\">";
-    return "<AI>";
+// ── Specify toString（在 SpecifyTypeInfo 完整定义之后）──────────────
+std::string Value::toStringSpecify() const {
+    if (specify) return "<Specify:" + specify->name + " intent=\"" + specify->intent + "\">";
+    return "<Specify>";
 }
 
 // ── 构造 & 析构 ───────────────────────────────────────────
@@ -154,7 +154,7 @@ void Interpreter::registerBuiltins() {
             case Value::Type::Array:  return Value::Str("Array");
             case Value::Type::Map:    return Value::Str("Map");
             case Value::Type::Addr:   return Value::Str("Addr");
-            case Value::Type::AI:    return Value::Str("AI");
+            case Value::Type::Specify: return Value::Str("Specify");
             default:                  return Value::Str("Nil");
         }
     });
@@ -1587,9 +1587,9 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
     }
 
     // ── 声明 ──
-    // ── AI 原生类型声明 ──
-    if (auto* n = dynamic_cast<AIDecl*>(node)) {
-        auto info = std::make_shared<AITypeInfo>();
+    // ── 规格声明 (specify) ──
+    if (auto* n = dynamic_cast<SpecifyDecl*>(node)) {
+        auto info = std::make_shared<SpecifyTypeInfo>();
         info->name = n->name;
         for (auto& field : n->fields) {
             Value val = evalNode(field.value.get(), env, mod);
@@ -1599,7 +1599,7 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
             else if (field.key == "constraints") info->constraints = val;
             else if (field.key == "examples")    info->examples = val;
         }
-        Value v = Value::AIV(info);
+        Value v = Value::SpecifyV(info);
         env->set(n->name, v);
         return v;
     }

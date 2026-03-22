@@ -27,7 +27,7 @@ enum class TypeKind {
     Fn,         // 函数类型（含参数/返回类型列表）
     Struct,     // 结构体类型
     Interface,  // 接口类型
-    AI,         // AI 原生类型
+    Specify,    // 规格声明类型
 };
 
 struct FluxType {
@@ -53,7 +53,7 @@ struct FluxType {
     static FluxType MapT()      { return FluxType(TypeKind::Map); }
     static FluxType StructT()   { return FluxType(TypeKind::Struct); }
     static FluxType InterfaceT(){ return FluxType(TypeKind::Interface); }
-    static FluxType AIT()       { return FluxType(TypeKind::AI); }
+    static FluxType SpecifyT()  { return FluxType(TypeKind::Specify); }
     static FluxType Unknown()   { return FluxType(TypeKind::Unknown); }
 
     std::string name() const {
@@ -73,7 +73,7 @@ struct FluxType {
             case TypeKind::Fn:        return "Fn";
             case TypeKind::Struct:    return "Struct";
             case TypeKind::Interface: return "Interface";
-            case TypeKind::AI:        return "AI";
+            case TypeKind::Specify:   return "Specify";
             case TypeKind::Unknown:   return "Unknown";
         }
         return "?";
@@ -112,7 +112,7 @@ inline FluxType parseTypeName(const std::string& name) {
     if (name == "Nil")     return FluxType::Nil();
     if (name == "Array")   return FluxType::ArrayT();
     if (name == "Map")     return FluxType::MapT();
-    if (name == "AI")      return FluxType::AIT();
+    if (name == "Specify") return FluxType::SpecifyT();
     if (name == "Any" || name.empty()) return FluxType::Any();
     return FluxType::Any(); // 未知类型降级为 Any
 }

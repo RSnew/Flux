@@ -455,21 +455,21 @@ struct TestDecl : ASTNode {
 };
 
 // ══════════════════════════════════════════════════════════
-// AI 友好特性节点
+// 规格声明节点 (specify)
 // ══════════════════════════════════════════════════════════
 
-// ── AI 字段定义（intent / input / output / constraints / examples）──
-struct AIFieldDef {
+// ── Specify 字段定义（intent / input / output / constraints / examples）──
+struct SpecifyFieldDef {
     std::string key;       // "intent" / "input" / "output" / "constraints" / "examples"
     NodePtr     value;     // 表达式值
 };
 
-// ── ai { intent: "...", input: {...}, output: Type, constraints: [...], examples: [...] }
-// 原生 AI 类型声明：向 AI 工具暴露意图、约束和示例
-struct AIDecl : ASTNode {
-    std::string              name;    // 变量名（来自 var name = ai { ... }）
-    std::vector<AIFieldDef>  fields;  // AI 元数据字段
-    AIDecl(std::string n, std::vector<AIFieldDef> f)
+// ── specify { intent: "...", input: {...}, output: Type, constraints: [...], examples: [...] }
+// 规格声明：向工具暴露意图、约束和示例
+struct SpecifyDecl : ASTNode {
+    std::string                   name;    // 变量名（来自 var name = specify { ... }）
+    std::vector<SpecifyFieldDef>  fields;  // 元数据字段
+    SpecifyDecl(std::string n, std::vector<SpecifyFieldDef> f)
         : name(std::move(n)), fields(std::move(f)) {}
 };
 

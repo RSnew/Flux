@@ -157,6 +157,49 @@ flux build              # 构建并运行
 flux publish            # 发布到本地仓库
 ```
 
+### AI 友好工具链
+
+Flux 为 AI Agent 工作流提供一等支持，所有输出均可结构化：
+
+| 命令 | 描述 |
+|------|------|
+| `flux check <file> --json` | 类型检查，JSON 格式输出错误 |
+| `flux inspect <file>` | 列出符号、签名和合约（人类可读） |
+| `flux inspect <file> --json` | 同上，JSON 格式 |
+| `flux eval "<code>" --json` | 执行代码片段，返回 JSON 结果 |
+
+**`specify` — 结构化规格声明**
+
+将意图、约束和示例声明为一等值：
+
+```flux
+var paymentValidator = specify {
+    intent: "验证用户支付数据的合法性",
+    input: "amount: Int, currency: String",
+    output: "Bool",
+    constraints: ["amount > 0", "currency in [USD, EUR, CNY]"],
+    examples: ["amount=100 currency=USD -> true"]
+}
+
+Specify.describe(paymentValidator)  // 人类可读摘要
+Specify.schema(paymentValidator)    // 结构化 Map
+Specify.intent(paymentValidator)    // → "验证用户支付数据的合法性"
+Specify.validate(paymentValidator, input)  // → true/false
+```
+
+**合约设计 — `requires` / `ensures`**
+
+```flux
+func divide(a, b)
+requires { b != 0 }
+ensures  { result != null }
+{
+    return a / b
+}
+```
+
+AI Agent 可通过 `flux inspect --json` 发现合约，无需解析源码。
+
 ## 功能状态
 
 | 编号 | 功能 | 描述 | 状态 |

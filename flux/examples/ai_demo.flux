@@ -1,12 +1,12 @@
-// ai_demo.flux — Flux AI 友好特性演示
-// 演示：AI 原生类型、合约（requires/ensures）、AI stdlib
+// ai_demo.flux — Flux 规格声明 (specify) 特性演示
+// 演示：specify 类型、合约（requires/ensures）、Specify stdlib
 
 // ══════════════════════════════════════════════════════════
-// 1. AI 原生类型 — 向 AI 工具暴露意图、约束和示例
+// 1. specify 类型 — 向工具暴露意图、约束和示例
 // ══════════════════════════════════════════════════════════
 
-// 定义一个 AI 类型：支付验证器的规格说明
-var paymentValidator = ai {
+// 定义一个规格：支付验证器的规格说明
+var paymentValidator = specify {
     intent: "验证用户支付数据的合法性",
     input: "amount: Int, currency: String",
     output: "Bool",
@@ -14,12 +14,12 @@ var paymentValidator = ai {
     examples: ["valid: amount=100 currency=USD -> true", "invalid: amount=-1 -> false"]
 }
 
-// 使用 AI stdlib 内省 AI 类型
-print("=== AI 类型内省 ===")
-print(AI.describe(paymentValidator))
-print("Intent: " + AI.intent(paymentValidator))
+// 使用 Specify stdlib 内省规格类型
+print("=== 规格类型内省 ===")
+print(Specify.describe(paymentValidator))
+print("Intent: " + Specify.intent(paymentValidator))
 
-var schema = AI.schema(paymentValidator)
+var schema = Specify.schema(paymentValidator)
 print("Schema name: " + schema["name"])
 
 // ══════════════════════════════════════════════════════════
@@ -52,18 +52,18 @@ print("clamp(-5, 0, 100)  = " + str(clamp(-5, 0, 100)))
 print("clamp(50, 0, 100)  = " + str(clamp(50, 0, 100)))
 
 // ══════════════════════════════════════════════════════════
-// 3. AI 类型 + 合约 结合使用
+// 3. specify + 合约 结合使用
 // ══════════════════════════════════════════════════════════
 
-// AI 类型定义转账规则
-var transferSpec = ai {
+// 规格定义转账规则
+var transferSpec = specify {
     intent: "在两个账户之间安全转账",
     input: "from: String, to: String, amount: Int",
     output: "Bool",
     constraints: ["from != to", "amount > 0"]
 }
 
-// 基于 AI 约束实现的转账函数
+// 基于规格约束实现的转账函数
 func transfer(from, to, amount)
 requires { from != to, amount > 0 }
 {
@@ -71,12 +71,12 @@ requires { from != to, amount > 0 }
     return true
 }
 
-print("\n=== AI + 合约 结合 ===")
-print("Transfer spec intent: " + AI.intent(transferSpec))
+print("\n=== specify + 合约 结合 ===")
+print("Transfer spec intent: " + Specify.intent(transferSpec))
 transfer("Alice", "Bob", 100)
 
 print("\n=== 类型检查 ===")
 print("paymentValidator type: " + type(paymentValidator))
 print("transferSpec type: " + type(transferSpec))
 
-print("\n✅ AI 友好特性演示完成!")
+print("\n✅ 规格声明特性演示完成!")

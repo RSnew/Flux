@@ -177,7 +177,7 @@ static int cmdCheck(const std::string& filepath, bool jsonOutput = false) {
         auto errors = checker.check(program.get());
 
         if (jsonOutput) {
-            // JSON 结构化输出（AI 友好）
+            // JSON 结构化输出
             std::cout << "{\"file\":\"" << filepath << "\",\"errors\":[\n";
             for (size_t i = 0; i < errors.size(); i++) {
                 std::cout << "  " << errors[i].toJson();
@@ -803,7 +803,7 @@ static void printHelp() {
         << "  flux registry [url]         Get/set central package registry URL\n"
         << "  flux --help                 Show this help\n"
         << "\n"
-        << CLR_BOLD << "AI-Friendly Tools:\n" << CLR_RESET
+        << CLR_BOLD << "Tooling:\n" << CLR_RESET
         << "  flux inspect <file> [--json]  Export program symbols & structure\n"
         << "  flux eval \"<code>\" [--json]   Evaluate code snippet (pipe-friendly)\n"
         << "\n"
@@ -1487,7 +1487,7 @@ int main(int argc, char* argv[]) {
     }
 
     // ══════════════════════════════════════════════════════
-    // AI 友好特性命令
+    // 工具友好命令
     // ══════════════════════════════════════════════════════
 
     // ── flux inspect <file> [--json] — 导出程序结构（AST/类型/符号）──
@@ -1549,7 +1549,7 @@ int main(int argc, char* argv[]) {
                     if (!md->poolName.empty()) detail += ", pool=" + md->poolName;
                     symbols.push_back({"module", md->name, detail, 0});
                 }
-                if (auto* ad = dynamic_cast<AIDecl*>(stmt.get())) {
+                if (auto* ad = dynamic_cast<SpecifyDecl*>(stmt.get())) {
                     std::string detail;
                     for (auto& f : ad->fields) {
                         if (f.key == "intent") {
@@ -1557,7 +1557,7 @@ int main(int argc, char* argv[]) {
                                 detail = s->value;
                         }
                     }
-                    symbols.push_back({"ai", ad->name, detail, 0});
+                    symbols.push_back({"specify", ad->name, detail, 0});
                 }
                 if (auto* ed = dynamic_cast<EnumDecl*>(stmt.get())) {
                     std::string detail = std::to_string(ed->variants.size()) + " variants";
@@ -1585,7 +1585,7 @@ int main(int argc, char* argv[]) {
                     std::string kindColor = CLR_CYAN;
                     if (s.kind == "function") kindColor = CLR_GREEN;
                     if (s.kind == "module")   kindColor = CLR_YELLOW;
-                    if (s.kind == "ai")       kindColor = "\033[35m"; // magenta
+                    if (s.kind == "specify")  kindColor = "\033[35m"; // magenta
                     std::cout << kindColor << "  [" << s.kind << "] " << CLR_RESET
                               << CLR_BOLD << s.name << CLR_RESET;
                     if (!s.detail.empty())

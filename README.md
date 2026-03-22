@@ -159,6 +159,49 @@ flux build              # build & run
 flux publish            # publish to local registry
 ```
 
+### AI-Friendly Tooling
+
+Flux provides first-class support for AI agent workflows with structured I/O and machine-readable introspection:
+
+| Command | Description |
+|---------|-------------|
+| `flux check <file> --json` | Type-check with JSON error output |
+| `flux inspect <file>` | List symbols, signatures & contracts (human-readable) |
+| `flux inspect <file> --json` | Same, as structured JSON |
+| `flux eval "<code>" --json` | Evaluate a code snippet, return JSON result |
+
+**`specify` — Structured Specification Type**
+
+Declare intent, constraints, and examples as first-class values:
+
+```flux
+var paymentValidator = specify {
+    intent: "验证用户支付数据的合法性",
+    input: "amount: Int, currency: String",
+    output: "Bool",
+    constraints: ["amount > 0", "currency in [USD, EUR, CNY]"],
+    examples: ["amount=100 currency=USD -> true"]
+}
+
+Specify.describe(paymentValidator)  // human-readable summary
+Specify.schema(paymentValidator)    // structured Map
+Specify.intent(paymentValidator)    // → "验证用户支付数据的合法性"
+Specify.validate(paymentValidator, input)  // → true/false
+```
+
+**Design-by-Contract — `requires` / `ensures`**
+
+```flux
+func divide(a, b)
+requires { b != 0 }
+ensures  { result != null }
+{
+    return a / b
+}
+```
+
+AI agents can use `flux inspect --json` to discover contracts without parsing source code.
+
 ## Feature Status
 
 | ID | Feature | Description | Status |

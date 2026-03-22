@@ -17,7 +17,7 @@ void Compiler::compile(Program* program) {
         if (dynamic_cast<PersistentBlock*>(stmt.get())) continue;
         if (dynamic_cast<MigrateBlock*>(stmt.get()))    continue;
         if (dynamic_cast<ModuleDecl*>(stmt.get()))      continue;
-        if (dynamic_cast<AIDecl*>(stmt.get()))           continue; // AI 类型由解释器处理
+        if (dynamic_cast<SpecifyDecl*>(stmt.get()))       continue; // Specify 类型由解释器处理
         compileNode(stmt.get());
     }
     chunk_.emit(OpCode::RETURN_NIL);
@@ -239,14 +239,14 @@ void Compiler::compileNode(ASTNode* node) {
         return;
     }
 
-    // ── 结构体/接口/exception/default/AI → EVAL_AST ────────
+    // ── 结构体/接口/exception/default/Specify → EVAL_AST ────────
     if (dynamic_cast<StructLit*>(node)     ||
         dynamic_cast<InterfaceLit*>(node)  ||
         dynamic_cast<ExceptionDecl*>(node) ||
         dynamic_cast<IntervalRange*>(node) ||
         dynamic_cast<DefaultStmt*>(node) ||
         dynamic_cast<DefaultDecl*>(node) ||
-        dynamic_cast<AIDecl*>(node)) {
+        dynamic_cast<SpecifyDecl*>(node)) {
         chunk_.emit(OpCode::EVAL_AST, chunk_.addASTNode(node));
         return;
     }

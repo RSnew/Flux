@@ -529,9 +529,9 @@ private:
             return s;
         }
 
-        // ── AI 类型声明 ────────────────────────────────────
-        if (auto* n = dynamic_cast<AIDecl*>(node)) {
-            std::string s = ind() + "var " + n->name + " = ai {\n";
+        // ── 规格声明 (specify) ────────────────────────────────────
+        if (auto* n = dynamic_cast<SpecifyDecl*>(node)) {
+            std::string s = ind() + "var " + n->name + " = specify {\n";
             indent_++;
             for (auto& f : n->fields) {
                 s += ind() + f.key + ": " + fmtExpr(f.value.get()) + ",\n";

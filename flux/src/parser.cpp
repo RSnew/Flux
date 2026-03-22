@@ -417,9 +417,9 @@ NodePtr Parser::parseVarDecl(bool forceOverride) {
         }
     }
     expect(TokenType::ASSIGN, "expected '=' in variable declaration");
-    // var name = ai { ... } — AI 原生类型
-    if (check(TokenType::AI)) {
-        return parseAIDecl(name);
+    // var name = specify { ... } — 规格声明
+    if (check(TokenType::SPECIFY)) {
+        return parseSpecifyDecl(name);
     }
     NodePtr init;
     if (isInterface && check(TokenType::LBRACE)) {
@@ -1107,29 +1107,29 @@ NodePtr Parser::parsePlatformDecl() {
 }
 
 // ══════════════════════════════════════════════════════════
-// AI 友好特性解析
+// 规格声明解析 (specify)
 // ══════════════════════════════════════════════════════════
 
-// var name = ai { intent: "...", input: {...}, constraints: [...], examples: [...] }
-NodePtr Parser::parseAIDecl(const std::string& varName) {
-    consume(); // ai
+// var name = specify { intent: "...", input: {...}, constraints: [...], examples: [...] }
+NodePtr Parser::parseSpecifyDecl(const std::string& varName) {
+    consume(); // specify
     skipNewlines();
-    expect(TokenType::LBRACE, "expected '{' after 'ai'");
+    expect(TokenType::LBRACE, "expected '{' after 'specify'");
     skipNewlines();
 
-    std::vector<AIFieldDef> fields;
+    std::vector<SpecifyFieldDef> fields;
     while (!check(TokenType::RBRACE) && !check(TokenType::EOF_TOKEN)) {
-        AIFieldDef field;
-        field.key = expect(TokenType::IDENTIFIER, "expected AI field name (intent/input/output/constraints/examples)").value;
-        expect(TokenType::COLON, "expected ':' after AI field name");
+        SpecifyFieldDef field;
+        field.key = expect(TokenType::IDENTIFIER, "expected specify field name (intent/input/output/constraints/examples)").value;
+        expect(TokenType::COLON, "expected ':' after specify field name");
         field.value = parseExpr();
         fields.push_back(std::move(field));
         match(TokenType::COMMA);
         while (match(TokenType::NEWLINE)) {}
     }
-    expect(TokenType::RBRACE, "expected '}' to close ai block");
+    expect(TokenType::RBRACE, "expected '}' to close specify block");
     while (match(TokenType::NEWLINE)) {}
-    return std::make_unique<AIDecl>(varName, std::move(fields));
+    return std::make_unique<SpecifyDecl>(varName, std::move(fields));
 }
 
 // requires { expr1, expr2, ... } 或 ensures { expr1, expr2, ... }
