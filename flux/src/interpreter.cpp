@@ -58,6 +58,12 @@ void ChanVal::close() {
     cv_send.notify_all();
 }
 
+// ── AI toString（在 AITypeInfo 完整定义之后）──────────────
+std::string Value::toStringAI() const {
+    if (ai) return "<AI:" + ai->name + " intent=\"" + ai->intent + "\">";
+    return "<AI>";
+}
+
 // ── 构造 & 析构 ───────────────────────────────────────────
 Interpreter::Interpreter() {
     globalEnv_ = std::make_shared<Environment>();
@@ -148,6 +154,7 @@ void Interpreter::registerBuiltins() {
             case Value::Type::Array:  return Value::Str("Array");
             case Value::Type::Map:    return Value::Str("Map");
             case Value::Type::Addr:   return Value::Str("Addr");
+            case Value::Type::AI:    return Value::Str("AI");
             default:                  return Value::Str("Nil");
         }
     });
@@ -593,6 +600,13 @@ Value Interpreter::callFunction(const std::string& name,
     for (size_t i = 0; i < fn->params.size(); i++)
         fnEnv->set(fn->params[i].name, i < args.size() ? args[i] : Value::Nil());
 
+    // 合约检查：requires（前置条件）
+    for (auto& pre : fn->preconditions_) {
+        Value cond = evalNode(pre.get(), fnEnv, mod);
+        if (!cond.isTruthy())
+            throw std::runtime_error("contract violation: requires condition failed in " + name);
+    }
+
     // @profile: 自动计时
     std::unique_ptr<ProfileScope> profileScope;
     if (Profiler::instance().isProfiled(name))
@@ -602,6 +616,15 @@ Value Interpreter::callFunction(const std::string& name,
         for (auto& stmt : fn->body)
             evalNode(stmt.get(), fnEnv, mod);
     } catch (ReturnSignal& ret) {
+        // 合约检查：ensures（后置条件）
+        if (!fn->postconditions_.empty()) {
+            fnEnv->set("result", ret.value);
+            for (auto& post : fn->postconditions_) {
+                Value cond = evalNode(post.get(), fnEnv, mod);
+                if (!cond.isTruthy())
+                    throw std::runtime_error("contract violation: ensures condition failed in " + name);
+            }
+        }
         return ret.value;
     } catch (PanicSignal& p) {
         lastInlineExceptionDescs_.clear();
@@ -1564,6 +1587,23 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
     }
 
     // ── 声明 ──
+    // ── AI 原生类型声明 ──
+    if (auto* n = dynamic_cast<AIDecl*>(node)) {
+        auto info = std::make_shared<AITypeInfo>();
+        info->name = n->name;
+        for (auto& field : n->fields) {
+            Value val = evalNode(field.value.get(), env, mod);
+            if (field.key == "intent")           info->intent = val.toString();
+            else if (field.key == "input")       info->input = val;
+            else if (field.key == "output")      info->output = val;
+            else if (field.key == "constraints") info->constraints = val;
+            else if (field.key == "examples")    info->examples = val;
+        }
+        Value v = Value::AIV(info);
+        env->set(n->name, v);
+        return v;
+    }
+
     if (auto* n = dynamic_cast<VarDecl*>(node)) {
         Value v = n->initializer ? evalNode(n->initializer.get(), env, mod) : Value::Nil();
         if (n->isInterface && v.type == Value::Type::Interface && v.iface)

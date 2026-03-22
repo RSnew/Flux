@@ -35,9 +35,13 @@ using ValueStructInst = std::shared_ptr<StructInstInfo>;
 using ValueInterface  = std::shared_ptr<InterfaceInfo>;
 using ValueFunc       = std::shared_ptr<FuncVal>;
 
+// 前向声明 AITypeInfo（定义在 Value 之后）
+struct AITypeInfo;
+using ValueAI = std::shared_ptr<AITypeInfo>;
+
 struct Value {
     enum class Type { Nil, Number, String, Bool, Array, Map, Future, Chan,
-                      StructType, StructInst, Interface, Function, Addr };
+                      StructType, StructInst, Interface, Function, Addr, AI };
     Type type = Type::Nil;
 
     double      number  = 0;
@@ -52,6 +56,7 @@ struct Value {
     ValueStructInst structInst;  // StructInst（结构体实例）
     ValueInterface  iface;       // Interface（接口定义）
     ValueFunc       func;        // Function（一等公民函数值）
+    ValueAI         ai;          // AI（AI 原生类型值）
 
     static Value Nil()    { return {}; }
     static Value Num(double n)       { Value v; v.type = Type::Number; v.number = n; return v; }
@@ -91,6 +96,9 @@ struct Value {
     static Value FuncV(ValueFunc f) {
         Value v; v.type = Type::Function; v.func = std::move(f); return v;
     }
+    static Value AIV(ValueAI a) {
+        Value v; v.type = Type::AI; v.ai = std::move(a); return v;
+    }
 
     bool isTruthy() const {
         if (type == Type::Nil)    return false;
@@ -105,6 +113,7 @@ struct Value {
         if (type == Type::StructInst) return structInst != nullptr;
         if (type == Type::Interface)  return iface      != nullptr;
         if (type == Type::Function)  return func       != nullptr;
+        if (type == Type::AI)        return ai         != nullptr;
         if (type == Type::Addr)      return addr       != 0;
         return false;
     }
@@ -147,6 +156,7 @@ struct Value {
         if (type == Type::StructInst) return "<StructInst>";
         if (type == Type::Interface)  return "<Interface>";
         if (type == Type::Function)  return "<Function>";
+        if (type == Type::AI) return toStringAI();
         if (type == Type::Addr) {
             char buf[32];
             std::snprintf(buf, sizeof(buf), "0x%lx", (unsigned long)addr);
@@ -155,8 +165,20 @@ struct Value {
         return "null";
     }
 
+    // AI toString (defined after AITypeInfo is complete)
+    std::string toStringAI() const;
     // Full toString for struct instances (defined after StructInstInfo is complete)
     std::string toStringFull() const;
+};
+
+// ── AI 类型信息（AI 原生类型的运行时表示）──────────────────
+struct AITypeInfo {
+    std::string name;         // 变量名
+    std::string intent;       // 意图描述
+    Value       input;        // 输入 schema（通常是 Map）
+    Value       output;       // 输出 schema
+    Value       constraints;  // 约束列表（Array of String）
+    Value       examples;     // 示例列表（Array of Map）
 };
 
 // ── FutureVal — async 操作的异步结果持有器 ────────────────

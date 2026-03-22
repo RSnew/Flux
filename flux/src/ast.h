@@ -118,6 +118,9 @@ struct FnDecl : ASTNode {
     std::string          returnType;
     std::vector<NodePtr> body;
     bool                 forceOverride = false;  // !func: always replace on hot-reload
+    // 合约（Design by Contract）
+    std::vector<NodePtr> preconditions_;   // requires { ... }
+    std::vector<NodePtr> postconditions_;  // ensures { ... }
     FnDecl(std::string n, std::vector<Param> p, std::string rt, std::vector<NodePtr> b,
            bool fo = false)
         : name(std::move(n)), params(std::move(p)), returnType(std::move(rt)), body(std::move(b))
@@ -450,3 +453,24 @@ struct TestDecl : ASTNode {
     NodePtr inner;   // 被包装的声明（FnDecl / VarDecl）
     explicit TestDecl(NodePtr n) : inner(std::move(n)) {}
 };
+
+// ══════════════════════════════════════════════════════════
+// AI 友好特性节点
+// ══════════════════════════════════════════════════════════
+
+// ── AI 字段定义（intent / input / output / constraints / examples）──
+struct AIFieldDef {
+    std::string key;       // "intent" / "input" / "output" / "constraints" / "examples"
+    NodePtr     value;     // 表达式值
+};
+
+// ── ai { intent: "...", input: {...}, output: Type, constraints: [...], examples: [...] }
+// 原生 AI 类型声明：向 AI 工具暴露意图、约束和示例
+struct AIDecl : ASTNode {
+    std::string              name;    // 变量名（来自 var name = ai { ... }）
+    std::vector<AIFieldDef>  fields;  // AI 元数据字段
+    AIDecl(std::string n, std::vector<AIFieldDef> f)
+        : name(std::move(n)), fields(std::move(f)) {}
+};
+
+// 注：合约（requires/ensures）直接嵌入 FnDecl 的 preconditions_/postconditions_ 字段

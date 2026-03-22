@@ -25,7 +25,7 @@ void TypeChecker::registerBuiltins() {
 }
 
 void TypeChecker::error(const std::string& msg, int line) {
-    errors_.push_back({msg, line});
+    errors_.push_back({msg, line, "", "", ""});
 }
 
 // ─────────────────────────────────────────────────────────

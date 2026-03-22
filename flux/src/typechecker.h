@@ -27,6 +27,7 @@ enum class TypeKind {
     Fn,         // 函数类型（含参数/返回类型列表）
     Struct,     // 结构体类型
     Interface,  // 接口类型
+    AI,         // AI 原生类型
 };
 
 struct FluxType {
@@ -52,6 +53,7 @@ struct FluxType {
     static FluxType MapT()      { return FluxType(TypeKind::Map); }
     static FluxType StructT()   { return FluxType(TypeKind::Struct); }
     static FluxType InterfaceT(){ return FluxType(TypeKind::Interface); }
+    static FluxType AIT()       { return FluxType(TypeKind::AI); }
     static FluxType Unknown()   { return FluxType(TypeKind::Unknown); }
 
     std::string name() const {
@@ -71,6 +73,7 @@ struct FluxType {
             case TypeKind::Fn:        return "Fn";
             case TypeKind::Struct:    return "Struct";
             case TypeKind::Interface: return "Interface";
+            case TypeKind::AI:        return "AI";
             case TypeKind::Unknown:   return "Unknown";
         }
         return "?";
@@ -109,6 +112,7 @@ inline FluxType parseTypeName(const std::string& name) {
     if (name == "Nil")     return FluxType::Nil();
     if (name == "Array")   return FluxType::ArrayT();
     if (name == "Map")     return FluxType::MapT();
+    if (name == "AI")      return FluxType::AIT();
     if (name == "Any" || name.empty()) return FluxType::Any();
     return FluxType::Any(); // 未知类型降级为 Any
 }
@@ -154,9 +158,25 @@ private:
 struct TypeError {
     std::string message;
     int         line;
+    std::string code;       // 错误代码 (E1001, E1002, ...)
+    std::string category;   // 错误类别 (type-mismatch, undefined-var, ...)
+    std::string suggestion; // 修复建议
 
-    TypeError(std::string msg, int ln = 0)
-        : message(std::move(msg)), line(ln) {}
+    TypeError(std::string msg, int ln = 0, std::string c = "", std::string cat = "", std::string sug = "")
+        : message(std::move(msg)), line(ln), code(std::move(c))
+        , category(std::move(cat)), suggestion(std::move(sug)) {}
+
+    // 输出为 JSON 字符串（供 flux check --json 使用）
+    std::string toJson() const {
+        std::string json = "{";
+        json += "\"code\":\"" + code + "\",";
+        json += "\"category\":\"" + category + "\",";
+        json += "\"message\":\"" + message + "\",";
+        json += "\"line\":" + std::to_string(line) + ",";
+        json += "\"suggestion\":\"" + suggestion + "\"";
+        json += "}";
+        return json;
+    }
 };
 
 // ═══════════════════════════════════════════════════════════

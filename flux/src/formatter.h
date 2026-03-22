@@ -295,6 +295,24 @@ private:
             }
             s += ")";
             if (!n->returnType.empty()) s += " -> " + n->returnType;
+            // 合约：requires { ... }
+            if (!n->preconditions_.empty()) {
+                s += "\nrequires {\n";
+                indent_++;
+                for (auto& pre : n->preconditions_)
+                    s += ind() + fmtExpr(pre.get()) + ",\n";
+                indent_--;
+                s += ind() + "}";
+            }
+            // 合约：ensures { ... }
+            if (!n->postconditions_.empty()) {
+                s += "\nensures {\n";
+                indent_++;
+                for (auto& post : n->postconditions_)
+                    s += ind() + fmtExpr(post.get()) + ",\n";
+                indent_--;
+                s += ind() + "}";
+            }
             s += " {\n";
             indent_++;
             for (auto& st : n->body) s += fmtStmt(st.get());
@@ -506,6 +524,18 @@ private:
             std::string s = ind() + "default " + n->target + " {\n";
             indent_++;
             for (auto& stmt : n->body) s += fmtStmt(stmt.get());
+            indent_--;
+            s += ind() + "}\n";
+            return s;
+        }
+
+        // ── AI 类型声明 ────────────────────────────────────
+        if (auto* n = dynamic_cast<AIDecl*>(node)) {
+            std::string s = ind() + "var " + n->name + " = ai {\n";
+            indent_++;
+            for (auto& f : n->fields) {
+                s += ind() + f.key + ": " + fmtExpr(f.value.get()) + ",\n";
+            }
             indent_--;
             s += ind() + "}\n";
             return s;

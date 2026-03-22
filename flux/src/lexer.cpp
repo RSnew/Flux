@@ -40,6 +40,10 @@ const std::unordered_map<std::string, TokenType> Lexer::keywords_ = {
     {"asm",        TokenType::ASM},
     {"default",    TokenType::DEFAULT},
     {"test",       TokenType::TEST},
+    // AI 友好特性
+    {"ai",         TokenType::AI},
+    {"requires",   TokenType::REQUIRES},
+    {"ensures",    TokenType::ENSURES},
 };
 
 Lexer::Lexer(const std::string& source) : source_(source) {}

@@ -1257,6 +1257,83 @@ static void addHttpServerToModule(std::unordered_map<std::string, StdlibFn>& htt
     };
 }
 
+// ═══════════════════════════════════════════════════════════
+// AI 模块 — AI 原生类型的内省与工具
+// ═══════════════════════════════════════════════════════════
+static std::unordered_map<std::string, StdlibFn> makeAIModule() {
+    return {
+        // AI.describe(aiVal) → 人类可读的 AI 类型描述（字符串）
+        {"describe", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::AI || !args[0].ai)
+                throw std::runtime_error("AI.describe(val) — val must be an AI type");
+            auto& ai = args[0].ai;
+            std::string desc;
+            desc += "AI Type: " + ai->name + "\n";
+            desc += "  Intent: " + ai->intent + "\n";
+            if (ai->input.type != Value::Type::Nil)
+                desc += "  Input: " + ai->input.toString() + "\n";
+            if (ai->output.type != Value::Type::Nil)
+                desc += "  Output: " + ai->output.toString() + "\n";
+            if (ai->constraints.type == Value::Type::Array && ai->constraints.array) {
+                desc += "  Constraints:\n";
+                for (auto& c : *ai->constraints.array)
+                    desc += "    - " + c.toString() + "\n";
+            }
+            if (ai->examples.type == Value::Type::Array && ai->examples.array) {
+                desc += "  Examples: " + std::to_string(ai->examples.array->size()) + " defined\n";
+            }
+            return Value::Str(desc);
+        }},
+        // AI.schema(aiVal) → JSON schema 格式的结构化输出（Map）
+        {"schema", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::AI || !args[0].ai)
+                throw std::runtime_error("AI.schema(val) — val must be an AI type");
+            auto& ai = args[0].ai;
+            auto m = std::make_shared<std::unordered_map<std::string, Value>>();
+            (*m)["name"]        = Value::Str(ai->name);
+            (*m)["intent"]      = Value::Str(ai->intent);
+            (*m)["input"]       = ai->input;
+            (*m)["output"]      = ai->output;
+            (*m)["constraints"] = ai->constraints;
+            (*m)["examples"]    = ai->examples;
+            return Value::MapOf(m);
+        }},
+        // AI.intent(aiVal) → 获取意图字符串
+        {"intent", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::AI || !args[0].ai)
+                throw std::runtime_error("AI.intent(val) — val must be an AI type");
+            return Value::Str(args[0].ai->intent);
+        }},
+        // AI.constraints(aiVal) → 获取约束列表
+        {"constraints", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::AI || !args[0].ai)
+                throw std::runtime_error("AI.constraints(val) — val must be an AI type");
+            return args[0].ai->constraints;
+        }},
+        // AI.examples(aiVal) → 获取示例列表
+        {"examples", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::AI || !args[0].ai)
+                throw std::runtime_error("AI.examples(val) — val must be an AI type");
+            return args[0].ai->examples;
+        }},
+        // AI.validate(aiVal, inputMap) → 检查输入是否满足约束
+        {"validate", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2 || args[0].type != Value::Type::AI || !args[0].ai)
+                throw std::runtime_error("AI.validate(aiVal, input) — requires AI type and input");
+            // 基本验证：检查 input 是否包含 schema 要求的字段
+            auto& ai = args[0].ai;
+            if (ai->input.type == Value::Type::Map && ai->input.map &&
+                args[1].type == Value::Type::Map && args[1].map) {
+                for (auto& kv : *ai->input.map) {
+                    if (args[1].map->find(kv.first) == args[1].map->end())
+                        return Value::Bool(false);
+                }
+            }
+            return Value::Bool(true);
+        }},
+    };
+}
+
 void Interpreter::registerStdlib() {
     registerStdlibModule("File", makeFileModule());
     registerStdlibModule("Json", makeJsonModule());
@@ -1272,4 +1349,5 @@ void Interpreter::registerStdlib() {
     registerStdlibModule("Test",   makeTestModule());
     registerStdlibModule("String", makeStringModule());
     registerStdlibModule("hw",     makeHwModule());
+    registerStdlibModule("AI",     makeAIModule());
 }

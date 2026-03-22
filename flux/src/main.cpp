@@ -163,7 +163,7 @@ static int cmdRun(const std::string& filepath) {
 // ═══════════════════════════════════════════════════════════
 // flux check <file> — 类型检查，不执行
 // ═══════════════════════════════════════════════════════════
-static int cmdCheck(const std::string& filepath) {
+static int cmdCheck(const std::string& filepath, bool jsonOutput = false) {
     try {
         std::string src = readFile(filepath);
 
@@ -175,6 +175,18 @@ static int cmdCheck(const std::string& filepath) {
 
         TypeChecker checker;
         auto errors = checker.check(program.get());
+
+        if (jsonOutput) {
+            // JSON 结构化输出（AI 友好）
+            std::cout << "{\"file\":\"" << filepath << "\",\"errors\":[\n";
+            for (size_t i = 0; i < errors.size(); i++) {
+                std::cout << "  " << errors[i].toJson();
+                if (i + 1 < errors.size()) std::cout << ",";
+                std::cout << "\n";
+            }
+            std::cout << "]}\n";
+            return errors.empty() ? 0 : 1;
+        }
 
         if (errors.empty()) {
             std::cout << CLR_GREEN << "✅ No type errors found in: "
@@ -774,7 +786,7 @@ static void printHelp() {
         << "  flux <file.flux>            Run file with hot-reload (watch mode)\n"
         << "  flux dev   <file.flux>      Dev mode — hot-reload + file watcher\n"
         << "  flux run   <file.flux>      Run file once, no file watcher\n"
-        << "  flux check <file.flux>      Type-check file, do not execute\n"
+        << "  flux check <file.flux> [--json]  Type-check file (--json for structured output)\n"
         << "  flux dev   <file.flux>      Dev mode (hot reload + auto test)\n"
         << "  flux fmt   <file.flux>      Format file to stdout\n"
         << "  flux fmt   -w <file.flux>   Format file in-place (overwrite)\n"
@@ -790,6 +802,10 @@ static void printHelp() {
         << "  flux debug <file.flux>      Start interactive debugger\n"
         << "  flux registry [url]         Get/set central package registry URL\n"
         << "  flux --help                 Show this help\n"
+        << "\n"
+        << CLR_BOLD << "AI-Friendly Tools:\n" << CLR_RESET
+        << "  flux inspect <file> [--json]  Export program symbols & structure\n"
+        << "  flux eval \"<code>\" [--json]   Evaluate code snippet (pipe-friendly)\n"
         << "\n"
         << CLR_BOLD << "Flags:\n" << CLR_RESET
         << "  --no-test                   Strip all test declarations\n"
@@ -904,13 +920,18 @@ int main(int argc, char* argv[]) {
         return cmdDebug(argv[2]);
     }
 
-    // ── flux check <file> ────────────────────────────────
+    // ── flux check <file> [--json] ────────────────────────
     if (sub == "check") {
         if (argc < 3) {
-            std::cerr << "Usage: flux check <file.flux>\n";
+            std::cerr << "Usage: flux check <file.flux> [--json]\n";
             return 1;
         }
-        return cmdCheck(argv[2]);
+        bool jsonOutput = false;
+        std::string filepath = argv[2];
+        for (int i = 3; i < argc; i++) {
+            if (std::string(argv[i]) == "--json") jsonOutput = true;
+        }
+        return cmdCheck(filepath, jsonOutput);
     }
 
     // ── flux fmt [-w] <file> ─────────────────────────────
@@ -1463,6 +1484,198 @@ int main(int argc, char* argv[]) {
         setRegistryUrl(argv[2]);
         std::cout << CLR_GREEN << "Registry set to: " << argv[2] << CLR_RESET << "\n";
         return 0;
+    }
+
+    // ══════════════════════════════════════════════════════
+    // AI 友好特性命令
+    // ══════════════════════════════════════════════════════
+
+    // ── flux inspect <file> [--json] — 导出程序结构（AST/类型/符号）──
+    if (sub == "inspect") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux inspect <file.flux> [--json]\n";
+            return 1;
+        }
+        try {
+            bool jsonMode = false;
+            std::string filepath = argv[2];
+            for (int i = 3; i < argc; i++) {
+                if (std::string(argv[i]) == "--json") jsonMode = true;
+            }
+
+            std::string src = readFile(filepath);
+            Lexer  lexer(src);
+            auto   tokens = lexer.tokenize();
+            Parser parser(std::move(tokens));
+            auto   program = parser.parse();
+
+            // 收集符号信息
+            struct SymbolInfo {
+                std::string kind;   // "function" / "variable" / "module" / "ai" / "enum"
+                std::string name;
+                std::string detail;
+                int line;
+            };
+            std::vector<SymbolInfo> symbols;
+
+            for (auto& stmt : program->statements) {
+                if (auto* fn = dynamic_cast<FnDecl*>(stmt.get())) {
+                    std::string params;
+                    for (size_t i = 0; i < fn->params.size(); i++) {
+                        if (i > 0) params += ", ";
+                        params += fn->params[i].name;
+                        if (!fn->params[i].type.empty()) params += ": " + fn->params[i].type;
+                    }
+                    std::string detail = "(" + params + ")";
+                    if (!fn->returnType.empty()) detail += " -> " + fn->returnType;
+                    if (!fn->preconditions_.empty())
+                        detail += " [requires: " + std::to_string(fn->preconditions_.size()) + " conditions]";
+                    if (!fn->postconditions_.empty())
+                        detail += " [ensures: " + std::to_string(fn->postconditions_.size()) + " conditions]";
+                    symbols.push_back({"function", fn->name, detail, 0});
+                }
+                if (auto* vd = dynamic_cast<VarDecl*>(stmt.get())) {
+                    std::string detail = vd->typeAnnotation.empty() ? "Any" : vd->typeAnnotation;
+                    if (vd->isInterface) detail = "interface";
+                    symbols.push_back({"variable", vd->name, detail, 0});
+                }
+                if (auto* md = dynamic_cast<ModuleDecl*>(stmt.get())) {
+                    std::string detail;
+                    int fnCount = 0;
+                    for (auto& item : md->body)
+                        if (dynamic_cast<FnDecl*>(item.get())) fnCount++;
+                    detail = std::to_string(fnCount) + " functions";
+                    if (md->restartPolicy != RestartPolicy::None) detail += ", supervised";
+                    if (!md->poolName.empty()) detail += ", pool=" + md->poolName;
+                    symbols.push_back({"module", md->name, detail, 0});
+                }
+                if (auto* ad = dynamic_cast<AIDecl*>(stmt.get())) {
+                    std::string detail;
+                    for (auto& f : ad->fields) {
+                        if (f.key == "intent") {
+                            if (auto* s = dynamic_cast<StringLit*>(f.value.get()))
+                                detail = s->value;
+                        }
+                    }
+                    symbols.push_back({"ai", ad->name, detail, 0});
+                }
+                if (auto* ed = dynamic_cast<EnumDecl*>(stmt.get())) {
+                    std::string detail = std::to_string(ed->variants.size()) + " variants";
+                    symbols.push_back({"enum", ed->name, detail, 0});
+                }
+            }
+
+            if (jsonMode) {
+                // JSON 输出
+                std::cout << "{\"file\":\"" << filepath << "\",\"symbols\":[\n";
+                for (size_t i = 0; i < symbols.size(); i++) {
+                    auto& s = symbols[i];
+                    std::cout << "  {\"kind\":\"" << s.kind
+                              << "\",\"name\":\"" << s.name
+                              << "\",\"detail\":\"" << s.detail << "\"}";
+                    if (i + 1 < symbols.size()) std::cout << ",";
+                    std::cout << "\n";
+                }
+                std::cout << "]}\n";
+            } else {
+                // 人类可读输出
+                std::cout << CLR_BOLD << "Flux Inspect: " << filepath << CLR_RESET << "\n";
+                std::cout << CLR_GRAY << "─────────────────────────────────────\n" << CLR_RESET;
+                for (auto& s : symbols) {
+                    std::string kindColor = CLR_CYAN;
+                    if (s.kind == "function") kindColor = CLR_GREEN;
+                    if (s.kind == "module")   kindColor = CLR_YELLOW;
+                    if (s.kind == "ai")       kindColor = "\033[35m"; // magenta
+                    std::cout << kindColor << "  [" << s.kind << "] " << CLR_RESET
+                              << CLR_BOLD << s.name << CLR_RESET;
+                    if (!s.detail.empty())
+                        std::cout << CLR_GRAY << "  " << s.detail << CLR_RESET;
+                    std::cout << "\n";
+                }
+                std::cout << CLR_GRAY << "\nTotal: " << symbols.size() << " symbols\n" << CLR_RESET;
+            }
+            return 0;
+
+        } catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
+    }
+
+    // ── flux eval "<code>" [--json] — 管道式代码执行 ─────────
+    if (sub == "eval") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux eval \"<code>\" [--json]\n";
+            return 1;
+        }
+        try {
+            bool jsonOutput = false;
+            std::string code = argv[2];
+            for (int i = 3; i < argc; i++) {
+                if (std::string(argv[i]) == "--json") jsonOutput = true;
+            }
+
+            Interpreter interp;
+            interp.setNoTest(g_noTest);
+
+            // 捕获 stdout
+            std::stringstream capturedOut;
+            auto* oldBuf = std::cout.rdbuf(capturedOut.rdbuf());
+
+            Lexer  lexer(code);
+            auto   tokens = lexer.tokenize();
+            Parser parser(std::move(tokens));
+            auto   program = parser.parse();
+
+            TypeChecker checker;
+            auto typeErrors = checker.check(program.get());
+
+            std::string errorStr;
+            if (!typeErrors.empty()) {
+                for (auto& e : typeErrors)
+                    errorStr += e.message + "\n";
+            }
+
+            std::string resultStr;
+            if (errorStr.empty()) {
+                interp.execute(program.get());
+                resultStr = "ok";
+            }
+
+            std::cout.rdbuf(oldBuf);
+
+            if (jsonOutput) {
+                std::string stdout_content = capturedOut.str();
+                // 转义 JSON 字符串
+                std::string escaped;
+                for (char c : stdout_content) {
+                    if (c == '"') escaped += "\\\"";
+                    else if (c == '\\') escaped += "\\\\";
+                    else if (c == '\n') escaped += "\\n";
+                    else if (c == '\t') escaped += "\\t";
+                    else escaped += c;
+                }
+                std::string errEscaped;
+                for (char c : errorStr) {
+                    if (c == '"') errEscaped += "\\\"";
+                    else if (c == '\\') errEscaped += "\\\\";
+                    else if (c == '\n') errEscaped += "\\n";
+                    else errEscaped += c;
+                }
+                std::cout << "{\"status\":\"" << (errorStr.empty() ? "ok" : "error")
+                          << "\",\"stdout\":\"" << escaped
+                          << "\",\"errors\":\"" << errEscaped << "\"}\n";
+            } else {
+                std::cout << capturedOut.str();
+                if (!errorStr.empty())
+                    std::cerr << CLR_RED << errorStr << CLR_RESET;
+            }
+            return errorStr.empty() ? 0 : 1;
+
+        } catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
     }
 
     // ── flux <file.flux> — 热更新模式 ───────────────────
