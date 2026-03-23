@@ -17,6 +17,7 @@
 #include "hotswap.h"
 #include "profiler.h"
 #include "fluz.h"
+#include "llvm_jit.h"
 
 #include <iostream>
 #include <fstream>
@@ -792,6 +793,8 @@ static void printHelp() {
         << "  flux fmt   -w <file.flux>   Format file in-place (overwrite)\n"
         << "  flux --vm  <file.flux>      Run file with bytecode VM (Feature G)\n"
         << "  flux jit   <file.flux>      JIT compile eligible functions\n"
+        << "  flux llvm  <file.flux>      LLVM JIT compile and run (single-shot)\n"
+        << "  flux --llvm <file.flux>     LLVM JIT + hot reload watch mode\n"
         << "  flux pack  <file> [-o app.fluz]  Pack (obfuscated + encrypted)\n"
         << "  flux pack  <file> --debug   Pack without protection (debuggable)\n"
         << "  flux profile <file.flux>    Run with profiling on all functions\n"
@@ -1068,6 +1071,113 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // ── flux --llvm <file> — LLVM JIT + hot reload watch mode ──
+    if (sub == "--llvm") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux --llvm <file.flux>\n";
+            return 1;
+        }
+        try {
+            std::string filepath = argv[2];
+
+            // Print banner
+            std::cout << CLR_BOLD CLR_CYAN
+                      << "╔══════════════════════════════════════╗\n"
+                      << "║    Flux LLVM JIT Hot Reload          ║\n"
+                      << "║    Watch Mode: ON                    ║\n"
+                      << "╚══════════════════════════════════════╝\n"
+                      << CLR_RESET;
+            std::cout << CLR_GRAY << "  Watching: " << filepath << CLR_RESET << "\n\n";
+
+            // Create persistent interpreter and LLVM JIT compiler
+            Interpreter interp;
+            interp.setNoTest(g_noTest);
+
+            LLVMJITCompiler llvmJit;
+            llvmJit.setInterpreter(&interp);
+
+            // Initial compile and run
+            {
+                std::string src = readFile(filepath);
+                Lexer  lexer(src);
+                auto   tokens = lexer.tokenize();
+                Parser parser(std::move(tokens));
+                auto   program = parser.parse();
+
+                TypeChecker checker;
+                auto typeErrors = checker.check(program.get());
+                if (!typeErrors.empty()) {
+                    std::cerr << CLR_RED CLR_BOLD
+                              << "\n  Type errors found:\n" << CLR_RESET;
+                    for (auto& e : typeErrors) {
+                        std::cerr << CLR_RED << "   ";
+                        if (e.line > 0) std::cerr << "line " << e.line << ": ";
+                        std::cerr << e.message << CLR_RESET << "\n";
+                    }
+                }
+
+                interp.initProgram(program.get());
+
+                HIRLowering lowering;
+                auto hir = lowering.lower(program.get());
+
+                std::cerr << CLR_CYAN << "[LLVM JIT] Compiling " << filepath
+                          << "..." << CLR_RESET << "\n";
+
+                double result = llvmJit.compileAndRun(hir);
+                llvmJit.dumpStats();
+
+                if (result != 0.0) {
+                    std::cerr << CLR_GRAY << "[LLVM JIT] Exit value: "
+                              << result << CLR_RESET << "\n";
+                }
+            }
+
+            // Start file watcher for hot reload
+            std::mutex reloadMutex;
+            FileWatcher watcher(filepath, [&](const std::string& path) {
+                std::lock_guard<std::mutex> lock(reloadMutex);
+                try {
+                    std::string src = readFile(path);
+                    Lexer  lexer(src);
+                    auto   tokens = lexer.tokenize();
+                    Parser parser(std::move(tokens));
+                    auto   program = parser.parse();
+
+                    // Re-init interpreter functions (but persistent state is preserved)
+                    interp.initProgram(program.get());
+
+                    HIRLowering lowering;
+                    auto hir = lowering.lower(program.get());
+
+                    std::cerr << CLR_CYAN << "\n[LLVM JIT] Recompiling " << path
+                              << "..." << CLR_RESET << "\n";
+
+                    double result = llvmJit.recompile(hir);
+                    llvmJit.dumpStats();
+
+                    if (result != 0.0) {
+                        std::cerr << CLR_GRAY << "[LLVM JIT] Exit value: "
+                                  << result << CLR_RESET << "\n";
+                    }
+                } catch (const std::exception& e) {
+                    std::cerr << CLR_RED << "[LLVM JIT] Reload error: "
+                              << e.what() << CLR_RESET << "\n";
+                }
+            });
+
+            watcher.start();
+            std::cout << CLR_GRAY << "\n[LLVM JIT watching for file changes... Ctrl+C to exit]\n" << CLR_RESET;
+
+            // Block main thread
+            while (true) std::this_thread::sleep_for(std::chrono::seconds(1));
+
+        } catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
+    }
+
     // ── flux --vm <file> ────────────────────────────────
     if (sub == "--vm") {
         if (argc < 3) {
@@ -1301,6 +1411,67 @@ int main(int argc, char* argv[]) {
             // Fall back to interpreter for execution
             Interpreter interp;
             runSource(src, interp, false);
+            return 0;
+
+        } catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
+    }
+
+    // ── flux llvm <file> — LLVM JIT compile and execute ────────
+    if (sub == "llvm") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux llvm <file.flux>\n";
+            return 1;
+        }
+        try {
+            std::string filepath = argv[2];
+            std::string src = readFile(filepath);
+
+            Lexer  lexer(src);
+            auto   tokens = lexer.tokenize();
+            Parser parser(std::move(tokens));
+            auto   program = parser.parse();
+
+            // Type check
+            TypeChecker checker;
+            auto typeErrors = checker.check(program.get());
+            if (!typeErrors.empty()) {
+                std::cerr << CLR_RED CLR_BOLD
+                          << "\n  Type errors found:\n" << CLR_RESET;
+                for (auto& e : typeErrors) {
+                    std::cerr << CLR_RED << "   ";
+                    if (e.line > 0) std::cerr << "line " << e.line << ": ";
+                    std::cerr << e.message << CLR_RESET << "\n";
+                }
+            }
+
+            // AST -> HIR
+            HIRLowering lowering;
+            auto hir = lowering.lower(program.get());
+
+            // Create interpreter for runtime bridge
+            Interpreter interp;
+            interp.setNoTest(g_noTest);
+            interp.initProgram(program.get());
+
+            // LLVM JIT compile and run
+            LLVMJITCompiler llvmJit;
+            llvmJit.setInterpreter(&interp);
+
+            std::cerr << CLR_CYAN << "[LLVM JIT] Compiling " << filepath
+                      << "..." << CLR_RESET << "\n";
+
+            double result = llvmJit.compileAndRun(hir);
+
+            llvmJit.dumpStats();
+
+            if (result != 0.0) {
+                std::cerr << CLR_GRAY << "[LLVM JIT] Exit value: "
+                          << result << CLR_RESET << "\n";
+            }
+
             return 0;
 
         } catch (const std::exception& e) {

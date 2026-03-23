@@ -115,6 +115,30 @@ var future = ImageProcessor.resize.async(1920, 1080)
 var result = future.await()
 ```
 
+**Arrays & Concatenation**
+```flux
+var a = [1, 2, 3]
+var b = [4, 5, 6]
+var c = a + b              // [1, 2, 3, 4, 5, 6]
+a.push(99)                 // [1, 2, 3, 99]
+print(a.len())             // 4
+```
+
+**AI-Native Types (`specify`)**
+```flux
+var validator = specify {
+    intent: "Validate payment data",
+    input: "amount: Int, currency: String",
+    output: "Bool",
+    constraints: ["amount > 0", "currency in [USD, EUR, CNY]"],
+    examples: ["amount=100 currency=USD -> true"]
+}
+
+Specify.describe(validator)   // human-readable summary
+Specify.schema(validator)     // structured Map
+Specify.validate(validator, input)  // true/false
+```
+
 **Standard Library**
 ```flux
 File.write("/tmp/out.txt", "hello\n")
@@ -123,17 +147,11 @@ var content = File.read("/tmp/out.txt")
 var obj = Json.parse("{\"x\": 1}")
 print(Json.pretty(obj))
 
+Http.download("https://example.com/file.bin", "/tmp/file.bin")
+
 var t0 = Time.now()
 Time.sleep(100)
 print("elapsed: \(Time.diff(t0, Time.now())) ms")
-```
-
-**Built-in Structured Logging**
-```flux
-log.info("Server started on port 8080")
-log.warn("Connection pool running low")
-log.error("Failed to connect to database")
-log.debug("Request payload: \(payload)")
 ```
 
 ## Toolchain
@@ -148,6 +166,8 @@ log.debug("Request payload: \(payload)")
 | `flux fmt <file>` | Format source to stdout |
 | `flux fmt -w <file>` | Format in-place |
 | `flux repl` | Multi-line REPL with history |
+| `flux compile <file>` | Compile to native binary (x86_64, arm64, riscv64) |
+| `flux profile <file>` | Run with profiling on all functions |
 
 ### Package Manager
 
@@ -212,10 +232,11 @@ AI agents can use `flux inspect --json` to discover contracts without parsing so
 | J  | Toolchain | `check` / `fmt` / `run` / REPL / VSCode extension | Done |
 | K  | Concurrency | Thread pools, `@concurrent`, `.async()` / `.await()`, channels | Done |
 | L  | Package Manager | `flux.toml`, dependency resolution, local registry | Done |
-| v1 | Spec v1.0 | Structs, interfaces, `??`, `func`, `!var`, intervals, `exception` | Done |
+| v1 | Spec v1.0 | Structs, interfaces, `func`, `!var`, intervals, `exception` | Done |
 | v2 | Constants & Enums | `conf` constants, `enum` with Natural-only values | Done |
-| v2 | Logging | Built-in `log.info/warn/error/debug` namespace | Done |
 | v2 | Pre-exec Checks | Interface completeness, enum validation | Done |
+| v2 | AI-Native Types | `specify` declarations, `Specify.validate/describe/schema`, contract-based programming | Done |
+| v2 | Native Compilation | `flux compile` to x86_64/arm64/riscv64 binary, `flux profile` | Done |
 | M  | Self-hosting | Flux compiles Flux | Planned |
 
 ## Design Philosophy — Why Not Rust / C++?
@@ -231,6 +252,7 @@ for hot-reload-first development. See [`docs/design-comparison.md`](docs/design-
 | Error handling | `Result<T,E>` / exceptions | `exception` + `default` + `@supervised` | Errors isolated at module boundary; supervisor auto-recovers |
 | Polymorphism | Traits / virtual functions | Duck-typed interfaces | No `impl` boilerplate; hot-reload friendly |
 | Branching | `match` / `switch` | `if value { else: pattern { } }` | Covers value matching; persistent state handles state machines |
+| AI integration | External tooling / prompts | `specify` as first-class type + `flux inspect --json` | Contracts and intent are part of the language, not comments |
 | Dev feedback | Edit → compile → run | Edit → save → **instant effect** | The reason Flux exists |
 
 ## Project Structure
@@ -241,6 +263,7 @@ Flux/
 │   ├── CMakeLists.txt
 │   ├── src/
 │   │   ├── main.cpp            CLI entry point
+│   │   ├── token.h             TokenType enum (keywords, operators, literals)
 │   │   ├── lexer.h/.cpp        Lexer (string interpolation, all tokens)
 │   │   ├── parser.h/.cpp       Recursive-descent parser
 │   │   ├── ast.h               33 AST node types
@@ -248,14 +271,22 @@ Flux/
 │   │   ├── interpreter.h/.cpp  Tree-walking interpreter (hot reload, modules)
 │   │   ├── compiler.h/.cpp     AST → bytecode compiler
 │   │   ├── vm.h/.cpp           Stack-based bytecode VM
-│   │   ├── stdlib.cpp          File, Json, Http, Time, Chan, log
+│   │   ├── stdlib.cpp          File, Json, Http, Time, Chan, Math, Specify
 │   │   ├── concurrency.h       GIL + thread safety
 │   │   ├── threadpool.h        Thread pools with overflow policies
 │   │   ├── formatter.h         AST → source pretty-printer
 │   │   ├── watcher.h/.cpp      inotify file watcher
 │   │   ├── toml.h              Zero-dep TOML parser
-│   │   └── pkgmgr.h/.cpp      Package manager
-│   └── examples/               11 demo scripts
+│   │   ├── pkgmgr.h/.cpp      Package manager
+│   │   ├── lsp.h               Language Server Protocol support
+│   │   ├── debugger.h          Debugger (breakpoints, step, inspect)
+│   │   ├── profiler.h          Performance profiler
+│   │   ├── gc.h                Garbage collector
+│   │   ├── hir.h / mir.h       High/Mid-level IR for optimization
+│   │   ├── jit.h               JIT compiler
+│   │   ├── codegen.h           Native code generation
+│   │   └── fluz.h              Binary format protection (.fluz)
+│   └── examples/               23 demo scripts
 ├── vscode-flux/                VSCode extension (syntax, snippets, folding)
 ├── Flux Language Spec.docx     Language specification document
 └── README.md                   ← you are here
