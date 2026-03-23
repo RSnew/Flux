@@ -16,6 +16,7 @@
 #include <ctime>    // std::time, std::localtime, std::strftime
 #include <chrono>   // std::chrono::*
 #include <thread>   // std::this_thread::sleep_for
+#include <mutex>    // std::mutex, std::once_flag
 #include <algorithm> // std::sort, std::transform
 #include <filesystem> // File operations (C++17)
 
@@ -279,29 +280,76 @@ struct SockGuard {
     }
 };
 
+// ── 全局 SSL_CTX 缓存（避免每次请求重建 + 重新加载 CA）──
+static SSL_CTX* getGlobalSSLCtx() {
+    static SSL_CTX* ctx = nullptr;
+    static std::once_flag flag;
+    std::call_once(flag, []() {
+        SSL_library_init();
+        SSL_load_error_strings();
+        OpenSSL_add_all_algorithms();
+        ctx = SSL_CTX_new(TLS_client_method());
+        if (ctx) {
+            SSL_CTX_set_default_verify_paths(ctx);
+            // 启用 SSL 会话缓存，复用 TLS 会话可跳过完整握手
+            SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_CLIENT);
+        }
+    });
+    return ctx;
+}
+
+// ── DNS 缓存（同一 host 不重复解析）──────────────────────
+static std::mutex dnsCacheMutex;
+static std::unordered_map<std::string, struct sockaddr_storage> dnsCache;
+
+static bool dnsLookupCached(const std::string& host, int port,
+                            struct sockaddr_storage& out, socklen_t& outLen) {
+    std::string key = host + ":" + std::to_string(port);
+    {
+        std::lock_guard<std::mutex> lk(dnsCacheMutex);
+        auto it = dnsCache.find(key);
+        if (it != dnsCache.end()) {
+            out = it->second;
+            outLen = (out.ss_family == AF_INET6) ? sizeof(struct sockaddr_in6)
+                                                 : sizeof(struct sockaddr_in);
+            return true;
+        }
+    }
+    // 未命中 → 实际解析
+    struct addrinfo hints{}, *res = nullptr;
+    hints.ai_family   = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    int err = getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &res);
+    if (err || !res) return false;
+    std::memcpy(&out, res->ai_addr, res->ai_addrlen);
+    outLen = res->ai_addrlen;
+    freeaddrinfo(res);
+    {
+        std::lock_guard<std::mutex> lk(dnsCacheMutex);
+        dnsCache[key] = out;
+    }
+    return true;
+}
+
 static std::string httpDoRequest(const std::string& method,
                                   const std::string& url,
                                   const std::string& body,
                                   const std::string& contentType) {
     auto p = parseUrl(url);
 
-    // ── DNS 解析 + TCP 连接 ──────────────────────────────
-    struct addrinfo hints{}, *res = nullptr;
-    hints.ai_family   = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    int err = getaddrinfo(p.host.c_str(), std::to_string(p.port).c_str(), &hints, &res);
-    if (err || !res)
-        throw std::runtime_error("Http." + method + ": DNS lookup failed for '"
-                                 + p.host + "': " + gai_strerror(err));
+    // ── DNS 解析（带缓存）+ TCP 连接 ─────────────────────
+    struct sockaddr_storage addr{};
+    socklen_t addrLen = 0;
+    if (!dnsLookupCached(p.host, p.port, addr, addrLen))
+        throw std::runtime_error("Http." + method + ": DNS lookup failed for '" + p.host + "'");
 
-    int sock = ::socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (sock < 0) { freeaddrinfo(res); throw std::runtime_error("Http: socket() failed"); }
+    int sock = ::socket(addr.ss_family, SOCK_STREAM, 0);
+    if (sock < 0) throw std::runtime_error("Http: socket() failed");
 
-    if (::connect(sock, res->ai_addr, res->ai_addrlen) < 0) {
-        ::close(sock); freeaddrinfo(res);
+    if (::connect(sock, (struct sockaddr*)&addr, addrLen) < 0) {
+        ::close(sock);
         throw std::runtime_error("Http." + method + ": connect failed to " + p.host);
     }
-    freeaddrinfo(res);
 
     // ── 构建 HTTP/1.1 请求 ──────────────────────────────
     std::string req = method + " " + p.path + " HTTP/1.1\r\n"
@@ -319,48 +367,30 @@ static std::string httpDoRequest(const std::string& method,
     char buf[8192];
 
     if (p.https) {
-        // ── HTTPS: OpenSSL TLS ──────────────────────────
-        static bool ssl_inited = false;
-        if (!ssl_inited) {
-            SSL_library_init();
-            SSL_load_error_strings();
-            OpenSSL_add_all_algorithms();
-            ssl_inited = true;
-        }
-
-        const SSL_METHOD* meth = TLS_client_method();
-        SSL_CTX* ctx = SSL_CTX_new(meth);
+        // ── HTTPS: 复用全局 SSL_CTX ─────────────────────
+        SSL_CTX* ctx = getGlobalSSLCtx();
         if (!ctx) {
             ::close(sock);
-            throw std::runtime_error("Http: SSL_CTX_new() failed");
+            throw std::runtime_error("Http: SSL_CTX not available");
         }
-        // 加载系统 CA 证书
-        SSL_CTX_set_default_verify_paths(ctx);
 
         SSL* ssl = SSL_new(ctx);
         SSL_set_fd(ssl, sock);
-        // SNI（Server Name Indication）— 很多 HTTPS 站点需要
         SSL_set_tlsext_host_name(ssl, p.host.c_str());
 
         SockGuard guard(sock, ssl);
 
-        if (SSL_connect(ssl) <= 0) {
-            SSL_CTX_free(ctx);
+        if (SSL_connect(ssl) <= 0)
             throw std::runtime_error("Http." + method + ": TLS handshake failed with " + p.host);
-        }
 
-        // 发送
-        if (SSL_write(ssl, req.c_str(), (int)req.size()) <= 0) {
-            SSL_CTX_free(ctx);
+        if (SSL_write(ssl, req.c_str(), (int)req.size()) <= 0)
             throw std::runtime_error("Http: SSL_write() failed");
-        }
 
-        // 接收
         int n;
         while ((n = SSL_read(ssl, buf, sizeof(buf))) > 0)
             response.append(buf, (size_t)n);
 
-        SSL_CTX_free(ctx);
+        // SSL_CTX 不释放 — 全局复用
     } else {
         // ── HTTP: 纯 TCP ────────────────────────────────
         SockGuard guard(sock, nullptr);
@@ -371,8 +401,6 @@ static std::string httpDoRequest(const std::string& method,
         ssize_t n;
         while ((n = ::recv(sock, buf, sizeof(buf), 0)) > 0)
             response.append(buf, (size_t)n);
-
-        // SockGuard 析构时关闭 sock，不要再手动 close
     }
 
     // ── 去掉 HTTP 头，返回 body ─────────────────────────
@@ -380,6 +408,21 @@ static std::string httpDoRequest(const std::string& method,
     if (header_end != std::string::npos)
         return response.substr(header_end + 4);
     return response;
+}
+
+// ── 二进制下载到文件 ──────────────────────────────────────
+// 返回写入的字节数
+static size_t httpDownloadToFile(const std::string& url, const std::string& path) {
+    // 复用 httpDoRequest 获取原始响应（body 是 std::string，可存二进制）
+    std::string data = httpDoRequest("GET", url, "", "");
+
+    // 以二进制模式写入文件
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out)
+        throw std::runtime_error("Http.download: cannot open '" + path + "' for writing");
+    out.write(data.data(), (std::streamsize)data.size());
+    out.close();
+    return data.size();
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -561,36 +604,61 @@ static std::unordered_map<std::string, StdlibFn> makeJsonModule() {
 // ── Http 模块 ─────────────────────────────────────────────
 static std::unordered_map<std::string, StdlibFn> makeHttpModule() {
     return {
-        // Http.get(url) -> String
+        // Http.get(url) -> String（释放 GIL 以允许并发请求）
         {"get", [](std::vector<Value> args) -> Value {
             if (args.empty() || args[0].type != Value::Type::String)
                 throw std::runtime_error("Http.get(url) — url must be a String");
-            return Value::Str(httpDoRequest("GET", args[0].string, "", ""));
+            std::string url = args[0].string;
+            std::string result;
+            { GILRelease release; result = httpDoRequest("GET", url, "", ""); }
+            return Value::Str(result);
         }},
 
         // Http.post(url, body, contentType="application/json") -> String
         {"post", [](std::vector<Value> args) -> Value {
             if (args.empty() || args[0].type != Value::Type::String)
                 throw std::runtime_error("Http.post(url, body) — url must be a String");
+            std::string url  = args[0].string;
             std::string body = args.size() > 1 ? args[1].toString() : "";
             std::string ct   = args.size() > 2 ? args[2].toString() : "application/json";
-            return Value::Str(httpDoRequest("POST", args[0].string, body, ct));
+            std::string result;
+            { GILRelease release; result = httpDoRequest("POST", url, body, ct); }
+            return Value::Str(result);
         }},
 
         // Http.put(url, body, contentType="application/json") -> String
         {"put", [](std::vector<Value> args) -> Value {
             if (args.empty() || args[0].type != Value::Type::String)
                 throw std::runtime_error("Http.put(url, body) — url must be a String");
+            std::string url  = args[0].string;
             std::string body = args.size() > 1 ? args[1].toString() : "";
             std::string ct   = args.size() > 2 ? args[2].toString() : "application/json";
-            return Value::Str(httpDoRequest("PUT", args[0].string, body, ct));
+            std::string result;
+            { GILRelease release; result = httpDoRequest("PUT", url, body, ct); }
+            return Value::Str(result);
         }},
 
         // Http.delete(url) -> String
         {"delete", [](std::vector<Value> args) -> Value {
             if (args.empty() || args[0].type != Value::Type::String)
                 throw std::runtime_error("Http.delete(url) — url must be a String");
-            return Value::Str(httpDoRequest("DELETE", args[0].string, "", ""));
+            std::string url = args[0].string;
+            std::string result;
+            { GILRelease release; result = httpDoRequest("DELETE", url, "", ""); }
+            return Value::Str(result);
+        }},
+
+        // Http.download(url, path) -> Number (写入字节数)
+        // 二进制安全：直接将响应体写入文件，支持图片、视频等
+        {"download", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2 || args[0].type != Value::Type::String
+                               || args[1].type != Value::Type::String)
+                throw std::runtime_error("Http.download(url, path) — url and path must be Strings");
+            std::string url  = args[0].string;
+            std::string path = args[1].string;
+            size_t bytes;
+            { GILRelease release; bytes = httpDownloadToFile(url, path); }
+            return Value::Num((double)bytes);
         }},
     };
 }
