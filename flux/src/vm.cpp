@@ -2041,11 +2041,13 @@ Value VM::runTurbo(Chunk& topChunk, FnDecl* topFn,
         }
 
         // 慢路径：内置函数 / 非编译函数
-        std::vector<Value> args(argc);
-        for (int i = argc - 1; i >= 0; --i)
-            args[i] = toValue(NPOP());
-        Value result = interp_.callFunction(name, std::move(args), mod);
-        NPUSH(fromValue(result));
+        {
+            std::vector<Value> args(argc);
+            for (int i = argc - 1; i >= 0; --i)
+                args[i] = toValue(NPOP());
+            Value result = interp_.callFunction(name, std::move(args), mod);
+            NPUSH(fromValue(result));
+        }
         DISPATCH();
     }
 
@@ -2095,75 +2097,77 @@ Value VM::runTurbo(Chunk& topChunk, FnDecl* topFn,
         for (int i = 0; i < nsp; ++i)
             stack_.push_back(toValue(ns[i]));
 
-        // 用旧的 Environment 路径执行这条指令
-        auto curEnv = std::make_shared<Environment>(interp_.globalEnv_);
-        // 把当前帧的局部变量放入 env
-        for (int i = 0; i < frame->numLocals && i < (int)frame->chunk->names.size(); ++i) {
-            NanVal lv = locals[frame->localsBase + i];
-            curEnv->set(frame->chunk->names[i], toValue(lv));
-        }
+        {
+            // 用旧的 Environment 路径执行这条指令
+            auto curEnv = std::make_shared<Environment>(interp_.globalEnv_);
+            // 把当前帧的局部变量放入 env
+            for (int i = 0; i < frame->numLocals && i < (int)frame->chunk->names.size(); ++i) {
+                NanVal lv = locals[frame->localsBase + i];
+                curEnv->set(frame->chunk->names[i], toValue(lv));
+            }
 
-        // 复用 run() 中的逻辑执行单条复杂指令
-        switch (inst->op) {
-        case OpCode::CALL_MODULE: {
-            const std::string& combined = frame->chunk->names[inst->a];
-            int argc = inst->b;
-            std::vector<Value> args(argc);
-            for (int i = argc - 1; i >= 0; --i) args[i] = pop();
-            auto dot = combined.find('.');
-            if (dot == std::string::npos)
-                throw std::runtime_error("VM CALL_MODULE: bad name: " + combined);
-            std::string modName = combined.substr(0, dot);
-            std::string fnName  = combined.substr(dot + 1);
-            bool isKnownModule = interp_.stdlibModules_.count(modName) > 0
-                              || interp_.modules_.count(modName) > 0;
-            Value result;
-            if (isKnownModule) {
-                result = interp_.callModuleFunction(modName, fnName, std::move(args));
-            } else {
-                Value obj = curEnv->get(modName);
-                result = dispatchMethod(obj, fnName, std::move(args), mod);
+            // 复用 run() 中的逻辑执行单条复杂指令
+            switch (inst->op) {
+            case OpCode::CALL_MODULE: {
+                const std::string& combined = frame->chunk->names[inst->a];
+                int argc = inst->b;
+                std::vector<Value> args(argc);
+                for (int i = argc - 1; i >= 0; --i) args[i] = pop();
+                auto dot = combined.find('.');
+                if (dot == std::string::npos)
+                    throw std::runtime_error("VM CALL_MODULE: bad name: " + combined);
+                std::string modName = combined.substr(0, dot);
+                std::string fnName  = combined.substr(dot + 1);
+                bool isKnownModule = interp_.stdlibModules_.count(modName) > 0
+                                  || interp_.modules_.count(modName) > 0;
+                Value result;
+                if (isKnownModule) {
+                    result = interp_.callModuleFunction(modName, fnName, std::move(args));
+                } else {
+                    Value obj = curEnv->get(modName);
+                    result = dispatchMethod(obj, fnName, std::move(args), mod);
+                }
+                push(result);
+                break;
             }
-            push(result);
-            break;
-        }
-        case OpCode::CALL_METHOD: {
-            const std::string& method = frame->chunk->names[inst->a];
-            int argc = inst->b;
-            std::vector<Value> args(argc);
-            for (int i = argc - 1; i >= 0; --i) args[i] = pop();
-            Value obj = pop();
-            push(dispatchMethod(obj, method, std::move(args), mod));
-            break;
-        }
-        case OpCode::MAKE_ARRAY: {
-            int count = inst->b;
-            auto arr = std::make_shared<std::vector<Value>>(count);
-            for (int i = count - 1; i >= 0; --i) (*arr)[i] = pop();
-            push(Value::Arr(arr));
-            break;
-        }
-        case OpCode::INDEX_GET: {
-            Value idx = pop(), obj = pop();
-            if (obj.type == Value::Type::Array) {
-                int i = (int)idx.number;
-                if (i < 0) i = (int)obj.array->size() + i;
-                push((*obj.array)[i]);
-            } else if (obj.type == Value::Type::String) {
-                int i = (int)idx.number;
-                push(Value::Str(std::string(1, obj.string[i])));
-            } else if (obj.type == Value::Type::Map) {
-                auto it = obj.map->find(idx.toString());
-                push(it != obj.map->end() ? it->second : Value::Nil());
-            } else {
-                push(Value::Nil());
+            case OpCode::CALL_METHOD: {
+                const std::string& method = frame->chunk->names[inst->a];
+                int argc = inst->b;
+                std::vector<Value> args(argc);
+                for (int i = argc - 1; i >= 0; --i) args[i] = pop();
+                Value obj = pop();
+                push(dispatchMethod(obj, method, std::move(args), mod));
+                break;
             }
-            break;
-        }
-        default:
-            // 其他复杂操作直接委托给解释器
-            push(interp_.evalNode(frame->chunk->ast_nodes[inst->a], curEnv, mod));
-            break;
+            case OpCode::MAKE_ARRAY: {
+                int count = inst->b;
+                auto arr = std::make_shared<std::vector<Value>>(count);
+                for (int i = count - 1; i >= 0; --i) (*arr)[i] = pop();
+                push(Value::Arr(arr));
+                break;
+            }
+            case OpCode::INDEX_GET: {
+                Value idx = pop(), obj = pop();
+                if (obj.type == Value::Type::Array) {
+                    int i = (int)idx.number;
+                    if (i < 0) i = (int)obj.array->size() + i;
+                    push((*obj.array)[i]);
+                } else if (obj.type == Value::Type::String) {
+                    int i = (int)idx.number;
+                    push(Value::Str(std::string(1, obj.string[i])));
+                } else if (obj.type == Value::Type::Map) {
+                    auto it = obj.map->find(idx.toString());
+                    push(it != obj.map->end() ? it->second : Value::Nil());
+                } else {
+                    push(Value::Nil());
+                }
+                break;
+            }
+            default:
+                // 其他复杂操作直接委托给解释器
+                push(interp_.evalNode(frame->chunk->ast_nodes[inst->a], curEnv, mod));
+                break;
+            }
         }
 
         // 转换回 NaN 栈

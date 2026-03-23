@@ -1344,7 +1344,7 @@ void Interpreter::registerStdlib() {
     registerStdlibModule("Chan", makeChanModule());
     registerStdlibModule("Math", makeMathModule());
     registerStdlibModule("Set",  makeSetModule());
-    registerStdlibModule("Log",  makeLogModule());
+    // Log 模块已移除，使用 specify 替代
     registerStdlibModule("Env",    makeEnvModule());
     registerStdlibModule("Test",   makeTestModule());
     registerStdlibModule("String", makeStringModule());

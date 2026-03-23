@@ -732,11 +732,52 @@ NodePtr Parser::parsePrimary() {
     if (check(TokenType::IDENTIFIER) || check(TokenType::STATE)) {
         std::string name = consume().value;
 
-        // state.field 访问
+        // state.field 访问（支持后续链式调用 state.titles.push() 等）
         if (name == "state" && check(TokenType::DOT)) {
             consume(); // .
             std::string field = expect(TokenType::IDENTIFIER, "expected field name after 'state.'").value;
-            return std::make_unique<StateAccess>(field);
+            NodePtr node = std::make_unique<StateAccess>(field);
+            // 进入后缀链循环，支持 state.xxx[i] / state.xxx.method() 等
+            while (true) {
+                bool isDotEnum = check(TokenType::DOT_ERROR)  || check(TokenType::DOT_BLOCK)
+                              || check(TokenType::DOT_DROP)   || check(TokenType::DOT_ALWAYS)
+                              || check(TokenType::DOT_NEVER);
+                if (check(TokenType::LBRACKET)) {
+                    consume();
+                    auto idx = parseExpr();
+                    expect(TokenType::RBRACKET, "expected ']'");
+                    node = std::make_unique<IndexExpr>(std::move(node), std::move(idx));
+                } else if (check(TokenType::DOT) || isDotEnum) {
+                    std::string member;
+                    if (isDotEnum) {
+                        auto tok = consume();
+                        member = tok.value.substr(1);
+                    } else {
+                        consume(); // .
+                        if      (check(TokenType::IDENTIFIER)) member = consume().value;
+                        else if (check(TokenType::ASYNC))      { consume(); member = "async"; }
+                        else if (check(TokenType::AWAIT))      { consume(); member = "await"; }
+                        else if (check(TokenType::FUNC))       { consume(); member = "func"; }
+                        else throw ParseError("expected member name after '.'", current().line);
+                    }
+                    if (check(TokenType::LPAREN)) {
+                        consume();
+                        std::vector<NodePtr> args;
+                        while (!check(TokenType::RPAREN) && !check(TokenType::EOF_TOKEN)) {
+                            if (check(TokenType::IDENTIFIER) && peek().type == TokenType::COLON) {
+                                consume(); consume();
+                            }
+                            args.push_back(parseExpr());
+                            if (!match(TokenType::COMMA)) break;
+                        }
+                        expect(TokenType::RPAREN, "expected ')'");
+                        node = std::make_unique<MethodCall>(std::move(node), member, std::move(args));
+                    }
+                } else {
+                    break;
+                }
+            }
+            return node;
         }
 
         NodePtr node;
