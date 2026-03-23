@@ -275,8 +275,36 @@ std::unique_ptr<FnDecl> Parser::parseFnDecl(bool forceOverride) {
     if (match(TokenType::ARROW))
         retType = expect(TokenType::IDENTIFIER, "expected return type").value;
 
+    // 合约检查：requires { ... } ensures { ... }（在函数体 { 之前）
+    skipNewlines();
+    std::vector<NodePtr> preconditions;
+    std::vector<NodePtr> postconditions;
+    if (check(TokenType::REQUIRES)) {
+        consume();
+        preconditions = parseContractBlock();
+        skipNewlines();
+    }
+    if (check(TokenType::ENSURES)) {
+        consume();
+        postconditions = parseContractBlock();
+        skipNewlines();
+    }
+
     auto body = parseBlock();
-    return std::make_unique<FnDecl>(name, std::move(params), retType, std::move(body), forceOverride);
+    auto fn = std::make_unique<FnDecl>(name, std::move(params), retType, std::move(body), forceOverride);
+
+    // 如果有合约，包装为 ContractFnDecl
+    if (!preconditions.empty() || !postconditions.empty()) {
+        // 把 FnDecl 包装在 ContractFnDecl 中（调用方检测 ContractFnDecl 即可）
+        // 注意：返回类型仍然是 unique_ptr<FnDecl>，但实际上 parseTopLevel 会处理
+        // 这里我们直接在 FnDecl 中嵌入合约（存在外部包装）
+        // 将合约信息存入一个全局表，在 parseTopLevel 中包装
+        // 简化方案：返回 FnDecl，由 parseTopLevel 检查
+        fn->preconditions_ = std::move(preconditions);
+        fn->postconditions_ = std::move(postconditions);
+    }
+
+    return fn;
 }
 
 // ── 语句 ──────────────────────────────────────────────────
@@ -389,6 +417,10 @@ NodePtr Parser::parseVarDecl(bool forceOverride) {
         }
     }
     expect(TokenType::ASSIGN, "expected '=' in variable declaration");
+    // var name = specify { ... } — 规格声明
+    if (check(TokenType::SPECIFY)) {
+        return parseSpecifyDecl(name);
+    }
     NodePtr init;
     if (isInterface && check(TokenType::LBRACE)) {
         // var Shape: interface = { func area() ... }
@@ -1072,4 +1104,46 @@ NodePtr Parser::parsePlatformDecl() {
 
     auto body = parseBlock();
     return std::make_unique<PlatformDecl>(target, std::move(body));
+}
+
+// ══════════════════════════════════════════════════════════
+// 规格声明解析 (specify)
+// ══════════════════════════════════════════════════════════
+
+// var name = specify { intent: "...", input: {...}, constraints: [...], examples: [...] }
+NodePtr Parser::parseSpecifyDecl(const std::string& varName) {
+    consume(); // specify
+    skipNewlines();
+    expect(TokenType::LBRACE, "expected '{' after 'specify'");
+    skipNewlines();
+
+    std::vector<SpecifyFieldDef> fields;
+    while (!check(TokenType::RBRACE) && !check(TokenType::EOF_TOKEN)) {
+        SpecifyFieldDef field;
+        field.key = expect(TokenType::IDENTIFIER, "expected specify field name (intent/input/output/constraints/examples)").value;
+        expect(TokenType::COLON, "expected ':' after specify field name");
+        field.value = parseExpr();
+        fields.push_back(std::move(field));
+        match(TokenType::COMMA);
+        while (match(TokenType::NEWLINE)) {}
+    }
+    expect(TokenType::RBRACE, "expected '}' to close specify block");
+    while (match(TokenType::NEWLINE)) {}
+    return std::make_unique<SpecifyDecl>(varName, std::move(fields));
+}
+
+// requires { expr1, expr2, ... } 或 ensures { expr1, expr2, ... }
+std::vector<NodePtr> Parser::parseContractBlock() {
+    skipNewlines();
+    expect(TokenType::LBRACE, "expected '{' after requires/ensures");
+    skipNewlines();
+
+    std::vector<NodePtr> conditions;
+    while (!check(TokenType::RBRACE) && !check(TokenType::EOF_TOKEN)) {
+        conditions.push_back(parseExpr());
+        match(TokenType::COMMA);
+        while (match(TokenType::NEWLINE)) {}
+    }
+    expect(TokenType::RBRACE, "expected '}' to close contract block");
+    return conditions;
 }

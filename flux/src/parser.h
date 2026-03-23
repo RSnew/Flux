@@ -43,6 +43,9 @@ private:
     NodePtr parseAppendDecl();      // append 扩展
     NodePtr parseAsmBlock();        // asm {} 内联汇编
     NodePtr parsePlatformDecl();    // @platform 声明
+    // 规格声明
+    NodePtr parseSpecifyDecl(const std::string& varName); // specify { ... } 声明
+    std::vector<NodePtr> parseContractBlock();        // requires/ensures { ... }
 
     // 语句
     NodePtr      parseStatement();

@@ -1257,6 +1257,83 @@ static void addHttpServerToModule(std::unordered_map<std::string, StdlibFn>& htt
     };
 }
 
+// ═══════════════════════════════════════════════════════════
+// Specify 模块 — 规格声明类型的内省与工具
+// ═══════════════════════════════════════════════════════════
+static std::unordered_map<std::string, StdlibFn> makeSpecifyModule() {
+    return {
+        // Specify.describe(val) → 人类可读的规格描述（字符串）
+        {"describe", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::Specify || !args[0].specify)
+                throw std::runtime_error("Specify.describe(val) — val must be a Specify type");
+            auto& sp = args[0].specify;
+            std::string desc;
+            desc += "Specify: " + sp->name + "\n";
+            desc += "  Intent: " + sp->intent + "\n";
+            if (sp->input.type != Value::Type::Nil)
+                desc += "  Input: " + sp->input.toString() + "\n";
+            if (sp->output.type != Value::Type::Nil)
+                desc += "  Output: " + sp->output.toString() + "\n";
+            if (sp->constraints.type == Value::Type::Array && sp->constraints.array) {
+                desc += "  Constraints:\n";
+                for (auto& c : *sp->constraints.array)
+                    desc += "    - " + c.toString() + "\n";
+            }
+            if (sp->examples.type == Value::Type::Array && sp->examples.array) {
+                desc += "  Examples: " + std::to_string(sp->examples.array->size()) + " defined\n";
+            }
+            return Value::Str(desc);
+        }},
+        // Specify.schema(val) → JSON schema 格式的结构化输出（Map）
+        {"schema", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::Specify || !args[0].specify)
+                throw std::runtime_error("Specify.schema(val) — val must be a Specify type");
+            auto& sp = args[0].specify;
+            auto m = std::make_shared<std::unordered_map<std::string, Value>>();
+            (*m)["name"]        = Value::Str(sp->name);
+            (*m)["intent"]      = Value::Str(sp->intent);
+            (*m)["input"]       = sp->input;
+            (*m)["output"]      = sp->output;
+            (*m)["constraints"] = sp->constraints;
+            (*m)["examples"]    = sp->examples;
+            return Value::MapOf(m);
+        }},
+        // Specify.intent(val) → 获取意图字符串
+        {"intent", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::Specify || !args[0].specify)
+                throw std::runtime_error("Specify.intent(val) — val must be a Specify type");
+            return Value::Str(args[0].specify->intent);
+        }},
+        // Specify.constraints(val) → 获取约束列表
+        {"constraints", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::Specify || !args[0].specify)
+                throw std::runtime_error("Specify.constraints(val) — val must be a Specify type");
+            return args[0].specify->constraints;
+        }},
+        // Specify.examples(val) → 获取示例列表
+        {"examples", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::Specify || !args[0].specify)
+                throw std::runtime_error("Specify.examples(val) — val must be a Specify type");
+            return args[0].specify->examples;
+        }},
+        // Specify.validate(val, inputMap) → 检查输入是否满足约束
+        {"validate", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2 || args[0].type != Value::Type::Specify || !args[0].specify)
+                throw std::runtime_error("Specify.validate(val, input) — requires Specify type and input");
+            // 基本验证：检查 input 是否包含 schema 要求的字段
+            auto& sp = args[0].specify;
+            if (sp->input.type == Value::Type::Map && sp->input.map &&
+                args[1].type == Value::Type::Map && args[1].map) {
+                for (auto& kv : *sp->input.map) {
+                    if (args[1].map->find(kv.first) == args[1].map->end())
+                        return Value::Bool(false);
+                }
+            }
+            return Value::Bool(true);
+        }},
+    };
+}
+
 void Interpreter::registerStdlib() {
     registerStdlibModule("File", makeFileModule());
     registerStdlibModule("Json", makeJsonModule());
@@ -1272,4 +1349,5 @@ void Interpreter::registerStdlib() {
     registerStdlibModule("Test",   makeTestModule());
     registerStdlibModule("String", makeStringModule());
     registerStdlibModule("hw",     makeHwModule());
+    registerStdlibModule("Specify", makeSpecifyModule());
 }

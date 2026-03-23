@@ -249,6 +249,7 @@ private:
         case Value::Type::Interface:  return "Interface";
         case Value::Type::Function:   return "Function";
         case Value::Type::Addr:       return "Addr";
+        case Value::Type::Specify:   return "Specify";
         }
         return "Unknown";
     }
