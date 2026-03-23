@@ -2169,7 +2169,6 @@ Value VM::runTurbo(Chunk& topChunk, FnDecl* topFn,
                 break;
             }
         }
-        } // end scope for curEnv
 
         // 转换回 NaN 栈
         nsp = 0;
