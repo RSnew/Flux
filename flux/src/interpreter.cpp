@@ -2283,6 +2283,20 @@ Value Interpreter::evalBinary(BinaryExpr* node, std::shared_ptr<Environment> env
     if (op == "+" && (l.type == Value::Type::String || r.type == Value::Type::String))
         return Value::Str(l.toString() + r.toString());
 
+    // 数组拼接：Array + Array → 新 Array（带地址和长度变化警告）
+    if (op == "+" && l.type == Value::Type::Array && r.type == Value::Type::Array) {
+        size_t lLen = l.array ? l.array->size() : 0;
+        size_t rLen = r.array ? r.array->size() : 0;
+        auto result = std::make_shared<std::vector<Value>>();
+        if (l.array) result->insert(result->end(), l.array->begin(), l.array->end());
+        if (r.array) result->insert(result->end(), r.array->begin(), r.array->end());
+        std::cerr << "\033[33m[array+] addr " << (void*)l.array.get()
+                  << " (len " << lLen << ") + addr " << (void*)r.array.get()
+                  << " (len " << rLen << ") → new addr " << (void*)result.get()
+                  << " (len " << result->size() << ")\033[0m\n";
+        return Value::Arr(result);
+    }
+
     if (l.type == Value::Type::Number && r.type == Value::Type::Number) {
         double a = l.number, b = r.number;
         if (op == "+")  return Value::Num(a + b);
