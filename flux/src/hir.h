@@ -168,6 +168,25 @@ struct HIRAwait : HIRNode {
     int timeoutMs = -1;
 };
 
+// ── HIR Persistent state nodes ────────────────────────────
+
+struct HIRPersistentBlock : HIRNode {
+    struct Field {
+        std::string name;
+        HIRNodePtr  defaultValue;  // may be nullptr
+    };
+    std::vector<Field> fields;
+};
+
+struct HIRStateAccess : HIRNode {
+    std::string field;
+};
+
+struct HIRStateAssign : HIRNode {
+    std::string field;
+    HIRNodePtr  value;
+};
+
 // ═══════════════════════════════════════════════════════════
 // HIR Program — 顶层容器
 // ═══════════════════════════════════════════════════════════
@@ -338,6 +357,75 @@ private:
             auto h = std::make_shared<HIRCall>();
             auto callee = std::make_shared<HIRVarRef>();
             callee->name = n->name;
+            h->callee = callee;
+            for (auto& a : n->args) h->args.push_back(lowerNode(a.get()));
+            return h;
+        }
+
+        // ── ExprStmt ────────────────────────────────────
+        if (auto* n = dynamic_cast<ExprStmt*>(node)) {
+            return lowerNode(n->expr.get());
+        }
+
+        // ── ArrayLit ────────────────────────────────────
+        if (auto* n = dynamic_cast<ArrayLit*>(node)) {
+            auto h = std::make_shared<HIRArrayLit>();
+            for (auto& e : n->elements) h->elements.push_back(lowerNode(e.get()));
+            h->type = HIRType::make(HIRType::Array);
+            return h;
+        }
+
+        // ── IndexExpr ───────────────────────────────────
+        if (auto* n = dynamic_cast<IndexExpr*>(node)) {
+            auto h = std::make_shared<HIRIndex>();
+            h->object = lowerNode(n->object.get());
+            h->index = lowerNode(n->index.get());
+            return h;
+        }
+
+        // ── MethodCall ──────────────────────────────────
+        if (auto* n = dynamic_cast<MethodCall*>(node)) {
+            auto h = std::make_shared<HIRCall>();
+            auto callee = std::make_shared<HIRVarRef>();
+            callee->name = n->method;
+            h->callee = callee;
+            h->args.push_back(lowerNode(n->object.get()));
+            for (auto& a : n->args) h->args.push_back(lowerNode(a.get()));
+            return h;
+        }
+
+        // ── PersistentBlock ─────────────────────────────
+        if (auto* n = dynamic_cast<PersistentBlock*>(node)) {
+            auto h = std::make_shared<HIRPersistentBlock>();
+            for (auto& f : n->fields) {
+                HIRPersistentBlock::Field hf;
+                hf.name = f.name;
+                hf.defaultValue = f.defaultValue ? lowerNode(f.defaultValue.get()) : nullptr;
+                h->fields.push_back(std::move(hf));
+            }
+            return h;
+        }
+
+        // ── StateAccess ────────────────────────────────
+        if (auto* n = dynamic_cast<StateAccess*>(node)) {
+            auto h = std::make_shared<HIRStateAccess>();
+            h->field = n->field;
+            return h;
+        }
+
+        // ── StateAssign ────────────────────────────────
+        if (auto* n = dynamic_cast<StateAssign*>(node)) {
+            auto h = std::make_shared<HIRStateAssign>();
+            h->field = n->field;
+            h->value = lowerNode(n->value.get());
+            return h;
+        }
+
+        // ── ModuleCall ──────────────────────────────────
+        if (auto* n = dynamic_cast<ModuleCall*>(node)) {
+            auto h = std::make_shared<HIRCall>();
+            auto callee = std::make_shared<HIRVarRef>();
+            callee->name = n->module + "." + n->fn;
             h->callee = callee;
             for (auto& a : n->args) h->args.push_back(lowerNode(a.get()));
             return h;
