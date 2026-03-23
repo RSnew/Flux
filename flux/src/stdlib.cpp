@@ -1325,6 +1325,43 @@ static void addHttpServerToModule(std::unordered_map<std::string, StdlibFn>& htt
     };
 }
 
+// ── Value → JSON 可序列化 Value ──────────────────────────
+// StructType → Map{fieldName: defaultType}，StructInst → Map{fieldName: value}
+// 其他不可序列化类型 → String（toString）
+static Value valueToSerializable(const Value& v) {
+    if (v.type == Value::Type::StructType && v.structType) {
+        auto m = std::make_shared<std::unordered_map<std::string, Value>>();
+        for (auto& field : v.structType->fields) {
+            // 默认表达式是 AST 节点，尝试提取字面量
+            if (field.defaultExpr) {
+                // 尝试 StringLiteral
+                if (auto* sl = dynamic_cast<StringLit*>(field.defaultExpr.get()))
+                    (*m)[field.name] = Value::Str(sl->value);
+                else if (auto* nl = dynamic_cast<NumberLit*>(field.defaultExpr.get()))
+                    (*m)[field.name] = Value::Num(nl->value);
+                else if (auto* bl = dynamic_cast<BoolLit*>(field.defaultExpr.get()))
+                    (*m)[field.name] = Value::Bool(bl->value);
+                else
+                    (*m)[field.name] = Value::Str("<expr>");
+            } else {
+                (*m)[field.name] = Value::Nil();
+            }
+        }
+        return Value::MapOf(m);
+    }
+    if (v.type == Value::Type::StructInst && v.structInst) {
+        auto m = std::make_shared<std::unordered_map<std::string, Value>>();
+        for (auto& [k, val] : v.structInst->fields)
+            (*m)[k] = valueToSerializable(val);
+        return Value::MapOf(m);
+    }
+    // Interface, Function, Future 等 → 用 toString
+    if (v.type == Value::Type::Interface || v.type == Value::Type::Function ||
+        v.type == Value::Type::Future || v.type == Value::Type::Chan)
+        return Value::Str(v.toString());
+    return v;
+}
+
 // ═══════════════════════════════════════════════════════════
 // Specify 模块 — 规格声明类型的内省与工具
 // ═══════════════════════════════════════════════════════════
@@ -1360,8 +1397,8 @@ static std::unordered_map<std::string, StdlibFn> makeSpecifyModule() {
             auto m = std::make_shared<std::unordered_map<std::string, Value>>();
             (*m)["name"]        = Value::Str(sp->name);
             (*m)["intent"]      = Value::Str(sp->intent);
-            (*m)["input"]       = sp->input;
-            (*m)["output"]      = sp->output;
+            (*m)["input"]       = valueToSerializable(sp->input);
+            (*m)["output"]      = valueToSerializable(sp->output);
             (*m)["constraints"] = sp->constraints;
             (*m)["examples"]    = sp->examples;
             return Value::MapOf(m);
