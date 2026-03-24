@@ -178,6 +178,15 @@ NodePtr Parser::parseTopLevel() {
         else throw ParseError("expected 'func' or 'var' after 'test'", current().line);
         return std::make_unique<TestDecl>(std::move(inner));
     }
+    // bench — 基准测试声明
+    if (check(TokenType::BENCH)) {
+        consume();
+        skipNewlines();
+        if (!check(TokenType::FUNC))
+            throw ParseError("expected 'func' after 'bench'", current().line);
+        NodePtr inner = parseFnDecl();
+        return std::make_unique<BenchDecl>(std::move(inner));
+    }
     return parseStatement();
 }
 

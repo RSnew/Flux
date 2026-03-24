@@ -29,6 +29,7 @@ enum class TokenType {
     ASM,            // asm 内联汇编
     DEFAULT,        // default 错误恢复
     TEST,           // test 测试覆盖声明
+    BENCH,          // bench 基准测试声明
     // 规格声明 (specify)
     SPECIFY,        // specify 类型声明
     REQUIRES,       // requires 前置条件（合约）

@@ -1439,6 +1439,159 @@ static std::unordered_map<std::string, StdlibFn> makeSpecifyModule() {
     };
 }
 
+// ═══════════════════════════════════════════════════════════
+// Server 模块 — 动态路由 HTTP 开发服务器
+// ═══════════════════════════════════════════════════════════
+
+// 服务器状态（C++ 侧持有，通过 Addr 指针暴露给 Flux）
+struct ServerRoute {
+    std::string method;           // GET/POST/PUT/DELETE
+    std::string pattern;          // e.g. "/api/users/:id"
+    std::vector<std::string> paramNames;  // 从 pattern 提取的参数名
+    std::string regexPattern;     // 转换后的正则/匹配模式
+    std::shared_ptr<FuncVal> handler;     // Flux 回调函数
+};
+
+struct ServerState {
+    int port = 8080;
+    std::vector<ServerRoute> routes;
+    Interpreter* interp = nullptr;  // 用于回调 Flux 函数
+};
+
+// 解析路径模式，提取参数名和生成匹配模式
+static void parseRoutePattern(ServerRoute& route) {
+    std::string pat = route.pattern;
+    route.paramNames.clear();
+    // 将 /users/:id/posts/:postId 拆分为段，记录参数段
+    // 匹配时按段比较
+    // 我们不用正则，直接按 '/' 分割对比
+}
+
+// 按 '/' 分割路径为段列表
+static std::vector<std::string> splitPath(const std::string& path) {
+    std::vector<std::string> segments;
+    std::string seg;
+    for (size_t i = 0; i < path.size(); i++) {
+        if (path[i] == '/') {
+            if (!seg.empty()) { segments.push_back(seg); seg.clear(); }
+        } else {
+            seg += path[i];
+        }
+    }
+    if (!seg.empty()) segments.push_back(seg);
+    return segments;
+}
+
+// 解析查询参数 ?key=val&key2=val2
+static std::shared_ptr<std::unordered_map<std::string, Value>>
+parseQueryParams(const std::string& query) {
+    auto m = std::make_shared<std::unordered_map<std::string, Value>>();
+    if (query.empty()) return m;
+    size_t pos = 0;
+    while (pos < query.size()) {
+        size_t eq = query.find('=', pos);
+        size_t amp = query.find('&', pos);
+        if (eq == std::string::npos || (amp != std::string::npos && amp < eq)) {
+            // key without value
+            std::string key = query.substr(pos, (amp == std::string::npos ? query.size() : amp) - pos);
+            if (!key.empty()) (*m)[key] = Value::Str("");
+            pos = (amp == std::string::npos) ? query.size() : amp + 1;
+        } else {
+            std::string key = query.substr(pos, eq - pos);
+            size_t valEnd = (amp == std::string::npos) ? query.size() : amp;
+            std::string val = query.substr(eq + 1, valEnd - eq - 1);
+            if (!key.empty()) (*m)[key] = Value::Str(val);
+            pos = (amp == std::string::npos) ? query.size() : amp + 1;
+        }
+    }
+    return m;
+}
+
+// URL decode (basic: %20 → space, + → space)
+static std::string urlDecode(const std::string& s) {
+    std::string out;
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '%' && i + 2 < s.size()) {
+            int hi = 0, lo = 0;
+            char c1 = s[i+1], c2 = s[i+2];
+            if (c1 >= '0' && c1 <= '9') hi = c1 - '0';
+            else if (c1 >= 'a' && c1 <= 'f') hi = c1 - 'a' + 10;
+            else if (c1 >= 'A' && c1 <= 'F') hi = c1 - 'A' + 10;
+            if (c2 >= '0' && c2 <= '9') lo = c2 - '0';
+            else if (c2 >= 'a' && c2 <= 'f') lo = c2 - 'a' + 10;
+            else if (c2 >= 'A' && c2 <= 'F') lo = c2 - 'A' + 10;
+            out += (char)((hi << 4) | lo);
+            i += 2;
+        } else if (s[i] == '+') {
+            out += ' ';
+        } else {
+            out += s[i];
+        }
+    }
+    return out;
+}
+
+// 解析 HTTP 请求头
+static std::shared_ptr<std::unordered_map<std::string, Value>>
+parseHeaders(const std::string& raw) {
+    auto m = std::make_shared<std::unordered_map<std::string, Value>>();
+    // 跳过第一行（请求行）
+    size_t pos = raw.find("\r\n");
+    if (pos == std::string::npos) return m;
+    pos += 2;
+    while (pos < raw.size()) {
+        size_t lineEnd = raw.find("\r\n", pos);
+        if (lineEnd == std::string::npos || lineEnd == pos) break;  // 空行 = 头结束
+        std::string line = raw.substr(pos, lineEnd - pos);
+        size_t colon = line.find(':');
+        if (colon != std::string::npos) {
+            std::string key = line.substr(0, colon);
+            std::string val = line.substr(colon + 1);
+            // trim leading whitespace
+            while (!val.empty() && val[0] == ' ') val = val.substr(1);
+            // lowercase the key for consistency
+            for (auto& c : key) c = tolower(c);
+            (*m)[key] = Value::Str(val);
+        }
+        pos = lineEnd + 2;
+    }
+    return m;
+}
+
+// 路由匹配：返回是否匹配，以及提取的参数
+static bool matchRoute(const ServerRoute& route, const std::string& path,
+                       std::shared_ptr<std::unordered_map<std::string, Value>>& params) {
+    auto patSegs = splitPath(route.pattern);
+    auto pathSegs = splitPath(path);
+
+    if (patSegs.size() != pathSegs.size()) return false;
+
+    params = std::make_shared<std::unordered_map<std::string, Value>>();
+    for (size_t i = 0; i < patSegs.size(); i++) {
+        if (!patSegs[i].empty() && patSegs[i][0] == ':') {
+            // 参数段
+            std::string paramName = patSegs[i].substr(1);
+            (*params)[paramName] = Value::Str(urlDecode(pathSegs[i]));
+        } else if (patSegs[i] == "*") {
+            // 通配符
+            continue;
+        } else if (patSegs[i] != pathSegs[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// 全局 ServerState 注册表（通过 Addr 指针管理生命周期）
+static std::mutex g_serverMutex;
+static std::vector<std::unique_ptr<ServerState>> g_servers;
+
+static ServerState* getServerFromAddr(Value& v) {
+    if (v.type != Value::Type::Addr || v.addr == 0)
+        throw std::runtime_error("Server: invalid server handle");
+    return reinterpret_cast<ServerState*>(v.addr);
+}
+
 void Interpreter::registerStdlib() {
     registerStdlibModule("File", makeFileModule());
     registerStdlibModule("Json", makeJsonModule());
@@ -1455,4 +1608,260 @@ void Interpreter::registerStdlib() {
     registerStdlibModule("String", makeStringModule());
     registerStdlibModule("hw",     makeHwModule());
     registerStdlibModule("Specify", makeSpecifyModule());
+
+    // ── Server 模块（动态路由 HTTP 服务器）────────────────────
+    Interpreter* self = this;
+    std::unordered_map<std::string, StdlibFn> serverMod;
+
+    // Server.new(port) → Addr (server handle)
+    serverMod["new"] = [self](std::vector<Value> args) -> Value {
+        if (args.empty() || args[0].type != Value::Type::Number)
+            throw std::runtime_error("Server.new(port) — port must be a Number");
+        auto state = std::make_unique<ServerState>();
+        state->port = (int)args[0].number;
+        state->interp = self;
+        ServerState* ptr = state.get();
+        {
+            std::lock_guard<std::mutex> lk(g_serverMutex);
+            g_servers.push_back(std::move(state));
+        }
+        return Value::AddrVal(reinterpret_cast<uintptr_t>(ptr));
+    };
+
+    // Server.get(app, path, handler)
+    serverMod["get"] = [](std::vector<Value> args) -> Value {
+        if (args.size() < 3)
+            throw std::runtime_error("Server.get(app, path, handler)");
+        auto* srv = getServerFromAddr(args[0]);
+        ServerRoute route;
+        route.method = "GET";
+        route.pattern = args[1].toString();
+        if (args[2].type != Value::Type::Function || !args[2].func)
+            throw std::runtime_error("Server.get: handler must be a function");
+        route.handler = args[2].func;
+        srv->routes.push_back(std::move(route));
+        return Value::Nil();
+    };
+
+    // Server.post(app, path, handler)
+    serverMod["post"] = [](std::vector<Value> args) -> Value {
+        if (args.size() < 3)
+            throw std::runtime_error("Server.post(app, path, handler)");
+        auto* srv = getServerFromAddr(args[0]);
+        ServerRoute route;
+        route.method = "POST";
+        route.pattern = args[1].toString();
+        if (args[2].type != Value::Type::Function || !args[2].func)
+            throw std::runtime_error("Server.post: handler must be a function");
+        route.handler = args[2].func;
+        srv->routes.push_back(std::move(route));
+        return Value::Nil();
+    };
+
+    // Server.put(app, path, handler)
+    serverMod["put"] = [](std::vector<Value> args) -> Value {
+        if (args.size() < 3)
+            throw std::runtime_error("Server.put(app, path, handler)");
+        auto* srv = getServerFromAddr(args[0]);
+        ServerRoute route;
+        route.method = "PUT";
+        route.pattern = args[1].toString();
+        if (args[2].type != Value::Type::Function || !args[2].func)
+            throw std::runtime_error("Server.put: handler must be a function");
+        route.handler = args[2].func;
+        srv->routes.push_back(std::move(route));
+        return Value::Nil();
+    };
+
+    // Server.delete(app, path, handler)
+    serverMod["delete"] = [](std::vector<Value> args) -> Value {
+        if (args.size() < 3)
+            throw std::runtime_error("Server.delete(app, path, handler)");
+        auto* srv = getServerFromAddr(args[0]);
+        ServerRoute route;
+        route.method = "DELETE";
+        route.pattern = args[1].toString();
+        if (args[2].type != Value::Type::Function || !args[2].func)
+            throw std::runtime_error("Server.delete: handler must be a function");
+        route.handler = args[2].func;
+        srv->routes.push_back(std::move(route));
+        return Value::Nil();
+    };
+
+    // Server.listen(app) → blocks, serving requests
+    serverMod["listen"] = [self](std::vector<Value> args) -> Value {
+        if (args.empty())
+            throw std::runtime_error("Server.listen(app)");
+        auto* srv = getServerFromAddr(args[0]);
+
+        int serverFd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (serverFd < 0) throw std::runtime_error("Server.listen: socket() failed");
+
+        int opt = 1;
+        setsockopt(serverFd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+        struct sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = INADDR_ANY;
+        addr.sin_port = htons(srv->port);
+
+        if (::bind(serverFd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            ::close(serverFd);
+            throw std::runtime_error("Server.listen: bind() failed on port " + std::to_string(srv->port));
+        }
+        if (::listen(serverFd, 128) < 0) {
+            ::close(serverFd);
+            throw std::runtime_error("Server.listen: listen() failed");
+        }
+
+        std::cout << "\033[32m[Server]\033[0m Flux development server running on http://localhost:"
+                  << srv->port << "\n";
+        std::cout << "\033[90m  Routes:\n";
+        for (auto& r : srv->routes) {
+            std::cout << "    " << r.method << " " << r.pattern << "\n";
+        }
+        std::cout << "\033[0m" << std::flush;
+
+        while (true) {
+            int clientFd;
+            {
+                GILRelease release;
+                clientFd = ::accept(serverFd, nullptr, nullptr);
+            }
+            if (clientFd < 0) continue;
+
+            // Read full request (handle large bodies)
+            std::string rawReq;
+            {
+                char buf[8192];
+                ssize_t n = ::recv(clientFd, buf, sizeof(buf) - 1, 0);
+                if (n <= 0) { ::close(clientFd); continue; }
+                buf[n] = '\0';
+                rawReq = std::string(buf, n);
+
+                // Check Content-Length for body
+                std::string clHeader = "content-length:";
+                size_t clPos = rawReq.find(clHeader);
+                if (clPos == std::string::npos) {
+                    // try case-insensitive
+                    std::string lowerReq = rawReq;
+                    for (auto& c : lowerReq) c = tolower(c);
+                    clPos = lowerReq.find(clHeader);
+                }
+                if (clPos != std::string::npos) {
+                    size_t valStart = clPos + clHeader.size();
+                    while (valStart < rawReq.size() && rawReq[valStart] == ' ') valStart++;
+                    size_t valEnd = rawReq.find("\r\n", valStart);
+                    if (valEnd == std::string::npos) valEnd = rawReq.size();
+                    int contentLen = std::stoi(rawReq.substr(valStart, valEnd - valStart));
+
+                    // Find end of headers
+                    size_t headerEnd = rawReq.find("\r\n\r\n");
+                    if (headerEnd != std::string::npos) {
+                        size_t bodyStart = headerEnd + 4;
+                        int bodyRead = (int)rawReq.size() - (int)bodyStart;
+                        while (bodyRead < contentLen) {
+                            ssize_t more = ::recv(clientFd, buf, sizeof(buf) - 1, 0);
+                            if (more <= 0) break;
+                            rawReq.append(buf, more);
+                            bodyRead += more;
+                        }
+                    }
+                }
+            }
+
+            // Parse request line: "GET /path?query HTTP/1.1"
+            std::string method, fullPath, path, queryStr, body;
+            {
+                size_t sp1 = rawReq.find(' ');
+                size_t sp2 = rawReq.find(' ', sp1 + 1);
+                if (sp1 != std::string::npos && sp2 != std::string::npos) {
+                    method   = rawReq.substr(0, sp1);
+                    fullPath = rawReq.substr(sp1 + 1, sp2 - sp1 - 1);
+                }
+                // Split path and query
+                size_t qPos = fullPath.find('?');
+                if (qPos != std::string::npos) {
+                    path     = fullPath.substr(0, qPos);
+                    queryStr = fullPath.substr(qPos + 1);
+                } else {
+                    path = fullPath;
+                }
+                // Extract body (after \r\n\r\n)
+                size_t headerEnd = rawReq.find("\r\n\r\n");
+                if (headerEnd != std::string::npos) {
+                    body = rawReq.substr(headerEnd + 4);
+                }
+            }
+
+            // Route matching
+            std::string responseBody = "";
+            int status = 404;
+            std::string contentType = "text/plain";
+            bool matched = false;
+
+            for (auto& route : srv->routes) {
+                if (route.method != method) continue;
+                std::shared_ptr<std::unordered_map<std::string, Value>> params;
+                if (matchRoute(route, path, params)) {
+                    // Build req Map
+                    auto reqMap = std::make_shared<std::unordered_map<std::string, Value>>();
+                    (*reqMap)["method"]  = Value::Str(method);
+                    (*reqMap)["path"]    = Value::Str(path);
+                    (*reqMap)["body"]    = Value::Str(body);
+                    (*reqMap)["params"]  = Value::MapOf(params);
+                    (*reqMap)["query"]   = Value::MapOf(parseQueryParams(queryStr));
+                    (*reqMap)["headers"] = Value::MapOf(parseHeaders(rawReq));
+
+                    Value reqVal = Value::MapOf(reqMap);
+
+                    try {
+                        Value result = self->callFuncVal(route.handler, {reqVal});
+                        responseBody = result.toString();
+                        status = 200;
+                        // Auto-detect JSON content type
+                        if (!responseBody.empty() &&
+                            (responseBody[0] == '{' || responseBody[0] == '['))
+                            contentType = "application/json";
+                    } catch (const std::exception& e) {
+                        responseBody = std::string("{\"error\":\"") + e.what() + "\"}";
+                        status = 500;
+                        contentType = "application/json";
+                        std::cerr << "\033[31m[Server] Error handling "
+                                  << method << " " << path << ": "
+                                  << e.what() << "\033[0m\n";
+                    }
+                    matched = true;
+                    break;
+                }
+            }
+
+            if (!matched) {
+                responseBody = "{\"error\":\"Not Found\",\"path\":\"" + path + "\"}";
+                contentType = "application/json";
+            }
+
+            // Send response
+            std::string statusText = (status == 200) ? "OK"
+                : (status == 404) ? "Not Found"
+                : "Internal Server Error";
+            std::string response =
+                "HTTP/1.1 " + std::to_string(status) + " " + statusText + "\r\n"
+                "Content-Type: " + contentType + "\r\n"
+                "Content-Length: " + std::to_string(responseBody.size()) + "\r\n"
+                "Access-Control-Allow-Origin: *\r\n"
+                "Connection: close\r\n\r\n"
+                + responseBody;
+            ::send(clientFd, response.c_str(), response.size(), 0);
+            ::close(clientFd);
+
+            // Log request
+            std::cout << "\033[90m  " << method << " " << path
+                      << " → " << status << "\033[0m\n";
+        }
+        ::close(serverFd);
+        return Value::Nil();
+    };
+
+    registerStdlibModule("Server", std::move(serverMod));
 }

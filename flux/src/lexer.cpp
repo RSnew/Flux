@@ -40,6 +40,7 @@ const std::unordered_map<std::string, TokenType> Lexer::keywords_ = {
     {"asm",        TokenType::ASM},
     {"default",    TokenType::DEFAULT},
     {"test",       TokenType::TEST},
+    {"bench",      TokenType::BENCH},
     // 规格声明
     {"specify",    TokenType::SPECIFY},
     {"requires",   TokenType::REQUIRES},
