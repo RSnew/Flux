@@ -425,14 +425,6 @@ private:
     // default 声明表：target → DefaultDecl body (AST nodes)
     std::unordered_map<std::string, std::vector<ASTNode*>> defaultBodies_;
 
-    // ── !var / !func 灰度切换（Spec v1.0）─────────────────
-    // 热更新期间将新值/新函数体存入 pending 表；
-    // 在下一次函数调用边界（callFunction / callModuleFunction 入口）
-    // 统一应用，确保正在执行的任务用旧版本跑完，新任务看到新版本。
-    std::unordered_map<std::string, Value>   pendingVarUpdates_;
-    std::unordered_map<std::string, FnDecl*> pendingFnUpdates_;
-    void applyPendingUpdates();  // 在调用边界处消费 pending 表
-
     // 创建结构体实例（StructTypeInfo + 具名参数）
     Value createStructInst(std::shared_ptr<StructTypeInfo> type,
                            const std::vector<std::pair<std::string,Value>>& initFields,

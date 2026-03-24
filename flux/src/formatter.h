@@ -175,8 +175,7 @@ private:
 
         // ── 变量声明 ────────────────────────────────────────
         if (auto* n = dynamic_cast<VarDecl*>(node)) {
-            std::string kw = n->forceOverride ? "!var " : "var ";
-            std::string s = ind() + kw + n->name;
+            std::string s = ind() + "var " + n->name;
             if (n->isInterface) s += ": interface";
             if (!n->typeAnnotation.empty()) s += ": " + n->typeAnnotation;
             if (n->initializer) s += " = " + fmtExpr(n->initializer.get());
@@ -286,8 +285,7 @@ private:
 
         // ── 函数声明 ─────────────────────────────────────────
         if (auto* n = dynamic_cast<FnDecl*>(node)) {
-            std::string kw = n->forceOverride ? "!func " : "func ";
-            std::string s = ind() + kw + n->name + "(";
+            std::string s = ind() + "func " + n->name + "(";
             for (size_t i = 0; i < n->params.size(); i++) {
                 if (i) s += ", ";
                 s += n->params[i].name;

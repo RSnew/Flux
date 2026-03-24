@@ -153,13 +153,6 @@ NodePtr Parser::parseTopLevel() {
     if (check(TokenType::ENUM))       return parseEnumDecl();
     if (check(TokenType::PERSISTENT)) return parsePersistentBlock();
     if (check(TokenType::MODULE))     return parseModuleDecl();
-    // !var / !func — 热更新强制覆盖 (NOT token followed by var/func)
-    if (check(TokenType::NOT)) {
-        auto& nx = peek();
-        if (nx.type == TokenType::VAR)  { consume(); return parseVarDecl(true); }
-        if (nx.type == TokenType::FUNC)
-            { consume(); return parseFnDecl(true); }
-    }
     // exception — 顶层错误描述声明
     if (check(TokenType::EXCEPTION))  return parseExceptionDecl();
     // enum — 枚举声明
@@ -263,7 +256,7 @@ NodePtr Parser::parsePersistentBlock() {
     return block;
 }
 
-std::unique_ptr<FnDecl> Parser::parseFnDecl(bool forceOverride) {
+std::unique_ptr<FnDecl> Parser::parseFnDecl() {
     if (check(TokenType::FUNC)) consume();
     else throw ParseError("expected 'func'", current().line);
     std::string name = expect(TokenType::IDENTIFIER, "expected function name").value;
@@ -300,7 +293,7 @@ std::unique_ptr<FnDecl> Parser::parseFnDecl(bool forceOverride) {
     }
 
     auto body = parseBlock();
-    auto fn = std::make_unique<FnDecl>(name, std::move(params), retType, std::move(body), forceOverride);
+    auto fn = std::make_unique<FnDecl>(name, std::move(params), retType, std::move(body));
 
     // 如果有合约，包装为 ContractFnDecl
     if (!preconditions.empty() || !postconditions.empty()) {
@@ -328,13 +321,6 @@ NodePtr Parser::parseStatement() {
     if (check(TokenType::FOR))    return parseForIn();
     if (check(TokenType::RETURN)) return parseReturn();
     if (check(TokenType::SPAWN))  return parseSpawn();
-    // !var / !func in statement context
-    if (check(TokenType::NOT)) {
-        auto& nx = peek();
-        if (nx.type == TokenType::VAR)  { consume(); return parseVarDecl(true); }
-        if (nx.type == TokenType::FUNC)
-            { consume(); return parseFnDecl(true); }
-    }
     // inline exception { "..." }
     if (check(TokenType::EXCEPTION)) return parseExceptionDecl();
     // free(ptr) 语句（向后兼容，已废弃）
@@ -411,7 +397,7 @@ NodePtr Parser::parseStatement() {
     return std::make_unique<ExprStmt>(std::move(expr));
 }
 
-NodePtr Parser::parseVarDecl(bool forceOverride) {
+NodePtr Parser::parseVarDecl() {
     consume(); // var
     std::string name = expect(TokenType::IDENTIFIER, "expected variable name").value;
     std::string typeAnnotation;
@@ -443,7 +429,7 @@ NodePtr Parser::parseVarDecl(bool forceOverride) {
     }
     while (match(TokenType::NEWLINE)) {}
     return std::make_unique<VarDecl>(name, typeAnnotation, std::move(init),
-                                     forceOverride, isInterface);
+                                     isInterface);
 }
 
 // conf MAX = 100 — 常量声明（运行时只读）

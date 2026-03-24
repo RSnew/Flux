@@ -53,14 +53,13 @@ struct CallExpr : ASTNode {
 
 // ── 语句节点 ──────────────────────────────────────────────
 struct VarDecl : ASTNode {
-    bool        forceOverride = false;  // !var: always overwrite on hot-reload
     bool        isInterface   = false;  // var S: interface = { ... }
     std::string name;
     std::string typeAnnotation; // 可选，如 "Int" "String"
     NodePtr     initializer;
     VarDecl(std::string n, std::string ta, NodePtr init,
-            bool fo = false, bool iface = false)
-        : forceOverride(fo), isInterface(iface)
+            bool iface = false)
+        : isInterface(iface)
         , name(std::move(n))
         , typeAnnotation(std::move(ta)), initializer(std::move(init)) {}
 };
@@ -117,14 +116,11 @@ struct FnDecl : ASTNode {
     std::vector<Param>   params;
     std::string          returnType;
     std::vector<NodePtr> body;
-    bool                 forceOverride = false;  // !func: always replace on hot-reload
     // 合约（Design by Contract）
     std::vector<NodePtr> preconditions_;   // requires { ... }
     std::vector<NodePtr> postconditions_;  // ensures { ... }
-    FnDecl(std::string n, std::vector<Param> p, std::string rt, std::vector<NodePtr> b,
-           bool fo = false)
-        : name(std::move(n)), params(std::move(p)), returnType(std::move(rt)), body(std::move(b))
-        , forceOverride(fo) {}
+    FnDecl(std::string n, std::vector<Param> p, std::string rt, std::vector<NodePtr> b)
+        : name(std::move(n)), params(std::move(p)), returnType(std::move(rt)), body(std::move(b)) {}
 };
 
 struct Program : ASTNode {

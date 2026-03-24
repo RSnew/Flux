@@ -67,7 +67,7 @@ Source (.flux) → Lexer → Tokens → Parser → AST → TypeChecker → Inter
 
 ## Flux Language Quick Reference
 
-- Variables: `var x = 42`, `var name: String = "Flux"`, `!var forced = 0`
+- Variables: `var x = 42`, `var name: String = "Flux"`
 - Functions: `func foo(a, b) { ... }`
 - Modules: `module Name { persistent { key: val } func method() { ... } }`
 - Interfaces: `var Shape: interface = { func area() }`
