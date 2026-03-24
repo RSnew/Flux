@@ -235,7 +235,7 @@ AI Agent 可通过 `flux inspect --json` 发现合约，无需解析源码。
 | v2 | 执行前检查 | 接口完整性验证、枚举值验证 | 已完成 |
 | v2 | AI 原生类型 | `specify` 声明、`Specify.validate/describe/schema`、合约编程 | 已完成 |
 | v2 | 原生编译 | `flux compile` 编译为 x86_64/arm64/riscv64 二进制、`flux profile` | 已完成 |
-| M  | 自举 | Flux 编译 Flux | 计划中 |
+| M  | 自举 | 用 Flux 编写的字节码编译器 + VM（27 项测试） | 已完成 |
 
 ## 设计哲学 — 为什么不用 Rust / C++？
 
@@ -284,7 +284,7 @@ Flux/
 │   │   ├── jit.h               JIT 编译器
 │   │   ├── codegen.h           原生代码生成
 │   │   └── fluz.h              二进制格式保护（.fluz）
-│   └── examples/               23 个示例脚本
+│   └── examples/               28 个示例脚本（含自举编译器）
 ├── vscode-flux/                VSCode 扩展（语法、代码片段、折叠）
 ├── Flux Language Spec.docx     语言规范文档
 └── README.md                   ← 英文版
