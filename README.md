@@ -232,7 +232,7 @@ AI agents can use `flux inspect --json` to discover contracts without parsing so
 | J  | Toolchain | `check` / `fmt` / `run` / REPL / VSCode extension | Done |
 | K  | Concurrency | Thread pools, `@concurrent`, `.async()` / `.await()`, channels | Done |
 | L  | Package Manager | `flux.toml`, dependency resolution, local registry | Done |
-| v1 | Spec v1.0 | Structs, interfaces, `func`, `!var`, intervals, `exception` | Done |
+| v1 | Spec v1.0 | Structs, interfaces, `func`, intervals, `exception` | Done |
 | v2 | Constants & Enums | `conf` constants, `enum` with Natural-only values | Done |
 | v2 | Pre-exec Checks | Interface completeness, enum validation | Done |
 | v2 | AI-Native Types | `specify` declarations, `Specify.validate/describe/schema`, contract-based programming | Done |

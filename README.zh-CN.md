@@ -230,7 +230,7 @@ AI Agent 可通过 `flux inspect --json` 发现合约，无需解析源码。
 | J  | 工具链 | `check` / `fmt` / `run` / REPL / VSCode 扩展 | 已完成 |
 | K  | 并发 | 线程池、`@concurrent`、`.async()` / `.await()`、通道 | 已完成 |
 | L  | 包管理器 | `flux.toml`、依赖解析、本地仓库 | 已完成 |
-| v1 | 规范 v1.0 | 结构体、接口、`func`、`!var`、区间、`exception` | 已完成 |
+| v1 | 规范 v1.0 | 结构体、接口、`func`、区间、`exception` | 已完成 |
 | v2 | 常量与枚举 | `conf` 常量、`enum` 自然数枚举 | 已完成 |
 | v2 | 执行前检查 | 接口完整性验证、枚举值验证 | 已完成 |
 | v2 | AI 原生类型 | `specify` 声明、`Specify.validate/describe/schema`、合约编程 | 已完成 |

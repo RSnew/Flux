@@ -30,7 +30,7 @@ private:
 
     // 顶层
     NodePtr parseTopLevel();
-    std::unique_ptr<FnDecl> parseFnDecl(bool forceOverride = false);
+    std::unique_ptr<FnDecl> parseFnDecl();
     NodePtr parsePersistentBlock();
     NodePtr parseMigrateBlock();
     NodePtr parseModuleDecl(RestartPolicy rp = RestartPolicy::None, int maxRetries = 3,
@@ -49,7 +49,7 @@ private:
 
     // 语句
     NodePtr      parseStatement();
-    NodePtr      parseVarDecl(bool forceOverride = false);
+    NodePtr      parseVarDecl();
     NodePtr      parseConfDecl();
     NodePtr      parseIf();
     NodePtr      parseWhile();

@@ -109,7 +109,6 @@ struct HIRVarDecl : HIRNode {
     HIRType declaredType;
     HIRNodePtr init;
     bool isMutable = true;
-    bool isHotSwap = false;  // !var
 };
 
 struct HIRAssign : HIRNode {
@@ -149,7 +148,6 @@ struct HIRFnDecl : HIRNode {
     std::vector<HIRLambda::Param> params;
     HIRType returnType;
     std::vector<HIRNodePtr> body;
-    bool isHotSwap = false;  // !func
 };
 
 struct HIRModuleDecl : HIRNode {
@@ -281,7 +279,6 @@ private:
             auto h = std::make_shared<HIRVarDecl>();
             h->name = n->name;
             h->init = n->initializer ? lowerNode(n->initializer.get()) : nullptr;
-            h->isHotSwap = n->forceOverride;
             declareVar(h->name);
             return h;
         }
@@ -305,7 +302,6 @@ private:
         if (auto* n = dynamic_cast<FnDecl*>(node)) {
             auto h = std::make_shared<HIRFnDecl>();
             h->name = n->name;
-            h->isHotSwap = n->forceOverride;
             for (auto& p : n->params)
                 h->params.push_back({p.name, HIRType::make(HIRType::Any)});
             pushScope();

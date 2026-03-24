@@ -207,9 +207,7 @@ void Interpreter::initProgram(Program* program) {
     // 第一遍：注册全局函数 + 初始化 persistent
     for (auto& stmt : program->statements) {
         if (auto* fn = dynamic_cast<FnDecl*>(stmt.get())) {
-            // !func: 灰度切换 — 存入 pending，在下一调用边界生效
-            if (fn->forceOverride) pendingFnUpdates_[fn->name] = fn;
-            else                   functions_[fn->name] = fn;
+            functions_[fn->name] = fn;
         } else if (auto* pb = dynamic_cast<PersistentBlock*>(stmt.get())) {
             for (auto& field : pb->fields) {
                 if (!persistentStore_.count(field.name)) {
@@ -246,9 +244,7 @@ void Interpreter::execute(Program* program) {
                 Profiler::instance().markFunction(fn->name);
             }
         } else if (auto* fn = dynamic_cast<FnDecl*>(stmt.get())) {
-            // !func: 灰度切换 — 存入 pending，在下一调用边界生效
-            if (fn->forceOverride) pendingFnUpdates_[fn->name] = fn;
-            else                   functions_[fn->name] = fn;
+            functions_[fn->name] = fn;
         } else if (auto* td = dynamic_cast<TestDecl*>(stmt.get())) {
             // test func: 在非 --no-test 模式下覆盖已有函数
             if (!noTest_) {
@@ -445,9 +441,6 @@ void Interpreter::executeModule(ModuleDecl* decl, std::shared_ptr<Environment> e
 Value Interpreter::callModuleFunction(const std::string& modName,
                                        const std::string& fnName,
                                        std::vector<Value> args) {
-    // 调用边界：应用所有 !var / !func 灰度切换
-    applyPendingUpdates();
-
     // ── 标准库模块优先 ──────────────────────────────────
     auto sit = stdlibModules_.find(modName);
     if (sit != stdlibModules_.end()) {
@@ -549,25 +542,10 @@ Value Interpreter::callModuleFunction(const std::string& modName,
     }
 }
 
-// ── !var / !func 灰度切换：在调用边界统一应用 pending 更新 ──
-// 正在执行的任务用旧版本跑完；进入下一个函数调用时切换到新版本。
-void Interpreter::applyPendingUpdates() {
-    for (auto& [name, val] : pendingVarUpdates_)
-        globalEnv_->set(name, val);
-    pendingVarUpdates_.clear();
-
-    for (auto& [name, fn] : pendingFnUpdates_)
-        functions_[name] = fn;
-    pendingFnUpdates_.clear();
-}
-
 // ── 普通函数调用 ──────────────────────────────────────────
 Value Interpreter::callFunction(const std::string& name,
                                  std::vector<Value> args,
                                  ModuleRuntime* mod) {
-    // 调用边界：应用所有 !var / !func 灰度切换
-    applyPendingUpdates();
-
     // 内置函数
     auto bit = builtins_.find(name);
     if (bit != builtins_.end()) return bit->second(std::move(args));
@@ -1631,15 +1609,7 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
         if (n->isInterface && v.type == Value::Type::Interface && v.iface)
             v.iface->name = n->name;
 
-        if (n->forceOverride) {
-            // !var: 灰度切换 — 存入 pending 表，在下一次函数调用边界才生效。
-            // 正在运行的任务继续使用旧值；下一个任务进来时看到新值。
-            pendingVarUpdates_[n->name] = v;
-            // 本次热更新循环内，变量仍沿用当前已存在的旧值（若无则返回新值）
-            return env->has(n->name) ? env->get(n->name) : v;
-        }
-
-        // var: 热更新时保留已存在的值（不重置）
+        // var: 直接设置变量
         if (env->has(n->name)) return env->get(n->name);
         env->set(n->name, v);
         return v;
