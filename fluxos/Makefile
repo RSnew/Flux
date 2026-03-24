@@ -17,6 +17,7 @@ FLAT_OBJ   = fluxos_flat.o
 KERNEL_BIN = fluxos.bin
 ISO_DIR    = isodir
 ISO_FILE   = fluxos.iso
+DISK_IMG   = disk.img
 
 # Default target: single-file build (simpler, no separate boot+kernel linking)
 all: $(KERNEL_BIN)
@@ -40,6 +41,10 @@ $(BOOT_OBJ): boot.asm
 $(KERNEL_OBJ): kernel.asm
 	$(NASM) -f elf32 -o $@ $<
 
+# Create 32MB disk image for ATA persistence
+$(DISK_IMG):
+	qemu-img create -f raw $(DISK_IMG) 32M 2>/dev/null || dd if=/dev/zero of=$(DISK_IMG) bs=1M count=32
+
 # Create bootable ISO (requires grub-mkrescue + xorriso)
 iso: $(KERNEL_BIN)
 	mkdir -p $(ISO_DIR)/boot/grub
@@ -53,20 +58,24 @@ iso: $(KERNEL_BIN)
 	echo '}'                                      >> $(ISO_DIR)/boot/grub/grub.cfg
 	$(GRUB_ISO) -o $(ISO_FILE) $(ISO_DIR)
 
-# Run in QEMU (direct kernel boot — no ISO/GRUB needed)
-run: $(KERNEL_BIN)
-	$(QEMU) -kernel $(KERNEL_BIN) -m 32M -display curses 2>/dev/null || \
-	$(QEMU) -kernel $(KERNEL_BIN) -m 32M -nographic || \
-	qemu-system-x86_64 -kernel $(KERNEL_BIN) -m 32M -display curses 2>/dev/null || \
-	qemu-system-x86_64 -kernel $(KERNEL_BIN) -m 32M -nographic
+# Run in QEMU with disk image (direct kernel boot — no ISO/GRUB needed)
+run: $(KERNEL_BIN) $(DISK_IMG)
+	$(QEMU) -kernel $(KERNEL_BIN) -m 32M -drive file=$(DISK_IMG),format=raw,if=ide -display curses 2>/dev/null || \
+	$(QEMU) -kernel $(KERNEL_BIN) -m 32M -drive file=$(DISK_IMG),format=raw,if=ide -nographic || \
+	qemu-system-x86_64 -kernel $(KERNEL_BIN) -m 32M -drive file=$(DISK_IMG),format=raw,if=ide -display curses 2>/dev/null || \
+	qemu-system-x86_64 -kernel $(KERNEL_BIN) -m 32M -drive file=$(DISK_IMG),format=raw,if=ide -nographic
 
 # Run with VGA window (if display is available)
-run-gui: $(KERNEL_BIN)
-	$(QEMU) -kernel $(KERNEL_BIN) -m 32M
+run-gui: $(KERNEL_BIN) $(DISK_IMG)
+	$(QEMU) -kernel $(KERNEL_BIN) -m 32M -drive file=$(DISK_IMG),format=raw,if=ide
 
 # Clean build artifacts
 clean:
 	rm -f $(BOOT_OBJ) $(KERNEL_OBJ) $(FLAT_OBJ) $(KERNEL_BIN) $(ISO_FILE)
 	rm -rf $(ISO_DIR)
 
-.PHONY: all iso run run-gui clean
+# Clean everything including disk image
+distclean: clean
+	rm -f $(DISK_IMG)
+
+.PHONY: all iso run run-gui clean distclean

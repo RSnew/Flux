@@ -1,5 +1,6 @@
 ; fluxos_flat.asm — FluxOS with PIT Timer, Memory Manager, RAM Filesystem
 ; Split-pane UI: Command area (left) | History/Info (right)
+; Features: User system, shell pipes, ATA disk persistence, network (simulated)
 ;
 ; Build: nasm -f elf32 fluxos_flat.asm -o fluxos_flat.o
 ;        i686-elf-ld -T linker.ld -o fluxos.bin fluxos_flat.o
@@ -87,6 +88,31 @@ PIT_CMD        equ 0x43
 PIT_FREQ       equ 1193182
 PIT_HZ         equ 100
 
+; ATA PIO ports
+ATA_DATA       equ 0x1F0
+ATA_ERR        equ 0x1F1
+ATA_COUNT      equ 0x1F2
+ATA_LBALO      equ 0x1F3
+ATA_LBAMID     equ 0x1F4
+ATA_LBAHI      equ 0x1F5
+ATA_DRIVE      equ 0x1F6
+ATA_CMD        equ 0x1F7
+ATA_STATUS     equ 0x1F7
+
+; Disk constants
+DISK_MAGIC     equ 0x464C5558   ; "FLUX"
+DISK_START_SEC equ 100          ; Start writing at sector 100
+
+; User system constants
+MAX_USERS      equ 4
+USER_NAME_SZ   equ 16
+USER_PASS_SZ   equ 16
+USER_HOME_SZ   equ 32
+USER_ENTRY_SZ  equ 65  ; 16+16+32+1
+
+; Pipe buffer size
+PIPE_BUF_SZ    equ 4096
+
 ; ═══════════════════════════════════════════════════
 ; Multiboot Header
 ; ═══════════════════════════════════════════════════
@@ -144,6 +170,27 @@ arg2:          resb 256
 pathbuf:       resb 128
 numbuf:        resb 16
 
+; User system BSS
+user_table:    resb MAX_USERS * USER_ENTRY_SZ
+user_count:    resb 1
+current_uid:   resb 1
+login_buf:     resb 32     ; for login input
+login_len:     resb 1
+
+; Pipe buffer
+pipe_buf:      resb PIPE_BUF_SZ
+pipe_len:      resd 1
+pipe_active:   resb 1      ; 1 if output should go to pipe_buf
+pipe_input:    resb 1      ; 1 if command reads from pipe_buf
+
+; ATA disk
+ata_present:   resb 1
+disk_sector_buf: resb 512
+
+; Original command buffer for pipe parsing
+orig_cmd_buf:  resb 128
+orig_cmd_len:  resb 1
+
 ; ═══════════════════════════════════════════════════
 ; Data
 ; ═══════════════════════════════════════════════════
@@ -157,37 +204,49 @@ logo5: db "|_| |_|\__,_/_/\_\", 0
 
 dir_dot:    db ".", 0
 dir_home:   db "~", 0
-ver_str:    db "v1.0", 0
+ver_str:    db "v2.0", 0
 home_lbl:   db "home", 0
-prompt:     db "> ", 0
+prompt_sfx: db "> ", 0
 
 welcome_msg:  db "Welcome to FluxOS.", 0
 hint_msg:     db "Type 'help' for commands.", 0
 
 help_lines:
 h0:  db "Commands:", 0
-h1:  db " help   - this help", 0
-h2:  db " clear  - clear screen", 0
-h3:  db " info   - system info", 0
-h4:  db " pwd    - current dir", 0
-h5:  db " uptime - time since boot", 0
-h6:  db " mem    - memory info", 0
-h7:  db " ls     - list files", 0
-h8:  db " cd <d> - change dir", 0
+h1:  db " help    - this help", 0
+h2:  db " clear   - clear screen", 0
+h3:  db " info    - system info", 0
+h4:  db " pwd     - current dir", 0
+h5:  db " uptime  - time since boot", 0
+h6:  db " mem     - memory info", 0
+h7:  db " ls      - list files", 0
+h8:  db " cd <d>  - change dir", 0
 h9:  db " mkdir <n> - make dir", 0
 h10: db " touch <n> - make file", 0
 h11: db " write <f> <t> - write", 0
 h12: db " cat <f> - show file", 0
 h13: db " rm <f>  - remove", 0
 h14: db " stat <f> - file info", 0
-h15: db " hello  - greeting", 0
-h16: db " reboot - restart", 0
+h15: db " hello   - greeting", 0
+h16: db " reboot  - restart", 0
+h17: db " whoami  - current user", 0
+h18: db " login   - switch user", 0
+h19: db " adduser <n> - add user", 0
+h20: db " save    - save fs to disk", 0
+h21: db " load    - load fs from disk", 0
+h22: db " disk    - disk status", 0
+h23: db " ping <ip> - ping host", 0
+h24: db " ifconfig - network info", 0
+h25: db " grep <p> - filter lines", 0
+h26: db " wc      - count lines/words", 0
+h27: db " Pipes: cmd1 | cmd2", 0
 
-info1: db "FluxOS v1.0", 0
+info1: db "FluxOS v2.0", 0
 info2: db "Arch: x86 (32-bit)", 0
 info3: db "VGA: 80x25 16-color", 0
 info4: db "PIT: 100Hz timer", 0
 info5: db "FS: RAMfs (64 files)", 0
+info6: db "ATA: PIO disk support", 0
 
 hello_msg:    db "Hello from FluxOS!", 0
 unknown_msg:  db "Unknown: ", 0
@@ -215,10 +274,11 @@ e_isdir:      db "Is a directory", 0
 e_notempty:   db "Not empty", 0
 
 def_readme:   db "Welcome to FluxOS filesystem", 0
-def_motd:     db "FluxOS v1.0 - Flux Language Bare Metal Kernel", 0
+def_motd:     db "FluxOS v2.0 - Flux Language Bare Metal Kernel", 0
 
 panel_dir:    db "Dir: ", 0
 panel_files:  db "Files: ", 0
+panel_user:   db "User: ", 0
 
 ; Command name strings
 c_help:   db "help", 0
@@ -237,8 +297,19 @@ c_write:  db "write", 0
 c_cat:    db "cat", 0
 c_rm:     db "rm", 0
 c_stat:   db "stat", 0
+c_whoami: db "whoami", 0
+c_login:  db "login", 0
+c_adduser: db "adduser", 0
+c_save:   db "save", 0
+c_load:   db "load", 0
+c_disk:   db "disk", 0
+c_ping:   db "ping", 0
+c_ifconfig: db "ifconfig", 0
+c_grep:   db "grep", 0
+c_wc:     db "wc", 0
 
-tab_cmds: db "help clear info pwd ls cd mkdir touch write cat rm stat mem uptime", 0
+tab_cmds: db "help clear info pwd ls cd mkdir touch write cat rm stat", 0
+tab_cmds2: db "mem uptime whoami login save load disk ping ifconfig", 0
 
 arrow_right: db "> ", 0     ; collapsed arrow (ASCII >)
 arrow_down:  db "v ", 0     ; expanded arrow (ASCII v)
@@ -258,6 +329,65 @@ scancode_shift:
     db 'Q','W','E','R','T','Y','U','I','O','P','{','}', 13, 0
     db 'A','S','D','F','G','H','J','K','L',':','"','~', 0, '|'
     db 'Z','X','C','V','B','N','M','<','>','?', 0, '*', 0, ' '
+
+; Login screen strings
+login_banner1: db "  FluxOS v2.0 Login", 0
+login_banner2: db "  ─────────────────", 0
+login_user_p:  db "  Username: ", 0
+login_pass_p:  db "  Password: ", 0
+login_fail:    db "  Login failed.", 0
+login_ok:      db "  Login successful.", 0
+login_guest:   db "guest", 0
+
+; User system strings
+s_root:        db "root", 0
+s_rootpass:    db "root", 0
+s_guest:       db "guest", 0
+s_rootdir:     db "/root", 0
+s_guestdir:    db "/home/guest", 0
+s_at_flux:     db "@fluxos:", 0
+s_perm_denied: db "Permission denied", 0
+s_user_added:  db "User added: ", 0
+s_root_only:   db "Only root can do that", 0
+s_user_exists: db "User already exists", 0
+s_users_full:  db "User table full", 0
+
+; ATA/disk strings
+s_disk_detect: db "ATA: ", 0
+s_disk_found:  db "Primary drive detected", 0
+s_disk_none:   db "No drive detected", 0
+s_disk_saved:  db "Filesystem saved to disk", 0
+s_disk_loaded: db "Filesystem loaded from disk", 0
+s_disk_nodata: db "No saved data on disk", 0
+s_disk_err:    db "Disk I/O error", 0
+s_disk_status: db "Disk: ", 0
+s_disk_avail:  db "Available (ATA PIO)", 0
+s_disk_unavail: db "Not available", 0
+s_sectors:     db " sectors used", 0
+
+; Network strings
+s_net_mac:     db "MAC: 52:54:00:12:34:56", 0
+s_net_ip:      db "IP:  10.0.2.15", 0
+s_net_mask:    db "Mask: 255.255.255.0", 0
+s_net_gw:      db "GW:  10.0.2.2", 0
+s_net_iface:   db "eth0 (simulated)", 0
+s_ping_prefix: db "PING ", 0
+s_ping_reply:  db " bytes from ", 0
+s_ping_64:     db "64", 0
+s_ping_seq:    db ": icmp_seq=", 0
+s_ping_ttl:    db " ttl=64 time=", 0
+s_ping_ms:     db "ms", 0
+s_ping_stats:  db "--- ping statistics ---", 0
+s_ping_summ:   db "4 packets sent, 4 received", 0
+s_no_arg:      db "Missing argument", 0
+
+; Pipe strings
+s_pipe_sep:    db " | ", 0
+
+; wc output
+s_lines:       db " lines ", 0
+s_words:       db " words ", 0
+s_chars:       db " chars", 0
 
 ; ═══════════════════════════════════════════════════
 ; Text — Entry Point
@@ -281,10 +411,27 @@ _start:
     mov byte [pre_cmd_row], 0
     mov dword [tick_count], 0
     mov word [pit_last], 0
+    mov byte [pipe_active], 0
+    mov byte [pipe_input], 0
+    mov dword [pipe_len], 0
 
     call pit_init
     call mem_init
+    call user_init
     call fs_init
+    call ata_detect
+
+    ; Try auto-load from disk
+    cmp byte [ata_present], 1
+    jne .no_autoload
+    call disk_load_fs
+.no_autoload:
+
+    ; Show login screen
+    call login_screen
+    jmp .post_login
+
+.post_login:
     call draw_ui
     call update_panel
 
@@ -345,6 +492,377 @@ mem_init:
     mov al, 0xFF
     rep stosb
     mov dword [mem_used_pg], 512
+    ret
+
+; ═══════════════════════════════════════════════════
+; User System Init
+; ═══════════════════════════════════════════════════
+user_init:
+    push eax
+    push ecx
+    push edi
+    push esi
+    ; Clear user table
+    mov edi, user_table
+    mov ecx, MAX_USERS * USER_ENTRY_SZ
+    xor al, al
+    rep stosb
+    mov byte [user_count], 0
+    mov byte [current_uid], 0
+
+    ; Add root user (uid 0)
+    mov edi, user_table
+    mov esi, s_root
+    call .copy_str16        ; name
+    add edi, USER_NAME_SZ
+    mov esi, s_rootpass
+    call .copy_str16        ; password
+    add edi, USER_PASS_SZ
+    mov esi, .s_root_home
+    call .copy_str32        ; home
+    add edi, USER_HOME_SZ
+    mov byte [edi], 0       ; uid = 0
+    inc byte [user_count]
+
+    ; Add guest user (uid 1)
+    mov edi, user_table + USER_ENTRY_SZ
+    mov esi, s_guest
+    call .copy_str16
+    add edi, USER_NAME_SZ
+    ; empty password for guest
+    mov byte [edi], 0
+    add edi, USER_PASS_SZ
+    mov esi, .s_guest_home
+    call .copy_str32
+    add edi, USER_HOME_SZ
+    mov byte [edi], 1       ; uid = 1
+    inc byte [user_count]
+
+    pop esi
+    pop edi
+    pop ecx
+    pop eax
+    ret
+
+.copy_str16:
+    push ecx
+    mov ecx, 15
+.cs16:
+    lodsb
+    mov [edi], al
+    test al, al
+    jz .cs16d
+    inc edi
+    dec ecx
+    jnz .cs16
+    mov byte [edi], 0
+.cs16d:
+    pop ecx
+    ret
+
+.copy_str32:
+    push ecx
+    mov ecx, 31
+.cs32:
+    lodsb
+    mov [edi], al
+    test al, al
+    jz .cs32d
+    inc edi
+    dec ecx
+    jnz .cs32
+    mov byte [edi], 0
+.cs32d:
+    pop ecx
+    ret
+
+.s_root_home:  db "/root", 0
+.s_guest_home: db "/home/guest", 0
+
+; ═══════════════════════════════════════════════════
+; Login Screen
+; ═══════════════════════════════════════════════════
+login_screen:
+    push eax
+    push ebx
+    push ecx
+    push edx
+    push esi
+    push edi
+
+    ; Clear screen
+    mov edi, VGA_BASE
+    mov ecx, VGA_COLS * VGA_ROWS
+    mov ax, 0x0020
+    rep stosw
+
+    ; Draw logo centered
+    mov eax, 5
+    mov edx, 30
+    mov esi, logo1
+    mov bl, COL_LOGO
+    call draw_at
+    mov eax, 6
+    mov edx, 30
+    mov esi, logo2
+    call draw_at
+    mov eax, 7
+    mov edx, 30
+    mov esi, logo3
+    call draw_at
+    mov eax, 8
+    mov edx, 30
+    mov esi, logo4
+    call draw_at
+    mov eax, 9
+    mov edx, 30
+    mov esi, logo5
+    call draw_at
+
+    ; Banner
+    mov eax, 11
+    mov edx, 28
+    mov esi, login_banner1
+    mov bl, COL_VER
+    call draw_at
+    mov eax, 12
+    mov edx, 28
+    mov esi, login_banner2
+    mov bl, COL_BORDER
+    call draw_at
+
+.login_retry:
+    ; Clear username/password lines
+    mov eax, 14
+    mov edx, 28
+    call vga_off
+    mov ecx, 40
+    mov ax, 0x0020
+    rep stosw
+    mov eax, 15
+    mov edx, 28
+    call vga_off
+    mov ecx, 40
+    mov ax, 0x0020
+    rep stosw
+    mov eax, 17
+    mov edx, 28
+    call vga_off
+    mov ecx, 40
+    mov ax, 0x0020
+    rep stosw
+
+    ; Username prompt
+    mov eax, 14
+    mov edx, 28
+    mov esi, login_user_p
+    mov bl, COL_PROMPT
+    call draw_at
+
+    ; Read username
+    mov byte [login_len], 0
+    mov edi, login_buf
+    mov ecx, 30
+    xor al, al
+    rep stosb
+
+    ; Cursor at row 14, col 40
+    mov eax, 14
+    mov edx, 40
+.lu_loop:
+    call pit_poll
+    call read_key
+    test al, al
+    jz .lu_loop
+    cmp al, 13
+    je .lu_done
+    cmp al, 8
+    je .lu_bs
+    cmp al, 27
+    je .lu_loop
+    movzx ecx, byte [login_len]
+    cmp ecx, 15
+    jge .lu_loop
+    mov [login_buf + ecx], al
+    inc byte [login_len]
+    ; Display char
+    push eax
+    push edx
+    mov eax, 14
+    movzx edx, byte [login_len]
+    add edx, 39
+    call vga_off
+    pop edx
+    pop eax
+    mov [edi], al
+    mov byte [edi+1], COL_INPUT
+    jmp .lu_loop
+.lu_bs:
+    cmp byte [login_len], 0
+    je .lu_loop
+    dec byte [login_len]
+    push eax
+    push edx
+    mov eax, 14
+    movzx edx, byte [login_len]
+    add edx, 40
+    call vga_off
+    mov byte [edi], ' '
+    mov byte [edi+1], COL_INPUT
+    pop edx
+    pop eax
+    jmp .lu_loop
+.lu_done:
+    movzx ecx, byte [login_len]
+    mov byte [login_buf + ecx], 0
+
+    ; Check for guest (no password needed)
+    mov esi, login_buf
+    mov edi, s_guest
+    call strcmp
+    je .login_as_guest
+
+    ; Password prompt
+    mov eax, 15
+    mov edx, 28
+    mov esi, login_pass_p
+    mov bl, COL_PROMPT
+    call draw_at
+
+    ; Read password into arg1 (reuse buffer)
+    mov byte [arg1], 0
+    xor ecx, ecx  ; length counter
+.lp_loop:
+    call pit_poll
+    call read_key
+    test al, al
+    jz .lp_loop
+    cmp al, 13
+    je .lp_done
+    cmp al, 8
+    je .lp_bs
+    cmp ecx, 15
+    jge .lp_loop
+    mov [arg1 + ecx], al
+    inc ecx
+    ; Show asterisk
+    push eax
+    push edx
+    push ecx
+    mov eax, 15
+    lea edx, [ecx + 39]
+    call vga_off
+    mov byte [edi], '*'
+    mov byte [edi+1], COL_INPUT
+    pop ecx
+    pop edx
+    pop eax
+    jmp .lp_loop
+.lp_bs:
+    test ecx, ecx
+    jz .lp_loop
+    dec ecx
+    push eax
+    push edx
+    push ecx
+    mov eax, 15
+    lea edx, [ecx + 40]
+    call vga_off
+    mov byte [edi], ' '
+    mov byte [edi+1], COL_INPUT
+    pop ecx
+    pop edx
+    pop eax
+    jmp .lp_loop
+.lp_done:
+    mov byte [arg1 + ecx], 0
+
+    ; Verify credentials
+    call user_authenticate
+    cmp eax, -1
+    je .login_failed
+
+    mov [current_uid], al
+    jmp .login_success
+
+.login_as_guest:
+    mov byte [current_uid], 1
+    jmp .login_success
+
+.login_failed:
+    mov eax, 17
+    mov edx, 28
+    mov esi, login_fail
+    mov bl, COL_ERR
+    call draw_at
+    ; Wait a second
+    mov eax, 100
+    call wait_ticks
+    jmp .login_retry
+
+.login_success:
+    mov eax, 17
+    mov edx, 28
+    mov esi, login_ok
+    mov bl, COL_OK
+    call draw_at
+    mov eax, 50
+    call wait_ticks
+
+    pop edi
+    pop esi
+    pop edx
+    pop ecx
+    pop ebx
+    pop eax
+    ret
+
+; user_authenticate: login_buf=username, arg1=password -> eax=uid or -1
+user_authenticate:
+    push ebx
+    push ecx
+    push edx
+    push esi
+    push edi
+    movzx ecx, byte [user_count]
+    xor ebx, ebx
+.ua_loop:
+    cmp ebx, ecx
+    jge .ua_fail
+    ; Compare username
+    imul edx, ebx, USER_ENTRY_SZ
+    lea esi, [user_table + edx]
+    mov edi, login_buf
+    push ecx
+    push ebx
+    call strcmp
+    pop ebx
+    pop ecx
+    jne .ua_next
+    ; Compare password
+    imul edx, ebx, USER_ENTRY_SZ
+    lea esi, [user_table + edx + USER_NAME_SZ]
+    mov edi, arg1
+    push ecx
+    push ebx
+    call strcmp
+    pop ebx
+    pop ecx
+    jne .ua_next
+    ; Match
+    mov eax, ebx
+    jmp .ua_ret
+.ua_next:
+    inc ebx
+    jmp .ua_loop
+.ua_fail:
+    mov eax, -1
+.ua_ret:
+    pop edi
+    pop esi
+    pop edx
+    pop ecx
+    pop ebx
     ret
 
 ; ═══════════════════════════════════════════════════
@@ -410,6 +928,7 @@ fs_init:
     push dword 0
     call fs_add_entry
     add esp, 12
+    push eax                ; save home index
 
     ; /tmp (dir, parent=0)
     push dword .s_tmp
@@ -417,6 +936,22 @@ fs_init:
     push dword 0
     call fs_add_entry
     add esp, 12
+
+    ; /root (dir, parent=0)
+    push dword .s_rootdir
+    push dword FS_DIR
+    push dword 0
+    call fs_add_entry
+    add esp, 12
+
+    ; /home/guest (dir, parent=home)
+    pop eax                 ; home index
+    push dword .s_guestdir
+    push dword FS_DIR
+    push eax
+    call fs_add_entry
+    add esp, 12
+
     ret
 
 .s_readme: db "README", 0
@@ -424,6 +959,8 @@ fs_init:
 .s_motd:   db "motd", 0
 .s_home:   db "home", 0
 .s_tmp:    db "tmp", 0
+.s_rootdir: db "root", 0
+.s_guestdir: db "guest", 0
 
 ; fs_add_entry(parent, type, name_ptr) -> eax=index
 ; Stack: [esp+4]=parent, [esp+8]=type, [esp+12]=name_ptr
@@ -762,18 +1299,8 @@ update_panel:
     mov esi, pathbuf
     mov bl, COL_VER
     call draw_at
-    mov eax, 2
-    mov edx, 58
-    mov esi, dir_home
-    mov bl, COL_DIR
-    call draw_at
-    mov eax, 2
-    mov edx, 61
-    mov esi, home_lbl
-    mov bl, COL_OUTPUT
-    call draw_at
     ; File count
-    mov eax, 3
+    mov eax, 2
     mov edx, 58
     mov esi, panel_files
     mov bl, COL_DIR
@@ -782,16 +1309,52 @@ update_panel:
     movzx eax, byte [fs_count]
     call itoa
     pop eax
-    mov eax, 3
+    mov eax, 2
     mov edx, 66
     mov esi, numbuf
     mov bl, COL_OUTPUT
+    call draw_at
+    ; Current user
+    mov eax, 3
+    mov edx, 58
+    mov esi, panel_user
+    mov bl, COL_DIR
+    call draw_at
+    ; Get username
+    push eax
+    movzx eax, byte [current_uid]
+    imul eax, USER_ENTRY_SZ
+    lea esi, [user_table + eax]
+    pop eax
+    mov eax, 3
+    mov edx, 64
+    mov bl, COL_VER
+    call draw_at
+    ; Disk status
+    mov eax, 4
+    mov edx, 58
+    mov esi, s_disk_status
+    mov bl, COL_DIR
+    call draw_at
+    mov eax, 4
+    mov edx, 64
+    cmp byte [ata_present], 1
+    jne .up_nodisk
+    mov esi, .s_yes
+    mov bl, COL_OK
+    jmp .up_ddone
+.up_nodisk:
+    mov esi, .s_no
+    mov bl, COL_ERR
+.up_ddone:
     call draw_at
     pop esi
     pop ecx
     pop edx
     pop eax
     ret
+.s_yes: db "Yes", 0
+.s_no:  db "No", 0
 
 ; ═══════════════════════════════════════════════════
 ; VGA helpers
@@ -828,10 +1391,13 @@ draw_at:
     ret
 
 ; ═══════════════════════════════════════════════════
-; Left pane output
+; Left pane output (with pipe support)
 ; ═══════════════════════════════════════════════════
 lp_putc:
     ; al=char, ah=color
+    ; If pipe_active, write to pipe_buf instead
+    cmp byte [pipe_active], 1
+    je .lpc_pipe
     push ebx
     push ecx
     push edx
@@ -861,8 +1427,21 @@ lp_putc:
 .lpc_scroll:
     call lp_scroll
     jmp lp_putc
+.lpc_pipe:
+    ; Write char to pipe buffer
+    push ebx
+    mov ebx, [pipe_len]
+    cmp ebx, PIPE_BUF_SZ - 1
+    jge .lpc_pipe_full
+    mov [pipe_buf + ebx], al
+    inc dword [pipe_len]
+.lpc_pipe_full:
+    pop ebx
+    ret
 
 lp_newline:
+    cmp byte [pipe_active], 1
+    je .ln_pipe
     mov byte [left_col], 0
     inc byte [left_row]
     movzx eax, byte [left_row]
@@ -872,6 +1451,17 @@ lp_newline:
     call lp_scroll
 .ln_ok:
     call lp_cursor
+    ret
+.ln_pipe:
+    ; Write newline char to pipe buffer
+    push ebx
+    mov ebx, [pipe_len]
+    cmp ebx, PIPE_BUF_SZ - 1
+    jge .ln_pipe_full
+    mov byte [pipe_buf + ebx], 10  ; LF
+    inc dword [pipe_len]
+.ln_pipe_full:
+    pop ebx
     ret
 
 lp_print:
@@ -1026,7 +1616,6 @@ add_hist:
     push eax
     push edi
     ; Restore original esi from stack
-    ; Stack: [esp]=edi, [esp+4]=eax, [esp+8]=saved_esi, [esp+12]=saved_edi_orig, ...
     mov esi, [esp + 8]    ; original esi (command string)
     mov ecx, HIST_W - 1
 .ah_c:
@@ -1053,7 +1642,6 @@ add_hist:
     rep stosb
     pop edi
     ; Copy command string
-    ; Stack: [esp]=eax, [esp+4]=saved_esi, [esp+8]=saved_edi, ...
     mov esi, [esp + 4]    ; original esi (cmd string)
     mov ecx, 63
 .ah_ecmd:
@@ -1120,7 +1708,6 @@ draw_hist_panel:
     jz .dhp_done
 
     ; Draw from newest (top) to oldest
-    ; ecx = count, we draw index (ecx-1) down to 0
     mov eax, PANE_TOP       ; current screen row
     dec ecx                 ; start index = count-1
 
@@ -1198,7 +1785,6 @@ draw_hist_panel:
     mov edx, RIGHT_S + 2
     mov bl, COL_OUTPUT
     call draw_at
-    ; esi advanced past the string already by draw_at
     pop esi
     pop edi
     pop ebx
@@ -1254,9 +1840,6 @@ wait_ticks:
 
 ; ═══════════════════════════════════════════════════
 ; Capture output: store output lines for hist entry
-; Call after command execution.
-; Uses pre_cmd_row (saved before exec) and current left_row.
-; eax = hist entry index
 ; ═══════════════════════════════════════════════════
 capture_output:
     push eax
@@ -1284,7 +1867,6 @@ capture_output:
     mov [hist_entries + eax + HIST_OLINES_OFF], bl
 
     ; Copy lines from VGA memory
-    ; Source: row (pre_cmd_row + PANE_TOP) through (pre_cmd_row + PANE_TOP + ebx - 1)
     movzx ecx, byte [pre_cmd_row]
     add ecx, PANE_TOP          ; start screen row
     xor edx, edx               ; line counter
@@ -1299,7 +1881,7 @@ capture_output:
     mov eax, ecx
     push edx
     mov edx, 0
-    call vga_off               ; edi_vga = edi (but we need edi for output)
+    call vga_off
     pop edx
     pop eax
     ; edi now points to VGA row -- save our output dest
@@ -1380,7 +1962,6 @@ capture_output:
 
 ; ═══════════════════════════════════════════════════
 ; Expand animation for history entry
-; ecx = hist entry index
 ; ═══════════════════════════════════════════════════
 expand_animation:
     push eax
@@ -1399,21 +1980,13 @@ expand_animation:
     test ebx, ebx
     jz .ea_done
 
-    ; Redraw with animation: draw each output line with fade
-    ; First redraw to show arrow change
     call draw_hist_panel
 
-    ; Now animate: for each output line, fade in
-    ; Find screen row of this entry's first output line
-    ; We need to figure out which row the entry is on
-    ; For simplicity, just redraw with increasing brightness
-    ; Step through fade colors: dark -> medium -> bright
     xor edi, edi             ; output line index
 .ea_line:
     cmp edi, ebx
     jge .ea_final
 
-    ; Wait with ease-out delay
     push eax
     cmp edi, 4
     jg .ea_def_delay
@@ -1425,7 +1998,6 @@ expand_animation:
     call wait_ticks
     pop eax
 
-    ; Redraw panel (the line is already there, just visible)
     call draw_hist_panel
 
     inc edi
@@ -1444,7 +2016,6 @@ expand_animation:
 
 ; ═══════════════════════════════════════════════════
 ; Collapse animation for history entry
-; ecx = hist entry index
 ; ═══════════════════════════════════════════════════
 collapse_animation:
     push eax
@@ -1459,8 +2030,6 @@ collapse_animation:
     test ebx, ebx
     jz .ca_mark
 
-    ; Animate fade out: briefly flash darker colors
-    ; Quick reverse: redraw a couple times with delays
     mov edi, ebx
     dec edi
 .ca_line:
@@ -1504,7 +2073,6 @@ right_panel_loop:
 
     ; Set focus to right panel
     mov byte [focus_panel], 1
-    ; Set selected to newest entry if count > 0
     movzx eax, byte [hist_entry_cnt]
     test eax, eax
     jz .rpl_exit
@@ -1537,14 +2105,14 @@ right_panel_loop:
     movzx ecx, byte [hist_entry_cnt]
     dec ecx
     cmp eax, ecx
-    jge .rpl_input            ; already at top (newest)
+    jge .rpl_input
     inc byte [hist_selected]
     call draw_hist_panel
     jmp .rpl_input
 
 .rpl_down:
     cmp byte [hist_selected], 0
-    je .rpl_input             ; already at bottom (oldest)
+    je .rpl_input
     dec byte [hist_selected]
     call draw_hist_panel
     jmp .rpl_input
@@ -1561,7 +2129,6 @@ right_panel_loop:
     imul edx, ecx, HIST_ENTRY_SIZE
     cmp byte [hist_entries + edx + HIST_EXP_OFF], 0
     jne .rpl_collapse
-    ; Expand
     call expand_animation
     jmp .rpl_input
 .rpl_collapse:
@@ -1571,7 +2138,6 @@ right_panel_loop:
 .rpl_exit:
     mov byte [focus_panel], 0
     call draw_hist_panel
-    ; Restore cursor to left pane
     call lp_cursor
     pop eax
     ret
@@ -1579,11 +2145,6 @@ right_panel_loop:
 ; ═══════════════════════════════════════════════════
 ; Keyboard (polling)
 ; ═══════════════════════════════════════════════════
-; Returns: al = ASCII char, or special codes:
-;   0xFF = up arrow (recall), 9 = tab, 0xFE = Ctrl+Alt+Right,
-;   0xFD = Ctrl+Alt+Left, 0xFC = arrow up (hist nav),
-;   0xFB = arrow down (hist nav), 0xFA = Enter (hist)
-;   0 = nothing
 read_key:
     push edx
     in al, KBD_STATUS
@@ -1610,7 +2171,6 @@ read_key:
     je .rk_no_ctrlalt
     cmp byte [alt_held], 0
     je .rk_no_ctrlalt
-    ; Ctrl+Alt held -- check arrows
     cmp al, SC_RIGHT
     je .rk_ca_right
     cmp al, SC_LEFT
@@ -1627,14 +2187,12 @@ read_key:
     ; If right panel focused, handle nav keys
     cmp byte [focus_panel], 1
     jne .rk_normal
-    ; Right panel mode: Up/Down/Enter
     cmp al, SC_UP
     je .rk_hist_up
     cmp al, SC_DOWN
     je .rk_hist_down
     cmp al, SC_ENTER
     je .rk_hist_enter
-    ; Ignore other keys when right panel focused
     xor al, al
     jmp .rk_done
 .rk_hist_up:
@@ -1648,13 +2206,10 @@ read_key:
     jmp .rk_done
 
 .rk_normal:
-    ; Up arrow?
     cmp al, SC_UP
     je .rk_up
-    ; Tab?
     cmp al, SC_TAB
     je .rk_tab
-    ; Normal
     cmp al, 0x39
     ja .rk_none
     movzx eax, al
@@ -1891,6 +2446,596 @@ parse_args:
     ret
 
 ; ═══════════════════════════════════════════════════
+; Pipe support: check for | in command, split and execute
+; ═══════════════════════════════════════════════════
+; check_pipe: scan cmd_buf for '|'. If found, split into
+; left command (cmd_buf) and right command (orig_cmd_buf),
+; execute left with pipe_active=1, then execute right with pipe_input=1
+; Returns: al=1 if pipe was found and handled, al=0 otherwise
+check_pipe:
+    push ebx
+    push ecx
+    push edx
+    push esi
+    push edi
+    ; Scan for '|'
+    mov esi, cmd_buf
+    xor ecx, ecx
+.cp_scan:
+    mov al, [esi + ecx]
+    test al, al
+    jz .cp_nopipe
+    cmp al, '|'
+    je .cp_found
+    inc ecx
+    cmp ecx, 127
+    jge .cp_nopipe
+    jmp .cp_scan
+
+.cp_found:
+    ; Found pipe at offset ecx
+    ; Null-terminate left command (trim trailing spaces)
+    mov byte [esi + ecx], 0
+    ; Trim trailing spaces from left side
+    dec ecx
+.cp_triml:
+    cmp ecx, 0
+    jl .cp_triml_done
+    cmp byte [esi + ecx], ' '
+    jne .cp_triml_done
+    mov byte [esi + ecx], 0
+    dec ecx
+    jmp .cp_triml
+.cp_triml_done:
+    inc ecx
+    mov [orig_cmd_len], cl
+
+    ; Copy right command to orig_cmd_buf (skip | and leading spaces)
+    mov esi, cmd_buf
+    add esi, ecx
+    ; esi now points to the null where | was; find start of right cmd
+    ; Actually we nulled the |, so we need original position
+    ; Let me re-find: the | was at the position we stored
+    ; We need to go past the null to find the right side
+    inc esi     ; skip the null (was |)
+.cp_skip_sp:
+    cmp byte [esi], ' '
+    jne .cp_copy_right
+    inc esi
+    jmp .cp_skip_sp
+.cp_copy_right:
+    mov edi, orig_cmd_buf
+    mov ecx, 127
+.cp_cpr:
+    lodsb
+    stosb
+    test al, al
+    jz .cp_cpr_done
+    dec ecx
+    jnz .cp_cpr
+    mov byte [edi], 0
+.cp_cpr_done:
+
+    ; Execute left command with output to pipe buffer
+    mov dword [pipe_len], 0
+    mov byte [pipe_active], 1
+    mov byte [pipe_input], 0
+
+    ; We need to recalculate cmd_len for the left part
+    mov esi, cmd_buf
+    xor ecx, ecx
+.cp_leftlen:
+    cmp byte [esi + ecx], 0
+    je .cp_leftlen_done
+    inc ecx
+    jmp .cp_leftlen
+.cp_leftlen_done:
+    mov [cmd_len], cl
+
+    call parse_args
+    call exec_command
+
+    mov byte [pipe_active], 0
+    ; Null-terminate pipe buffer
+    mov ecx, [pipe_len]
+    mov byte [pipe_buf + ecx], 0
+
+    ; Now set up right command
+    mov esi, orig_cmd_buf
+    mov edi, cmd_buf
+    mov ecx, 128
+.cp_copy_back:
+    lodsb
+    stosb
+    test al, al
+    jz .cp_copy_back_done
+    dec ecx
+    jnz .cp_copy_back
+.cp_copy_back_done:
+    ; Recalculate cmd_len
+    mov esi, cmd_buf
+    xor ecx, ecx
+.cp_rightlen:
+    cmp byte [esi + ecx], 0
+    je .cp_rightlen_done
+    inc ecx
+    jmp .cp_rightlen
+.cp_rightlen_done:
+    mov [cmd_len], cl
+
+    ; Execute right command with pipe as input
+    mov byte [pipe_input], 1
+    call parse_args
+    call exec_command
+    mov byte [pipe_input], 0
+
+    mov al, 1
+    pop edi
+    pop esi
+    pop edx
+    pop ecx
+    pop ebx
+    ret
+
+.cp_nopipe:
+    mov al, 0
+    pop edi
+    pop esi
+    pop edx
+    pop ecx
+    pop ebx
+    ret
+
+; ═══════════════════════════════════════════════════
+; ATA Disk Driver (PIO mode)
+; ═══════════════════════════════════════════════════
+ata_detect:
+    push eax
+    push edx
+    mov byte [ata_present], 0
+    ; Select drive 0
+    mov dx, ATA_DRIVE
+    mov al, 0xA0
+    out dx, al
+    ; Small delay
+    mov dx, ATA_STATUS
+    in al, dx
+    in al, dx
+    in al, dx
+    in al, dx
+    ; Check status
+    in al, dx
+    cmp al, 0xFF
+    je .ad_none
+    test al, al
+    jz .ad_none
+    mov byte [ata_present], 1
+.ad_none:
+    pop edx
+    pop eax
+    ret
+
+; ata_read_sector: eax=LBA sector number, edi=dest buffer (512 bytes)
+ata_read_sector:
+    push eax
+    push ebx
+    push ecx
+    push edx
+    mov ebx, eax        ; save LBA
+
+    ; Wait for drive ready
+    mov dx, ATA_STATUS
+.ars_wait1:
+    in al, dx
+    test al, 0x80       ; BSY
+    jnz .ars_wait1
+
+    ; Set sector count = 1
+    mov dx, ATA_COUNT
+    mov al, 1
+    out dx, al
+
+    ; LBA low
+    mov dx, ATA_LBALO
+    mov al, bl
+    out dx, al
+
+    ; LBA mid
+    mov dx, ATA_LBAMID
+    mov eax, ebx
+    shr eax, 8
+    out dx, al
+
+    ; LBA high
+    mov dx, ATA_LBAHI
+    mov eax, ebx
+    shr eax, 16
+    out dx, al
+
+    ; Drive/head with LBA bit
+    mov dx, ATA_DRIVE
+    mov eax, ebx
+    shr eax, 24
+    and al, 0x0F
+    or al, 0xE0         ; LBA mode, drive 0
+    out dx, al
+
+    ; Send read command
+    mov dx, ATA_CMD
+    mov al, 0x20
+    out dx, al
+
+    ; Wait for data ready
+    mov dx, ATA_STATUS
+.ars_wait2:
+    in al, dx
+    test al, 0x80       ; BSY
+    jnz .ars_wait2
+    test al, 0x08       ; DRQ
+    jz .ars_wait2
+
+    ; Read 256 words (512 bytes)
+    mov dx, ATA_DATA
+    mov ecx, 256
+    rep insw
+
+    pop edx
+    pop ecx
+    pop ebx
+    pop eax
+    ret
+
+; ata_write_sector: eax=LBA sector number, esi=source buffer (512 bytes)
+ata_write_sector:
+    push eax
+    push ebx
+    push ecx
+    push edx
+    mov ebx, eax        ; save LBA
+
+    ; Wait for drive ready
+    mov dx, ATA_STATUS
+.aws_wait1:
+    in al, dx
+    test al, 0x80
+    jnz .aws_wait1
+
+    ; Sector count = 1
+    mov dx, ATA_COUNT
+    mov al, 1
+    out dx, al
+
+    ; LBA
+    mov dx, ATA_LBALO
+    mov al, bl
+    out dx, al
+    mov dx, ATA_LBAMID
+    mov eax, ebx
+    shr eax, 8
+    out dx, al
+    mov dx, ATA_LBAHI
+    mov eax, ebx
+    shr eax, 16
+    out dx, al
+    mov dx, ATA_DRIVE
+    mov eax, ebx
+    shr eax, 24
+    and al, 0x0F
+    or al, 0xE0
+    out dx, al
+
+    ; Write command
+    mov dx, ATA_CMD
+    mov al, 0x30
+    out dx, al
+
+    ; Wait for ready
+    mov dx, ATA_STATUS
+.aws_wait2:
+    in al, dx
+    test al, 0x80
+    jnz .aws_wait2
+    test al, 0x08
+    jz .aws_wait2
+
+    ; Write 256 words
+    mov dx, ATA_DATA
+    mov ecx, 256
+    rep outsw
+
+    ; Flush cache
+    mov dx, ATA_CMD
+    mov al, 0xE7
+    out dx, al
+    mov dx, ATA_STATUS
+.aws_flush:
+    in al, dx
+    test al, 0x80
+    jnz .aws_flush
+
+    pop edx
+    pop ecx
+    pop ebx
+    pop eax
+    ret
+
+; ═══════════════════════════════════════════════════
+; Disk save/load filesystem
+; ═══════════════════════════════════════════════════
+; Format on disk:
+;   Sector 100: Magic(4) + fs_count(4) + padding to 512
+;   Sector 101+: fs_tab entries (64 bytes each, 8 per sector)
+;   After fs_tab: file data blocks
+
+disk_save_fs:
+    push eax
+    push ebx
+    push ecx
+    push edx
+    push esi
+    push edi
+
+    cmp byte [ata_present], 1
+    jne .dsf_err
+
+    ; Build header sector
+    mov edi, disk_sector_buf
+    mov ecx, 512
+    xor al, al
+    rep stosb              ; clear buffer
+
+    mov edi, disk_sector_buf
+    mov dword [edi], DISK_MAGIC
+    movzx eax, byte [fs_count]
+    mov [edi + 4], eax
+
+    ; Write header to sector 100
+    mov eax, DISK_START_SEC
+    mov esi, disk_sector_buf
+    call ata_write_sector
+
+    ; Write fs_tab: 64 entries * 64 bytes = 4096 bytes = 8 sectors
+    mov ecx, 0             ; sector offset
+    mov ebx, 0             ; byte offset in fs_tab
+.dsf_tab_loop:
+    cmp ecx, 8
+    jge .dsf_data
+
+    ; Copy 512 bytes of fs_tab to sector buffer
+    push ecx
+    mov edi, disk_sector_buf
+    lea esi, [fs_tab + ebx]
+    mov ecx, 512
+    rep movsb
+    pop ecx
+
+    ; Write sector
+    push ecx
+    lea eax, [DISK_START_SEC + 1]
+    add eax, ecx
+    mov esi, disk_sector_buf
+    call ata_write_sector
+    pop ecx
+
+    add ebx, 512
+    inc ecx
+    jmp .dsf_tab_loop
+
+.dsf_data:
+    ; Now write file content data
+    ; For each file entry with data, write its content
+    ; We'll write the heap region
+    ; Sector 109+: heap data
+    mov esi, heap
+    mov eax, [heap_ptr]
+    sub eax, esi           ; eax = bytes used in heap
+    test eax, eax
+    jz .dsf_done
+
+    mov ebx, eax           ; total bytes to write
+    mov ecx, 0             ; sector counter
+.dsf_heap_loop:
+    cmp ebx, 0
+    jle .dsf_done
+
+    ; Copy up to 512 bytes to sector buffer
+    push ecx
+    push ebx
+    mov edi, disk_sector_buf
+    ; Clear buffer first
+    push ecx
+    push edi
+    mov ecx, 512
+    xor al, al
+    rep stosb
+    pop edi
+    pop ecx
+
+    ; Copy bytes
+    cmp ebx, 512
+    jle .dsf_partial
+    mov ecx, 512
+    jmp .dsf_copy
+.dsf_partial:
+    mov ecx, ebx
+.dsf_copy:
+    rep movsb              ; esi advances through heap
+    pop ebx
+    pop ecx
+
+    ; Write sector
+    push ecx
+    push esi
+    lea eax, [DISK_START_SEC + 9]
+    add eax, ecx
+    mov esi, disk_sector_buf
+    call ata_write_sector
+    pop esi
+    pop ecx
+
+    sub ebx, 512
+    inc ecx
+    jmp .dsf_heap_loop
+
+.dsf_done:
+    pop edi
+    pop esi
+    pop edx
+    pop ecx
+    pop ebx
+    pop eax
+    ret
+
+.dsf_err:
+    pop edi
+    pop esi
+    pop edx
+    pop ecx
+    pop ebx
+    pop eax
+    ret
+
+; disk_load_fs: load filesystem from disk
+disk_load_fs:
+    push eax
+    push ebx
+    push ecx
+    push edx
+    push esi
+    push edi
+
+    cmp byte [ata_present], 1
+    jne .dlf_done
+
+    ; Read header sector
+    mov eax, DISK_START_SEC
+    mov edi, disk_sector_buf
+    call ata_read_sector
+
+    ; Check magic
+    cmp dword [disk_sector_buf], DISK_MAGIC
+    jne .dlf_done
+
+    ; Get fs_count
+    mov eax, [disk_sector_buf + 4]
+    cmp eax, FS_MAXF
+    jg .dlf_done
+    mov [fs_count], al
+
+    ; Read fs_tab: 8 sectors
+    mov ecx, 0
+    mov ebx, 0
+.dlf_tab_loop:
+    cmp ecx, 8
+    jge .dlf_heap
+
+    push ecx
+    lea eax, [DISK_START_SEC + 1]
+    add eax, ecx
+    lea edi, [fs_tab + ebx]
+    call ata_read_sector
+    pop ecx
+
+    add ebx, 512
+    inc ecx
+    jmp .dlf_tab_loop
+
+.dlf_heap:
+    ; Read heap data
+    ; We need to know how much heap was used
+    ; Reconstruct heap_ptr from file entries
+    mov eax, heap
+    mov [heap_ptr], eax
+
+    ; Read heap sectors (read up to 128 sectors = 64KB)
+    mov ecx, 0
+    mov edi, heap
+.dlf_heap_loop:
+    cmp ecx, 128
+    jge .dlf_fixptrs
+
+    push ecx
+    push edi
+    lea eax, [DISK_START_SEC + 9]
+    add eax, ecx
+    call ata_read_sector
+    pop edi
+    pop ecx
+
+    add edi, 512
+    inc ecx
+    jmp .dlf_heap_loop
+
+.dlf_fixptrs:
+    ; Fix heap_ptr by scanning entries for max (dptr + size)
+    movzx ecx, byte [fs_count]
+    mov ebx, 0             ; max end
+    xor edx, edx
+.dlf_scan:
+    cmp edx, ecx
+    jge .dlf_setptr
+    imul eax, edx, FS_ENTRY_SZ
+    cmp byte [fs_tab + eax + FS_TYPE], FS_FILE
+    jne .dlf_scan_next
+    mov eax, [fs_tab + eax + FS_DPTR]
+    test eax, eax
+    jz .dlf_scan_next
+    ; eax = data pointer; add size
+    push edx
+    imul edx, edx, FS_ENTRY_SZ
+    add eax, [fs_tab + edx + FS_SIZE]
+    inc eax                ; null terminator
+    pop edx
+    cmp eax, ebx
+    jle .dlf_scan_next
+    mov ebx, eax
+.dlf_scan_next:
+    inc edx
+    jmp .dlf_scan
+.dlf_setptr:
+    test ebx, ebx
+    jz .dlf_done
+    mov [heap_ptr], ebx
+
+.dlf_done:
+    pop edi
+    pop esi
+    pop edx
+    pop ecx
+    pop ebx
+    pop eax
+    ret
+
+; ═══════════════════════════════════════════════════
+; Print prompt with user@fluxos:/path>
+; ═══════════════════════════════════════════════════
+print_prompt:
+    push eax
+    push esi
+    ; Print username
+    movzx eax, byte [current_uid]
+    imul eax, USER_ENTRY_SZ
+    lea esi, [user_table + eax]
+    mov bl, COL_OK
+    call lp_print
+    ; Print @fluxos:
+    mov esi, s_at_flux
+    mov bl, COL_OUTPUT
+    call lp_print
+    ; Print path
+    call build_path
+    mov esi, pathbuf
+    mov bl, COL_BLUE
+    call lp_print
+    ; Print >
+    mov esi, prompt_sfx
+    mov bl, COL_PROMPT
+    call lp_print
+    pop esi
+    pop eax
+    ret
+
+; ═══════════════════════════════════════════════════
 ; Command Loop
 ; ═══════════════════════════════════════════════════
 cmd_done:
@@ -1899,9 +3044,7 @@ cmd_done:
     call draw_hist_panel
 
 cmd_loop:
-    mov esi, prompt
-    mov bl, COL_PROMPT
-    call lp_print
+    call print_prompt
 
     mov byte [cmd_len], 0
     mov edi, cmd_buf
@@ -1992,9 +3135,9 @@ cmd_loop:
     mov esi, tab_cmds
     mov bl, COL_OUTPUT
     call lp_println
-    mov esi, prompt
-    mov bl, COL_PROMPT
-    call lp_print
+    mov esi, tab_cmds2
+    call lp_println
+    call print_prompt
     xor ecx, ecx
 .tab_rd:
     cmp cl, [cmd_len]
@@ -2033,8 +3176,20 @@ cmd_loop:
     mov al, [left_row]
     mov [pre_cmd_row], al
 
-    call parse_args
+    ; Check for pipe
+    call check_pipe
+    test al, al
+    jnz cmd_done
 
+    ; No pipe, execute normally
+    call parse_args
+    call exec_command
+    jmp cmd_done
+
+; ═══════════════════════════════════════════════════
+; exec_command: dispatch current cmd_buf to handler
+; ═══════════════════════════════════════════════════
+exec_command:
     ; Match exact commands
     mov esi, cmd_buf
     mov edi, c_help
@@ -2072,6 +3227,34 @@ cmd_loop:
     mov edi, c_ls
     call strcmp
     je .cmd_ls
+    mov esi, cmd_buf
+    mov edi, c_whoami
+    call strcmp
+    je .cmd_whoami
+    mov esi, cmd_buf
+    mov edi, c_login
+    call strcmp
+    je .cmd_login
+    mov esi, cmd_buf
+    mov edi, c_save
+    call strcmp
+    je .cmd_save
+    mov esi, cmd_buf
+    mov edi, c_load
+    call strcmp
+    je .cmd_load_disk
+    mov esi, cmd_buf
+    mov edi, c_disk
+    call strcmp
+    je .cmd_disk
+    mov esi, cmd_buf
+    mov edi, c_ifconfig
+    call strcmp
+    je .cmd_ifconfig
+    mov esi, cmd_buf
+    mov edi, c_wc
+    call strcmp
+    je .cmd_wc
 
     ; Prefix commands
     mov edi, c_cd
@@ -2095,6 +3278,15 @@ cmd_loop:
     mov edi, c_write
     call strcmp_pfx
     je .cmd_write
+    mov edi, c_adduser
+    call strcmp_pfx
+    je .cmd_adduser
+    mov edi, c_ping
+    call strcmp_pfx
+    je .cmd_ping
+    mov edi, c_grep
+    call strcmp_pfx
+    je .cmd_grep
 
     ; Unknown
     mov esi, unknown_msg
@@ -2103,7 +3295,7 @@ cmd_loop:
     mov esi, cmd_buf
     mov bl, COL_ERR
     call lp_println
-    jmp cmd_done
+    ret
 
 ; ── help ──
 .cmd_help:
@@ -2143,11 +3335,33 @@ cmd_loop:
     call lp_println
     mov esi, h16
     call lp_println
-    jmp cmd_done
+    mov esi, h17
+    call lp_println
+    mov esi, h18
+    call lp_println
+    mov esi, h19
+    call lp_println
+    mov esi, h20
+    call lp_println
+    mov esi, h21
+    call lp_println
+    mov esi, h22
+    call lp_println
+    mov esi, h23
+    call lp_println
+    mov esi, h24
+    call lp_println
+    mov esi, h25
+    call lp_println
+    mov esi, h26
+    call lp_println
+    mov esi, h27
+    call lp_println
+    ret
 
 .cmd_clear:
     call lp_clear
-    jmp cmd_done
+    ret
 
 .cmd_info:
     mov esi, info1
@@ -2162,20 +3376,22 @@ cmd_loop:
     call lp_println
     mov esi, info5
     call lp_println
-    jmp cmd_done
+    mov esi, info6
+    call lp_println
+    ret
 
 .cmd_hello:
     mov esi, hello_msg
     mov bl, COL_OK
     call lp_println
-    jmp cmd_done
+    ret
 
 .cmd_pwd:
     call build_path
     mov esi, pathbuf
     mov bl, COL_VER
     call lp_println
-    jmp cmd_done
+    ret
 
 .cmd_reboot:
     lidt [.null_idt]
@@ -2199,7 +3415,7 @@ cmd_loop:
     mov esi, s_seconds
     mov bl, COL_OUTPUT
     call lp_println
-    jmp cmd_done
+    ret
 
 .cmd_mem:
     mov esi, s_total
@@ -2238,7 +3454,7 @@ cmd_loop:
     mov esi, s_pages
     mov bl, COL_OUTPUT
     call lp_println
-    jmp cmd_done
+    ret
 
 ; ── ls ──
 .cmd_ls:
@@ -2277,12 +3493,12 @@ cmd_loop:
     inc ebx
     jmp .ls_lp
 .ls_done:
-    jmp cmd_done
+    ret
 
 ; ── cd ──
 .cmd_cd:
     cmp byte [arg1], 0
-    je cmd_loop
+    je .cmd_cd_ret
     ; cd /
     cmp byte [arg1], '/'
     jne .cd_nr
@@ -2290,7 +3506,7 @@ cmd_loop:
     jne .cd_nr
     mov byte [fs_cwd], 0
     call update_panel
-    jmp cmd_done
+    ret
 .cd_nr:
     ; cd ..
     mov esi, arg1
@@ -2299,7 +3515,7 @@ cmd_loop:
     jne .cd_named
     movzx eax, byte [fs_cwd]
     test eax, eax
-    jz cmd_loop
+    jz .cmd_cd_ret
     imul eax, FS_ENTRY_SZ
     movzx eax, byte [fs_tab + eax + FS_PAR]
     cmp al, 0xFF
@@ -2308,7 +3524,7 @@ cmd_loop:
 .cd_par:
     mov [fs_cwd], al
     call update_panel
-    jmp cmd_done
+    ret
 .cd_named:
     mov esi, arg1
     movzx edx, byte [fs_cwd]
@@ -2320,26 +3536,28 @@ cmd_loop:
     jne .cd_nd
     mov [fs_cwd], al
     call update_panel
-    jmp cmd_done
+    ret
 .cd_nf:
     mov esi, e_nf
     mov bl, COL_ERR
     call lp_print
     mov esi, arg1
     call lp_println
-    jmp cmd_done
+    ret
 .cd_nd:
     mov esi, e_ndir
     mov bl, COL_ERR
     call lp_print
     mov esi, arg1
     call lp_println
-    jmp cmd_done
+    ret
+.cmd_cd_ret:
+    ret
 
 ; ── mkdir ──
 .cmd_mkdir:
     cmp byte [arg1], 0
-    je cmd_loop
+    je .cmd_mkdir_ret
     mov esi, arg1
     movzx edx, byte [fs_cwd]
     call fs_find
@@ -2352,22 +3570,24 @@ cmd_loop:
     call fs_add_entry
     add esp, 12
     call update_panel
-    jmp cmd_done
+    ret
 .mk_ex:
     mov esi, e_exist
     mov bl, COL_ERR
     call lp_println
-    jmp cmd_done
+    ret
+.cmd_mkdir_ret:
+    ret
 
 ; ── touch ──
 .cmd_touch:
     cmp byte [arg1], 0
-    je cmd_loop
+    je .cmd_touch_ret
     mov esi, arg1
     movzx edx, byte [fs_cwd]
     call fs_find
     cmp eax, -1
-    jne cmd_loop           ; exists, OK
+    jne .cmd_touch_ret
     movzx eax, byte [fs_cwd]
     push dword arg1
     push dword FS_FILE
@@ -2375,12 +3595,14 @@ cmd_loop:
     call fs_add_entry
     add esp, 12
     call update_panel
-    jmp cmd_done
+    ret
+.cmd_touch_ret:
+    ret
 
 ; ── write ──
 .cmd_write:
     cmp byte [arg1], 0
-    je cmd_loop
+    je .cmd_write_ret
     ; Find or create file
     mov esi, arg1
     movzx edx, byte [fs_cwd]
@@ -2404,28 +3626,30 @@ cmd_loop:
 .wr_do:
     ; Write arg2 content
     cmp byte [arg2], 0
-    je cmd_loop
+    je .cmd_write_ret
     push dword arg2
     push eax
     call fs_set_content
     add esp, 8
     call update_panel
-    jmp cmd_done
+    ret
 .wr_isdir:
     mov esi, e_isdir
     mov bl, COL_ERR
     call lp_println
-    jmp cmd_done
+    ret
 .wr_full:
     mov esi, e_full
     mov bl, COL_ERR
     call lp_println
-    jmp cmd_done
+    ret
+.cmd_write_ret:
+    ret
 
 ; ── cat ──
 .cmd_cat:
     cmp byte [arg1], 0
-    je cmd_loop
+    je .cmd_cat_ret
     mov esi, arg1
     movzx edx, byte [fs_cwd]
     call fs_find
@@ -2436,33 +3660,54 @@ cmd_loop:
     jne .cat_dir
     mov esi, [fs_tab + ebx + FS_DPTR]
     test esi, esi
-    jz cmd_loop
+    jz .cmd_cat_ret
     mov bl, COL_OUTPUT
     call lp_println
-    jmp cmd_done
+    ret
 .cat_nf:
     mov esi, e_nf
     mov bl, COL_ERR
     call lp_print
     mov esi, arg1
     call lp_println
-    jmp cmd_done
+    ret
 .cat_dir:
     mov esi, e_isdir
     mov bl, COL_ERR
     call lp_println
-    jmp cmd_done
+    ret
+.cmd_cat_ret:
+    ret
 
 ; ── rm ──
 .cmd_rm:
     cmp byte [arg1], 0
-    je cmd_loop
+    je .cmd_rm_ret
+    ; Permission check: non-root can't remove system files
+    cmp byte [current_uid], 0
+    je .rm_allowed
+    ; Check if it's in root dir (parent=0) - protect system files for non-root
     mov esi, arg1
     movzx edx, byte [fs_cwd]
     call fs_find
     cmp eax, -1
     je .rm_nf
     imul ebx, eax, FS_ENTRY_SZ
+    cmp byte [fs_tab + ebx + FS_PAR], 0
+    jne .rm_allowed_entry
+    ; Non-root trying to remove root-level entry
+    mov esi, s_perm_denied
+    mov bl, COL_ERR
+    call lp_println
+    ret
+.rm_allowed:
+    mov esi, arg1
+    movzx edx, byte [fs_cwd]
+    call fs_find
+    cmp eax, -1
+    je .rm_nf
+    imul ebx, eax, FS_ENTRY_SZ
+.rm_allowed_entry:
     cmp byte [fs_tab + ebx + FS_TYPE], FS_DIR
     jne .rm_do
     ; Check directory is empty
@@ -2488,26 +3733,28 @@ cmd_loop:
     mov esi, e_notempty
     mov bl, COL_ERR
     call lp_println
-    jmp cmd_done
+    ret
 .rm_empty:
     pop ebx
     pop eax
 .rm_do:
     mov byte [fs_tab + ebx + FS_TYPE], FS_FREE
     call update_panel
-    jmp cmd_done
+    ret
 .rm_nf:
     mov esi, e_nf
     mov bl, COL_ERR
     call lp_print
     mov esi, arg1
     call lp_println
-    jmp cmd_done
+    ret
+.cmd_rm_ret:
+    ret
 
 ; ── stat ──
 .cmd_stat:
     cmp byte [arg1], 0
-    je cmd_loop
+    je .cmd_stat_ret
     mov esi, arg1
     movzx edx, byte [fs_cwd]
     call fs_find
@@ -2539,11 +3786,446 @@ cmd_loop:
     mov esi, s_bytes
     mov bl, COL_OUTPUT
     call lp_println
-    jmp cmd_done
+    ret
 .st_nf:
     mov esi, e_nf
     mov bl, COL_ERR
     call lp_print
     mov esi, arg1
     call lp_println
-    jmp cmd_done
+    ret
+.cmd_stat_ret:
+    ret
+
+; ── whoami ──
+.cmd_whoami:
+    movzx eax, byte [current_uid]
+    imul eax, USER_ENTRY_SZ
+    lea esi, [user_table + eax]
+    mov bl, COL_VER
+    call lp_println
+    ret
+
+; ── login ──
+.cmd_login:
+    ; Re-show login screen
+    call login_screen
+    ; Redraw UI
+    call draw_ui
+    call update_panel
+    ret
+
+; ── adduser ──
+.cmd_adduser:
+    ; Only root can add users
+    cmp byte [current_uid], 0
+    jne .au_denied
+    cmp byte [arg1], 0
+    je .au_noarg
+    ; Check if user_count < MAX_USERS
+    movzx eax, byte [user_count]
+    cmp eax, MAX_USERS
+    jge .au_full
+    ; Check if user already exists
+    xor ecx, ecx
+.au_check:
+    cmp ecx, eax
+    jge .au_add
+    push eax
+    push ecx
+    imul edx, ecx, USER_ENTRY_SZ
+    lea esi, [user_table + edx]
+    mov edi, arg1
+    call strcmp
+    pop ecx
+    pop eax
+    je .au_exists
+    inc ecx
+    jmp .au_check
+.au_add:
+    ; Add new user with empty password
+    imul edx, eax, USER_ENTRY_SZ
+    lea edi, [user_table + edx]
+    mov esi, arg1
+    mov ecx, 15
+.au_cpname:
+    lodsb
+    mov [edi], al
+    test al, al
+    jz .au_cpname_done
+    inc edi
+    dec ecx
+    jnz .au_cpname
+    mov byte [edi], 0
+.au_cpname_done:
+    ; Set uid
+    imul edx, eax, USER_ENTRY_SZ
+    lea edi, [user_table + edx + USER_NAME_SZ + USER_PASS_SZ + USER_HOME_SZ]
+    mov [edi], al
+    inc byte [user_count]
+    mov esi, s_user_added
+    mov bl, COL_OK
+    call lp_print
+    mov esi, arg1
+    call lp_println
+    ret
+.au_denied:
+    mov esi, s_root_only
+    mov bl, COL_ERR
+    call lp_println
+    ret
+.au_full:
+    mov esi, s_users_full
+    mov bl, COL_ERR
+    call lp_println
+    ret
+.au_exists:
+    mov esi, s_user_exists
+    mov bl, COL_ERR
+    call lp_println
+    ret
+.au_noarg:
+    mov esi, s_no_arg
+    mov bl, COL_ERR
+    call lp_println
+    ret
+
+; ── save ──
+.cmd_save:
+    cmp byte [ata_present], 1
+    jne .save_nodisk
+    call disk_save_fs
+    mov esi, s_disk_saved
+    mov bl, COL_OK
+    call lp_println
+    ret
+.save_nodisk:
+    mov esi, s_disk_unavail
+    mov bl, COL_ERR
+    call lp_println
+    ret
+
+; ── load ──
+.cmd_load_disk:
+    cmp byte [ata_present], 1
+    jne .load_nodisk
+    call disk_load_fs
+    ; Check if load succeeded by verifying magic
+    cmp dword [disk_sector_buf], DISK_MAGIC
+    jne .load_nodata
+    mov esi, s_disk_loaded
+    mov bl, COL_OK
+    call lp_println
+    call update_panel
+    ret
+.load_nodisk:
+    mov esi, s_disk_unavail
+    mov bl, COL_ERR
+    call lp_println
+    ret
+.load_nodata:
+    mov esi, s_disk_nodata
+    mov bl, COL_ERR
+    call lp_println
+    ret
+
+; ── disk ──
+.cmd_disk:
+    mov esi, s_disk_status
+    mov bl, COL_OUTPUT
+    call lp_print
+    cmp byte [ata_present], 1
+    jne .disk_no
+    mov esi, s_disk_avail
+    mov bl, COL_OK
+    call lp_println
+    ret
+.disk_no:
+    mov esi, s_disk_unavail
+    mov bl, COL_ERR
+    call lp_println
+    ret
+
+; ── ping (simulated) ──
+.cmd_ping:
+    cmp byte [arg1], 0
+    je .ping_noarg
+    ; Display simulated ping output
+    mov esi, s_ping_prefix
+    mov bl, COL_OUTPUT
+    call lp_print
+    mov esi, arg1
+    call lp_println
+
+    ; Simulate 4 ping replies
+    mov ecx, 1
+.ping_loop:
+    cmp ecx, 5
+    jge .ping_stats
+    push ecx
+
+    mov esi, s_ping_64
+    mov bl, COL_OUTPUT
+    call lp_print
+    mov esi, s_ping_reply
+    call lp_print
+    mov esi, arg1
+    call lp_print
+    mov esi, s_ping_seq
+    call lp_print
+    ; Print sequence number
+    pop ecx
+    push ecx
+    mov eax, ecx
+    call itoa
+    mov esi, numbuf
+    call lp_print
+    mov esi, s_ping_ttl
+    call lp_print
+    ; Simulated time (1-4ms)
+    pop ecx
+    push ecx
+    mov eax, ecx
+    call itoa
+    mov esi, numbuf
+    call lp_print
+    mov esi, s_ping_ms
+    call lp_println
+
+    ; Small delay for realism
+    mov eax, 20
+    call wait_ticks
+
+    pop ecx
+    inc ecx
+    jmp .ping_loop
+
+.ping_stats:
+    mov esi, s_ping_stats
+    mov bl, COL_OUTPUT
+    call lp_println
+    mov esi, s_ping_summ
+    call lp_println
+    ret
+.ping_noarg:
+    mov esi, s_no_arg
+    mov bl, COL_ERR
+    call lp_println
+    ret
+
+; ── ifconfig ──
+.cmd_ifconfig:
+    mov esi, s_net_iface
+    mov bl, COL_OK
+    call lp_println
+    mov bl, COL_OUTPUT
+    mov esi, s_net_mac
+    call lp_println
+    mov esi, s_net_ip
+    call lp_println
+    mov esi, s_net_mask
+    call lp_println
+    mov esi, s_net_gw
+    call lp_println
+    ret
+
+; ── grep (works with pipe input or standalone) ──
+.cmd_grep:
+    cmp byte [arg1], 0
+    je .grep_noarg
+    cmp byte [pipe_input], 1
+    jne .grep_nodata
+    ; Filter pipe_buf lines by arg1 pattern
+    mov esi, pipe_buf
+    mov bl, COL_OUTPUT
+.grep_line:
+    cmp byte [esi], 0
+    je .grep_done
+    ; Copy current line to a temp check
+    push esi
+    call .grep_check_line
+    pop esi
+    ; Advance to next line
+.grep_advance:
+    cmp byte [esi], 0
+    je .grep_done
+    cmp byte [esi], 10     ; LF
+    je .grep_nextline
+    inc esi
+    jmp .grep_advance
+.grep_nextline:
+    inc esi
+    jmp .grep_line
+.grep_done:
+    ret
+.grep_noarg:
+    mov esi, s_no_arg
+    mov bl, COL_ERR
+    call lp_println
+    ret
+.grep_nodata:
+    ; No pipe input - just print message
+    mov esi, .s_grep_usage
+    mov bl, COL_OUTPUT
+    call lp_println
+    ret
+.s_grep_usage: db "Usage: cmd | grep <pattern>", 0
+
+; .grep_check_line: esi=start of line in pipe_buf
+; Check if line contains arg1 substring. If yes, print it.
+.grep_check_line:
+    push eax
+    push ebx
+    push ecx
+    push edx
+    push edi
+    ; First, find end of this line
+    mov edi, esi
+    xor ecx, ecx
+.gcl_findend:
+    mov al, [edi + ecx]
+    test al, al
+    jz .gcl_gotend
+    cmp al, 10
+    je .gcl_gotend
+    inc ecx
+    cmp ecx, 127
+    jge .gcl_gotend
+    jmp .gcl_findend
+.gcl_gotend:
+    ; ecx = length of line
+    test ecx, ecx
+    jz .gcl_nomatch
+    ; Search for arg1 substring in line
+    mov edx, 0             ; position in line
+.gcl_outer:
+    cmp edx, ecx
+    jge .gcl_nomatch
+    ; Compare arg1 starting at line[edx]
+    push esi
+    push edx
+    lea esi, [esi + edx]   ; esi = line + edx (source to compare)
+    mov edi, arg1
+    xor ebx, ebx
+.gcl_inner:
+    mov al, [edi + ebx]
+    test al, al
+    jz .gcl_match           ; end of pattern = match!
+    cmp al, [esi + ebx]
+    jne .gcl_inner_fail
+    inc ebx
+    jmp .gcl_inner
+.gcl_inner_fail:
+    pop edx
+    pop esi
+    inc edx
+    jmp .gcl_outer
+.gcl_match:
+    pop edx
+    pop esi
+    ; Match found! Print this line
+    push esi
+    mov bl, COL_OUTPUT
+    ; Print chars until LF or null
+    xor ecx, ecx
+.gcl_print:
+    mov al, [esi + ecx]
+    test al, al
+    jz .gcl_print_done
+    cmp al, 10
+    je .gcl_print_done
+    mov ah, bl
+    call lp_putc
+    inc ecx
+    jmp .gcl_print
+.gcl_print_done:
+    call lp_newline
+    pop esi
+.gcl_nomatch:
+    pop edi
+    pop edx
+    pop ecx
+    pop ebx
+    pop eax
+    ret
+
+; ── wc (count lines/words/chars from pipe or empty) ──
+.cmd_wc:
+    cmp byte [pipe_input], 1
+    jne .wc_nodata
+    ; Count lines, words, chars in pipe_buf
+    mov esi, pipe_buf
+    xor eax, eax           ; line count
+    xor ebx, ebx           ; word count
+    xor ecx, ecx           ; char count
+    xor edx, edx           ; in_word flag
+.wc_loop:
+    mov dl, [esi]
+    test dl, dl
+    jz .wc_print
+    inc ecx                 ; char count
+    cmp dl, 10              ; newline
+    je .wc_newline
+    cmp dl, ' '
+    je .wc_space
+    ; Non-space char
+    cmp byte [esi - 1], ' '
+    je .wc_newword
+    cmp byte [esi - 1], 10
+    je .wc_newword
+    ; Check if esi == pipe_buf (start of buffer)
+    cmp esi, pipe_buf
+    je .wc_newword
+    jmp .wc_next
+.wc_newword:
+    inc ebx
+    jmp .wc_next
+.wc_newline:
+    inc eax
+    jmp .wc_next
+.wc_space:
+.wc_next:
+    inc esi
+    jmp .wc_loop
+.wc_print:
+    ; If last char was not newline but there was content, count one more line
+    test ecx, ecx
+    jz .wc_show
+    cmp byte [esi - 1], 10
+    je .wc_show
+    inc eax                 ; partial last line
+.wc_show:
+    push ebx
+    push ecx
+    call itoa               ; eax = lines
+    mov esi, numbuf
+    mov bl, COL_VER
+    call lp_print
+    mov esi, s_lines
+    mov bl, COL_OUTPUT
+    call lp_print
+    pop ecx
+    pop eax                 ; was ebx (word count)
+    push ecx
+    call itoa
+    mov esi, numbuf
+    mov bl, COL_VER
+    call lp_print
+    mov esi, s_words
+    mov bl, COL_OUTPUT
+    call lp_print
+    pop eax                 ; char count
+    call itoa
+    mov esi, numbuf
+    mov bl, COL_VER
+    call lp_print
+    mov esi, s_chars
+    mov bl, COL_OUTPUT
+    call lp_println
+    ret
+.wc_nodata:
+    mov esi, .s_wc_usage
+    mov bl, COL_OUTPUT
+    call lp_println
+    ret
+.s_wc_usage: db "Usage: cmd | wc", 0
