@@ -454,6 +454,13 @@ struct TestDecl : ASTNode {
     explicit TestDecl(NodePtr n) : inner(std::move(n)) {}
 };
 
+// ── bench 基准测试声明 ─────────────────────────────────────
+// bench func bench_name() { ... }  → 基准测试函数（仅 flux bench 时执行）
+struct BenchDecl : ASTNode {
+    NodePtr inner;   // 被包装的 FnDecl
+    explicit BenchDecl(NodePtr n) : inner(std::move(n)) {}
+};
+
 // ══════════════════════════════════════════════════════════
 // 规格声明节点 (specify)
 // ══════════════════════════════════════════════════════════

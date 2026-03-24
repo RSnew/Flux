@@ -18,6 +18,8 @@
 #include "profiler.h"
 #include "fluz.h"
 #include "llvm_jit.h"
+#include "docgen.h"
+#include "linter.h"
 
 #include <iostream>
 #include <fstream>
@@ -254,6 +256,206 @@ static int cmdFmt(const std::string& filepath, bool writeBack) {
         std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
         return 1;
     }
+}
+
+// ═══════════════════════════════════════════════════════════
+// flux test <file|dir> [--filter <pattern>] — 内置测试框架
+// ═══════════════════════════════════════════════════════════
+#include <filesystem>
+#include <algorithm>
+#include <regex>
+namespace fs_test = std::filesystem;
+
+// 检查文件是否包含 test 函数
+static bool fileHasTestFunctions(const std::string& filepath) {
+    try {
+        std::string src = readFile(filepath);
+        Lexer  lexer(src);
+        auto   tokens = lexer.tokenize();
+        Parser parser(std::move(tokens));
+        auto   program = parser.parse();
+        for (auto& stmt : program->statements) {
+            if (auto* td = dynamic_cast<TestDecl*>(stmt.get())) {
+                if (dynamic_cast<FnDecl*>(td->inner.get())) return true;
+            }
+        }
+    } catch (...) {}
+    return false;
+}
+
+// 运行单个文件中的测试函数，返回 {passed, failed, skipped}
+struct TestResult { int passed = 0; int failed = 0; int skipped = 0; double totalMs = 0; };
+
+static TestResult runTestFile(const std::string& filepath, const std::string& filter) {
+    TestResult result;
+
+    std::cout << CLR_BOLD << "\n=== Running tests: " << filepath << " ===" << CLR_RESET << "\n";
+
+    std::string src;
+    try {
+        src = readFile(filepath);
+    } catch (const std::exception& e) {
+        std::cerr << CLR_RED << "  Error reading file: " << e.what() << CLR_RESET << "\n";
+        return result;
+    }
+
+    // Parse the file
+    std::unique_ptr<Program> program;
+    try {
+        Lexer  lexer(src);
+        auto   tokens = lexer.tokenize();
+        Parser parser(std::move(tokens));
+        program = parser.parse();
+    } catch (const ParseError& e) {
+        std::cerr << CLR_RED << "  Parse error at line " << e.line
+                  << ": " << e.what() << CLR_RESET << "\n";
+        return result;
+    } catch (const std::exception& e) {
+        std::cerr << CLR_RED << "  Error: " << e.what() << CLR_RESET << "\n";
+        return result;
+    }
+
+    // Collect test functions (TestDecl wrapping FnDecl)
+    struct TestInfo {
+        std::string name;
+        FnDecl*     fn;
+    };
+    std::vector<TestInfo> tests;
+
+    for (auto& stmt : program->statements) {
+        if (auto* td = dynamic_cast<TestDecl*>(stmt.get())) {
+            if (auto* fn = dynamic_cast<FnDecl*>(td->inner.get())) {
+                tests.push_back({fn->name, fn});
+            }
+        }
+    }
+
+    if (tests.empty()) {
+        std::cout << CLR_GRAY << "  (no test functions found)" << CLR_RESET << "\n";
+        return result;
+    }
+
+    // Create interpreter and register all functions/declarations
+    // (execute the file to set up the environment, but with test functions tracked)
+    Interpreter interp;
+    interp.setNoTest(false);  // enable test declarations
+
+    // Execute the program first to register all functions and set up state
+    try {
+        interp.execute(program.get());
+    } catch (const std::exception& e) {
+        // Some setup errors are expected if test functions call assert at top level
+        // We continue anyway since we'll call tests individually
+    }
+
+    // Now run each test function
+    for (auto& t : tests) {
+        // Apply filter
+        if (!filter.empty()) {
+            if (t.name.find(filter) == std::string::npos) {
+                result.skipped++;
+                std::cout << CLR_GRAY << "  SKIP  " << t.name << CLR_RESET << "\n";
+                continue;
+            }
+        }
+
+        auto start = std::chrono::high_resolution_clock::now();
+        bool passed = true;
+        std::string failMsg;
+
+        try {
+            interp.callFunction(t.name, {});
+        } catch (const PanicSignal& ps) {
+            passed = false;
+            failMsg = ps.message;
+        } catch (const std::exception& e) {
+            passed = false;
+            failMsg = e.what();
+        }
+
+        auto end = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(end - start).count();
+        result.totalMs += ms;
+
+        if (passed) {
+            result.passed++;
+            char timeBuf[32];
+            std::snprintf(timeBuf, sizeof(timeBuf), "%.1fms", ms);
+            std::cout << CLR_GREEN << "  PASS  " << CLR_RESET << t.name
+                      << CLR_GRAY << " (" << timeBuf << ")" << CLR_RESET << "\n";
+        } else {
+            result.failed++;
+            std::cout << CLR_RED << "  FAIL  " << CLR_RESET << t.name << "\n";
+            std::cout << CLR_RED << "        " << failMsg << CLR_RESET << "\n";
+        }
+    }
+
+    return result;
+}
+
+static int cmdTest(int argc, char* argv[]) {
+    if (argc < 3) {
+        std::cerr << "Usage: flux test <file.flux|dir> [--filter <pattern>]\n";
+        return 1;
+    }
+
+    std::string target = argv[2];
+    std::string filter;
+
+    // Parse --filter flag
+    for (int i = 3; i < argc; i++) {
+        if (std::string(argv[i]) == "--filter" && i + 1 < argc) {
+            filter = argv[++i];
+        }
+    }
+
+    // Collect files to test
+    std::vector<std::string> files;
+
+    if (fs_test::is_directory(target)) {
+        // Recursively find all .flux files with test functions
+        for (auto& entry : fs_test::recursive_directory_iterator(target)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".flux") {
+                std::string path = entry.path().string();
+                if (fileHasTestFunctions(path)) {
+                    files.push_back(path);
+                }
+            }
+        }
+        std::sort(files.begin(), files.end());
+        if (files.empty()) {
+            std::cerr << CLR_YELLOW << "No test files found in: " << target << CLR_RESET << "\n";
+            return 0;
+        }
+    } else {
+        files.push_back(target);
+    }
+
+    // Run tests in all files
+    int totalPassed  = 0;
+    int totalFailed  = 0;
+    int totalSkipped = 0;
+    double totalMs   = 0;
+
+    for (auto& file : files) {
+        auto r = runTestFile(file, filter);
+        totalPassed  += r.passed;
+        totalFailed  += r.failed;
+        totalSkipped += r.skipped;
+        totalMs      += r.totalMs;
+    }
+
+    // Print summary
+    char timeBuf[64];
+    std::snprintf(timeBuf, sizeof(timeBuf), "%.1fms", totalMs);
+
+    std::cout << CLR_BOLD << "\n=== Results ===" << CLR_RESET << "\n";
+    std::cout << "  " << CLR_GREEN << totalPassed << " passed" << CLR_RESET
+              << ", " << CLR_RED << totalFailed << " failed" << CLR_RESET
+              << ", " << CLR_GRAY << totalSkipped << " skipped" << CLR_RESET << "\n";
+    std::cout << "  Total time: " << timeBuf << "\n";
+
+    return totalFailed > 0 ? 1 : 0;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -777,6 +979,224 @@ static int cmdDebug(const std::string& filepath) {
     }
 }
 
+// ═══════════════════════════════════════════════════════════
+// flux bench <file> [--filter <pattern>] — 基准测试框架
+// ═══════════════════════════════════════════════════════════
+static std::string formatWithCommas(int64_t n) {
+    std::string s = std::to_string(n);
+    int insertPos = (int)s.length() - 3;
+    while (insertPos > 0) {
+        s.insert(insertPos, ",");
+        insertPos -= 3;
+    }
+    return s;
+}
+
+static int cmdBench(const std::string& filepath, const std::string& filter) {
+    try {
+        std::string src = readFile(filepath);
+
+        Lexer  lexer(src);
+        auto   tokens = lexer.tokenize();
+        Parser parser(std::move(tokens));
+        auto   program = parser.parse();
+
+        TypeChecker checker;
+        auto typeErrors = checker.check(program.get());
+        if (!typeErrors.empty()) {
+            for (auto& e : typeErrors)
+                std::cerr << CLR_RED << "  " << e.message << CLR_RESET << "\n";
+            return 1;
+        }
+
+        // Set up interpreter and register all functions (including non-bench)
+        Interpreter interp;
+        interp.setNoTest(g_noTest);
+        interp.execute(program.get());
+
+        // Collect benchmark functions: bench func decls + func with bench_ prefix
+        struct BenchInfo {
+            std::string name;
+            FnDecl*     fn;
+        };
+        std::vector<BenchInfo> benchmarks;
+
+        for (auto& stmt : program->statements) {
+            // bench func bench_name() { ... }
+            if (auto* bd = dynamic_cast<BenchDecl*>(stmt.get())) {
+                if (auto* fn = dynamic_cast<FnDecl*>(bd->inner.get())) {
+                    if (filter.empty() || fn->name.find(filter) != std::string::npos) {
+                        // Register the bench function so it can be called
+                        interp.functions_[fn->name] = fn;
+                        benchmarks.push_back({fn->name, fn});
+                    }
+                }
+            }
+            // func bench_name() { ... } (auto-detect by name prefix)
+            if (auto* fn = dynamic_cast<FnDecl*>(stmt.get())) {
+                if (fn->name.substr(0, 6) == "bench_") {
+                    if (filter.empty() || fn->name.find(filter) != std::string::npos) {
+                        benchmarks.push_back({fn->name, fn});
+                    }
+                }
+            }
+        }
+
+        if (benchmarks.empty()) {
+            std::cout << CLR_YELLOW << "No benchmarks found in: " << filepath
+                      << CLR_RESET << "\n";
+            return 0;
+        }
+
+        // Extract filename for display
+        std::string displayName = filepath;
+        auto slashPos = displayName.rfind('/');
+        if (slashPos != std::string::npos) displayName = displayName.substr(slashPos + 1);
+
+        std::cout << CLR_BOLD CLR_CYAN
+                  << "\n=== Benchmarks: " << displayName << " ===" << CLR_RESET << "\n";
+
+        int completed = 0;
+        for (auto& bench : benchmarks) {
+            // Warm-up: run once
+            try {
+                interp.callFunction(bench.name, {});
+            } catch (...) {
+                std::cerr << CLR_RED << "  " << bench.name
+                          << " -- warm-up failed, skipping" << CLR_RESET << "\n";
+                continue;
+            }
+
+            // Auto-calibrate: start at 1 iteration, double until >= 100ms
+            int64_t iters = 1;
+            double totalMs = 0;
+
+            while (true) {
+                auto start = std::chrono::high_resolution_clock::now();
+                for (int64_t i = 0; i < iters; i++) {
+                    interp.callFunction(bench.name, {});
+                }
+                auto end = std::chrono::high_resolution_clock::now();
+                totalMs = std::chrono::duration<double, std::milli>(end - start).count();
+
+                if (totalMs >= 100.0) break;
+                if (iters >= 1000000000LL) break;  // safety cap
+                iters *= 2;
+            }
+
+            // Final measurement with calibrated iteration count
+            auto start = std::chrono::high_resolution_clock::now();
+            for (int64_t i = 0; i < iters; i++) {
+                interp.callFunction(bench.name, {});
+            }
+            auto end = std::chrono::high_resolution_clock::now();
+            totalMs = std::chrono::duration<double, std::milli>(end - start).count();
+
+            double avgNs = (totalMs * 1e6) / (double)iters;
+            double opsSec = (iters / totalMs) * 1000.0;
+
+            // Format ns/op display
+            std::string nsPerOp;
+            if (avgNs >= 1e9) {
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), "%.1fs/op", avgNs / 1e9);
+                nsPerOp = buf;
+            } else if (avgNs >= 1e6) {
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), "%.0fms/op", avgNs / 1e6);
+                nsPerOp = buf;
+            } else if (avgNs >= 1e3) {
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), "%.0fus/op", avgNs / 1e3);
+                nsPerOp = buf;
+            } else {
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), "%.0fns/op", avgNs);
+                nsPerOp = buf;
+            }
+
+            // Print result line
+            char line[256];
+            std::snprintf(line, sizeof(line), "  %-28s %14s iters %7.0fms %12s %14s ops/s\n",
+                          bench.name.c_str(),
+                          formatWithCommas(iters).c_str(),
+                          totalMs,
+                          nsPerOp.c_str(),
+                          formatWithCommas((int64_t)opsSec).c_str());
+            std::cout << line;
+            completed++;
+        }
+
+        std::cout << CLR_BOLD CLR_CYAN
+                  << "\n=== Summary ===" << CLR_RESET << "\n"
+                  << "  " << completed << " benchmark"
+                  << (completed != 1 ? "s" : "") << " completed\n\n";
+        return 0;
+
+    } catch (const ParseError& e) {
+        std::cerr << CLR_RED << "Parse error at line " << e.line
+                  << ": " << e.what() << CLR_RESET << "\n";
+        return 1;
+    } catch (const std::exception& e) {
+        std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+        return 1;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════
+// flux lint <file> [--strict] [--json] — 代码质量检查
+// ═══════════════════════════════════════════════════════════
+static int cmdLint(const std::string& filepath, bool strictMode, bool jsonOutput) {
+    try {
+        std::string src = readFile(filepath);
+
+        Lexer  lexer(src);
+        auto   tokens = lexer.tokenize();
+
+        // 保存 token 副本给 linter 用（因为 parser 会 move tokens）
+        std::vector<Token> tokensCopy = tokens;
+
+        Parser parser(std::move(tokens));
+        auto   program = parser.parse();
+
+        // 提取文件名用于诊断输出
+        std::string displayName = filepath;
+        auto slash = displayName.find_last_of('/');
+        if (slash != std::string::npos) displayName = displayName.substr(slash + 1);
+
+        Linter linter(displayName);
+        linter.buildLineMap(tokensCopy);
+        auto diags = linter.lint(program.get());
+
+        if (jsonOutput) {
+            Linter::printDiagnostics(diags, displayName, true);
+        } else {
+            Linter::printDiagnostics(diags, displayName, false);
+        }
+
+        if (strictMode) {
+            for (auto& d : diags) {
+                if (d.severity == LintSeverity::Warn || d.severity == LintSeverity::Error) {
+                    return 1;
+                }
+            }
+        }
+
+        for (auto& d : diags) {
+            if (d.severity == LintSeverity::Error) return 1;
+        }
+        return 0;
+
+    } catch (const ParseError& e) {
+        std::cerr << CLR_RED << "Parse error at line " << e.line
+                  << ": " << e.what() << CLR_RESET << "\n";
+        return 1;
+    } catch (const std::exception& e) {
+        std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+        return 1;
+    }
+}
+
 // ── 帮助信息 ──────────────────────────────────────────────
 static void printHelp() {
     std::cout
@@ -788,6 +1208,7 @@ static void printHelp() {
         << "  flux dev   <file.flux>      Dev mode — hot-reload + file watcher\n"
         << "  flux run   <file.flux>      Run file once, no file watcher\n"
         << "  flux check <file.flux> [--json]  Type-check file (--json for structured output)\n"
+        << "  flux lint  <file.flux> [--strict] [--json]  Lint for code quality issues\n"
         << "  flux dev   <file.flux>      Dev mode (hot reload + auto test)\n"
         << "  flux fmt   <file.flux>      Format file to stdout\n"
         << "  flux fmt   -w <file.flux>   Format file in-place (overwrite)\n"
@@ -797,6 +1218,7 @@ static void printHelp() {
         << "  flux --llvm <file.flux>     LLVM JIT + hot reload watch mode\n"
         << "  flux pack  <file> [-o app.fluz]  Pack (obfuscated + encrypted)\n"
         << "  flux pack  <file> --debug   Pack without protection (debuggable)\n"
+        << "  flux bench  <file.flux> [--filter <pat>]  Run benchmarks\n"
         << "  flux profile <file.flux>    Run with profiling on all functions\n"
         << "  flux compile <file> [-o out]  Compile to native binary (x86_64, arm64, riscv64)\n"
         << "  flux live   <file.flux>      AOT compile + hot-swap (dlopen reload)\n"
@@ -808,6 +1230,7 @@ static void printHelp() {
         << "\n"
         << CLR_BOLD << "Tooling:\n" << CLR_RESET
         << "  flux inspect <file> [--json]  Export program symbols & structure\n"
+        << "  flux doc <file> [--json|--context]  Generate documentation (AI-friendly)\n"
         << "  flux eval \"<code>\" [--json]   Evaluate code snippet (pipe-friendly)\n"
         << "\n"
         << CLR_BOLD << "Flags:\n" << CLR_RESET
@@ -898,6 +1321,37 @@ int main(int argc, char* argv[]) {
         return cmdRun(argv[2]);
     }
 
+    // ── flux serve <file> — 开发服务器模式 ─────────────────
+    if (sub == "serve") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux serve <file.flux>\n";
+            return 1;
+        }
+        // 直接运行文件（Server.listen 会阻塞）
+        return cmdRun(argv[2]);
+    }
+
+    // ── flux bench <file> [--filter <pattern>] ────────────
+    if (sub == "bench") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux bench <file.flux> [--filter <pattern>]\n";
+            return 1;
+        }
+        std::string benchFile = argv[2];
+        std::string benchFilter;
+        for (int i = 3; i < argc; i++) {
+            if (std::string(argv[i]) == "--filter" && i + 1 < argc) {
+                benchFilter = argv[++i];
+            }
+        }
+        return cmdBench(benchFile, benchFilter);
+    }
+
+    // ── flux test <file|dir> [--filter <pattern>] ────────
+    if (sub == "test") {
+        return cmdTest(argc, argv);
+    }
+
     // ── flux dev <file> — 开发模式 ─────────────────────────
     if (sub == "dev") {
         if (argc < 3) {
@@ -935,6 +1389,23 @@ int main(int argc, char* argv[]) {
             if (std::string(argv[i]) == "--json") jsonOutput = true;
         }
         return cmdCheck(filepath, jsonOutput);
+    }
+
+    // ── flux lint <file> [--strict] [--json] ────────────────
+    if (sub == "lint") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux lint <file.flux> [--strict] [--json]\n";
+            return 1;
+        }
+        bool strictMode = false;
+        bool jsonOutput = false;
+        std::string filepath = argv[2];
+        for (int i = 3; i < argc; i++) {
+            std::string flag = argv[i];
+            if (flag == "--strict") strictMode = true;
+            if (flag == "--json")   jsonOutput = true;
+        }
+        return cmdLint(filepath, strictMode, jsonOutput);
     }
 
     // ── flux fmt [-w] <file> ─────────────────────────────
@@ -1767,6 +2238,50 @@ int main(int argc, char* argv[]) {
             }
             return 0;
 
+        } catch (const std::exception& e) {
+            std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
+            return 1;
+        }
+    }
+
+    // ── flux doc <file> [--json|--context] — AI-friendly 文档生成 ──
+    if (sub == "doc") {
+        if (argc < 3) {
+            std::cerr << "Usage: flux doc <file.flux> [--json|--context]\n";
+            return 1;
+        }
+        try {
+            std::string filepath = argv[2];
+            bool jsonMode = false;
+            bool contextMode = false;
+            for (int i = 3; i < argc; i++) {
+                std::string flag = argv[i];
+                if (flag == "--json") jsonMode = true;
+                if (flag == "--context") contextMode = true;
+            }
+
+            std::string src = readFile(filepath);
+            Lexer  lexer(src);
+            auto   tokens = lexer.tokenize();
+            Parser parser(std::move(tokens));
+            auto   program = parser.parse();
+
+            DocGenerator gen;
+            auto doc = gen.extract(program.get(), filepath, src);
+
+            if (jsonMode) {
+                std::cout << gen.toJson(doc);
+            } else if (contextMode) {
+                std::cout << gen.toContext(doc);
+            } else {
+                std::cout << gen.toMarkdown(doc);
+            }
+            return 0;
+
+        } catch (const ParseError& e) {
+            std::cerr << CLR_RED << "Parse error at line " << e.line
+                      << ": " << e.what() << CLR_RESET << "\n";
+            return 1;
         } catch (const std::exception& e) {
             std::cerr << CLR_RED << "Error: " << e.what() << CLR_RESET << "\n";
             return 1;

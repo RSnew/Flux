@@ -256,6 +256,8 @@ void Interpreter::execute(Program* program) {
                     functions_[fn->name] = fn;
                 }
             }
+        } else if (dynamic_cast<BenchDecl*>(stmt.get())) {
+            // bench func: 仅在 flux bench 模式下使用，普通执行时跳过
         } else if (auto* pb = dynamic_cast<PersistentBlock*>(stmt.get())) {
             for (auto& field : pb->fields) {
                 if (!persistentStore_.count(field.name)) {
@@ -273,6 +275,7 @@ void Interpreter::execute(Program* program) {
         if (dynamic_cast<FnDecl*>(stmt.get()))          continue;
         if (dynamic_cast<ProfiledFnDecl*>(stmt.get()))  continue;
         if (dynamic_cast<PersistentBlock*>(stmt.get())) continue;
+        if (dynamic_cast<BenchDecl*>(stmt.get()))       continue;  // bench: 跳过
         // test 包装的函数已在第一遍处理，跳过含 FnDecl 的 TestDecl
         if (auto* td = dynamic_cast<TestDecl*>(stmt.get())) {
             if (noTest_) continue;  // --no-test: 跳过所有 test 声明
@@ -1522,6 +1525,20 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
                 return Value::Arr(arr);
             }
         }
+        // ── Addr 方法调度（委托到 Server 等 stdlib 模块）────
+        if (obj.type == Value::Type::Addr) {
+            // 尝试 Server 模块方法：app.get(...) → Server.get(app, ...)
+            auto sit = stdlibModules_.find("Server");
+            if (sit != stdlibModules_.end()) {
+                auto fit = sit->second.find(n->fn);
+                if (fit != sit->second.end()) {
+                    std::vector<Value> fullArgs;
+                    fullArgs.push_back(obj);  // prepend self (Addr)
+                    for (auto& a : margs) fullArgs.push_back(std::move(a));
+                    return fit->second(std::move(fullArgs));
+                }
+            }
+        }
         throw std::runtime_error("unknown method '" + n->fn + "' on " + obj.toString());
     }
 
@@ -1583,6 +1600,11 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
             return v;
         }
         // test func: 已在 execute() 第一遍处理
+        return Value::Nil();
+    }
+
+    // ── bench 基准测试声明（普通执行时跳过）──
+    if (dynamic_cast<BenchDecl*>(node)) {
         return Value::Nil();
     }
 
