@@ -237,7 +237,7 @@ AI agents can use `flux inspect --json` to discover contracts without parsing so
 | v2 | Pre-exec Checks | Interface completeness, enum validation | Done |
 | v2 | AI-Native Types | `specify` declarations, `Specify.validate/describe/schema`, contract-based programming | Done |
 | v2 | Native Compilation | `flux compile` to x86_64/arm64/riscv64 binary, `flux profile` | Done |
-| M  | Self-hosting | Flux compiles Flux | Planned |
+| M  | Self-hosting | Flux bytecode compiler + VM written in Flux (27 tests) | Done |
 
 ## Design Philosophy — Why Not Rust / C++?
 
@@ -286,7 +286,7 @@ Flux/
 │   │   ├── jit.h               JIT compiler
 │   │   ├── codegen.h           Native code generation
 │   │   └── fluz.h              Binary format protection (.fluz)
-│   └── examples/               23 demo scripts
+│   └── examples/               28 demo scripts (incl. self-hosting compiler)
 ├── vscode-flux/                VSCode extension (syntax, snippets, folding)
 ├── Flux Language Spec.docx     Language specification document
 └── README.md                   ← you are here
