@@ -49,6 +49,26 @@ RIGHT_S        equ 41
 HIST_MAX       equ 16
 HIST_W         equ 64
 
+; History entry: 64 cmd + 256 output + 1 expanded + 1 output_lines = 322
+HIST_ENTRY_SIZE equ 322
+HIST_CMD_OFF   equ 0
+HIST_OUT_OFF   equ 64
+HIST_EXP_OFF   equ 320
+HIST_OLINES_OFF equ 321
+
+SC_CTRL        equ 0x1D
+SC_ALT         equ 0x38
+SC_LEFT        equ 0x4B
+SC_RIGHT       equ 0x4D
+SC_DOWN        equ 0x50
+SC_ENTER       equ 0x1C
+
+COL_HIST_SEL   equ 0x1F    ; white on dark blue
+COL_HIST_ARROW equ 0x0E    ; yellow
+COL_FADE1      equ 0x08    ; dark gray
+COL_FADE2      equ 0x07    ; gray
+COL_FADE3      equ 0x0F    ; bright white
+
 FS_ENTRY_SZ    equ 64
 FS_NAME        equ 0
 FS_DPTR        equ 32
@@ -94,6 +114,15 @@ last_cmd_len:  resb 1
 
 hist_buf:      resb HIST_MAX * HIST_W
 hist_count:    resb 1
+
+; Interactive history panel data
+hist_entries:  resb HIST_MAX * HIST_ENTRY_SIZE
+hist_entry_cnt: resb 1
+hist_selected: resb 1      ; currently selected index in right panel
+focus_panel:   resb 1      ; 0=left, 1=right
+ctrl_held:     resb 1
+alt_held:      resb 1
+pre_cmd_row:   resb 1      ; left_row before command execution
 
 tick_count:    resd 1
 pit_last:      resw 1
@@ -211,6 +240,13 @@ c_stat:   db "stat", 0
 
 tab_cmds: db "help clear info pwd ls cd mkdir touch write cat rm stat mem uptime", 0
 
+arrow_right: db "> ", 0     ; collapsed arrow (ASCII >)
+arrow_down:  db "v ", 0     ; expanded arrow (ASCII v)
+
+; Ease-out delay table (in PIT ticks, ~10ms each)
+ease_out_5: db 2, 3, 4, 6, 9
+ease_in_5:  db 9, 6, 4, 3, 2
+
 scancode_table:
     db 0, 27, '1','2','3','4','5','6','7','8','9','0','-','=', 8, 9
     db 'q','w','e','r','t','y','u','i','o','p','[',']', 13, 0
@@ -237,6 +273,12 @@ _start:
     mov byte [cmd_len], 0
     mov byte [last_cmd_len], 0
     mov byte [hist_count], 0
+    mov byte [hist_entry_cnt], 0
+    mov byte [hist_selected], 0
+    mov byte [focus_panel], 0
+    mov byte [ctrl_held], 0
+    mov byte [alt_held], 0
+    mov byte [pre_cmd_row], 0
     mov dword [tick_count], 0
     mov word [pit_last], 0
 
@@ -953,6 +995,9 @@ add_hist:
     push eax
     push ecx
     push edi
+    push esi              ; save esi for hist_entries copy
+
+    ; --- Original hist_buf logic ---
     movzx eax, byte [hist_count]
     cmp eax, HIST_MAX
     jl .ah_ns
@@ -962,13 +1007,27 @@ add_hist:
     mov ecx, (HIST_MAX - 1) * HIST_W
     rep movsb
     pop esi
+    ; Also shift hist_entries
+    push esi
+    mov edi, hist_entries
+    lea esi, [hist_entries + HIST_ENTRY_SIZE]
+    mov ecx, (HIST_MAX - 1) * HIST_ENTRY_SIZE
+    rep movsb
+    pop esi
     mov eax, HIST_MAX - 1
     jmp .ah_cp
 .ah_ns:
     inc byte [hist_count]
 .ah_cp:
+    push eax              ; save index for hist_entries
     imul eax, HIST_W
     lea edi, [hist_buf + eax]
+    pop eax
+    push eax
+    push edi
+    ; Restore original esi from stack
+    ; Stack: [esp]=edi, [esp+4]=eax, [esp+8]=saved_esi, [esp+12]=saved_edi_orig, ...
+    mov esi, [esp + 8]    ; original esi (command string)
     mov ecx, HIST_W - 1
 .ah_c:
     lodsb
@@ -980,21 +1039,71 @@ add_hist:
 .ah_pad:
     xor al, al
     rep stosb
+    pop edi               ; discard saved edi
+    pop eax               ; index back
+
+    ; --- hist_entries: copy cmd, clear output, collapsed ---
+    push eax
+    imul eax, HIST_ENTRY_SIZE
+    lea edi, [hist_entries + eax]
+    ; Clear entire entry first
+    push edi
+    mov ecx, HIST_ENTRY_SIZE
+    xor al, al
+    rep stosb
+    pop edi
+    ; Copy command string
+    ; Stack: [esp]=eax, [esp+4]=saved_esi, [esp+8]=saved_edi, ...
+    mov esi, [esp + 4]    ; original esi (cmd string)
+    mov ecx, 63
+.ah_ecmd:
+    lodsb
+    test al, al
+    jz .ah_ecmd_done
+    mov [edi], al
+    inc edi
+    dec ecx
+    jnz .ah_ecmd
+.ah_ecmd_done:
+    mov byte [edi], 0
+    pop eax
+
+    ; Update hist_entry_cnt to match hist_count
+    mov cl, [hist_count]
+    mov [hist_entry_cnt], cl
+
+    ; Set selected to newest entry
+    dec cl
+    mov [hist_selected], cl
+
+    pop esi               ; restore original esi
     pop edi
     pop ecx
     pop eax
-    call draw_hist
+    call draw_hist_panel
     ret
 
 draw_hist:
+    ; Legacy wrapper
+    call draw_hist_panel
+    ret
+
+; ═══════════════════════════════════════════════════
+; Draw history panel with arrows, selection, expand
+; ═══════════════════════════════════════════════════
+draw_hist_panel:
     push eax
+    push ebx
     push edx
     push ecx
     push esi
+    push edi
+
+    ; Clear right pane area
     mov eax, PANE_TOP
-.dh_clr:
+.dhp_clr:
     cmp eax, PANE_BOT
-    jg .dh_draw
+    jg .dhp_draw
     push eax
     mov edx, RIGHT_S
     call vga_off
@@ -1003,40 +1112,478 @@ draw_hist:
     rep stosw
     pop eax
     inc eax
-    jmp .dh_clr
-.dh_draw:
-    movzx ecx, byte [hist_count]
+    jmp .dhp_clr
+
+.dhp_draw:
+    movzx ecx, byte [hist_entry_cnt]
     test ecx, ecx
-    jz .dh_done
-    mov eax, PANE_TOP
-    dec ecx
-.dh_lp:
+    jz .dhp_done
+
+    ; Draw from newest (top) to oldest
+    ; ecx = count, we draw index (ecx-1) down to 0
+    mov eax, PANE_TOP       ; current screen row
+    dec ecx                 ; start index = count-1
+
+.dhp_loop:
     cmp ecx, 0
-    jl .dh_done
+    jl .dhp_done
     cmp eax, PANE_BOT
-    jg .dh_done
+    jg .dhp_done
+
     push eax
     push ecx
-    imul ecx, HIST_W
-    lea esi, [hist_buf + ecx]
+
+    ; Determine color based on selection and focus
+    mov bl, COL_HIST         ; default color
+    cmp byte [focus_panel], 1
+    jne .dhp_no_sel
+    cmp cl, [hist_selected]
+    jne .dhp_no_sel
+    mov bl, COL_HIST_SEL     ; selected: white on blue
+.dhp_no_sel:
+
+    ; Draw arrow
+    push ebx
+    imul edx, ecx, HIST_ENTRY_SIZE
+    cmp byte [hist_entries + edx + HIST_EXP_OFF], 0
+    jne .dhp_expanded_arrow
+    ; Collapsed: >
     mov edx, RIGHT_S
-    mov bl, COL_HIST
+    mov esi, arrow_right
+    mov bl, COL_HIST_ARROW
     call draw_at
+    jmp .dhp_arrow_done
+.dhp_expanded_arrow:
+    mov edx, RIGHT_S
+    mov esi, arrow_down
+    mov bl, COL_HIST_ARROW
+    call draw_at
+.dhp_arrow_done:
+    pop ebx
+
+    ; Draw command text (after arrow, col RIGHT_S+2)
+    pop ecx
+    push ecx
+    imul edx, ecx, HIST_ENTRY_SIZE
+    lea esi, [hist_entries + edx + HIST_CMD_OFF]
+    mov edx, RIGHT_S + 2
+    call draw_at
+
     pop ecx
     pop eax
-    inc eax
-    dec ecx
-    jmp .dh_lp
-.dh_done:
+
+    ; If expanded, draw output lines below
+    push eax
+    push ecx
+    imul edx, ecx, HIST_ENTRY_SIZE
+    cmp byte [hist_entries + edx + HIST_EXP_OFF], 0
+    je .dhp_no_expand
+    movzx ebx, byte [hist_entries + edx + HIST_OLINES_OFF]
+    test ebx, ebx
+    jz .dhp_no_expand
+
+    ; Draw each output line
+    lea esi, [hist_entries + edx + HIST_OUT_OFF]
+    xor edi, edi            ; line counter
+.dhp_oloop:
+    cmp edi, ebx
+    jge .dhp_no_expand
+    inc eax                 ; next screen row
+    cmp eax, PANE_BOT
+    jg .dhp_no_expand
+    push eax
+    push ebx
+    push edi
+    push esi
+    mov edx, RIGHT_S + 2
+    mov bl, COL_OUTPUT
+    call draw_at
+    ; esi advanced past the string already by draw_at
+    pop esi
+    pop edi
+    pop ebx
+    pop eax
+    ; Advance esi to next line (find null, skip it)
+    push ecx
+    xor ecx, ecx
+.dhp_skip:
+    cmp byte [esi], 0
+    je .dhp_skip_done
+    inc esi
+    inc ecx
+    cmp ecx, 38
+    jge .dhp_skip_done
+    jmp .dhp_skip
+.dhp_skip_done:
+    inc esi                 ; skip the null
+    pop ecx
+    inc edi
+    jmp .dhp_oloop
+
+.dhp_no_expand:
+    pop ecx
+    pop eax
+    inc eax                 ; next row
+    dec ecx                 ; next entry index
+    jmp .dhp_loop
+
+.dhp_done:
+    pop edi
     pop esi
     pop ecx
     pop edx
+    pop ebx
+    pop eax
+    ret
+
+; ═══════════════════════════════════════════════════
+; Wait N PIT ticks (eax = number of ticks to wait)
+; ═══════════════════════════════════════════════════
+wait_ticks:
+    push ecx
+    push eax
+    mov ecx, [tick_count]
+    add ecx, eax
+.wt_loop:
+    call pit_poll
+    cmp [tick_count], ecx
+    jl .wt_loop
+    pop eax
+    pop ecx
+    ret
+
+; ═══════════════════════════════════════════════════
+; Capture output: store output lines for hist entry
+; Call after command execution.
+; Uses pre_cmd_row (saved before exec) and current left_row.
+; eax = hist entry index
+; ═══════════════════════════════════════════════════
+capture_output:
+    push eax
+    push ebx
+    push ecx
+    push edx
+    push esi
+    push edi
+
+    ; Calculate number of output lines
+    movzx ebx, byte [left_row]
+    movzx ecx, byte [pre_cmd_row]
+    sub ebx, ecx               ; ebx = number of output lines
+    cmp ebx, 0
+    jle .co_none
+    cmp ebx, 8                 ; max 8 lines of output stored
+    jle .co_ok
+    mov ebx, 8
+.co_ok:
+    ; Get entry pointer
+    movzx eax, byte [hist_entry_cnt]
+    dec eax                     ; newest entry
+    imul eax, HIST_ENTRY_SIZE
+    lea edi, [hist_entries + eax + HIST_OUT_OFF]
+    mov [hist_entries + eax + HIST_OLINES_OFF], bl
+
+    ; Copy lines from VGA memory
+    ; Source: row (pre_cmd_row + PANE_TOP) through (pre_cmd_row + PANE_TOP + ebx - 1)
+    movzx ecx, byte [pre_cmd_row]
+    add ecx, PANE_TOP          ; start screen row
+    xor edx, edx               ; line counter
+.co_line:
+    cmp edx, ebx
+    jge .co_done
+    push ebx
+    push edx
+    push ecx
+    ; Read from VGA: row ecx, col 0, up to LEFT_W chars
+    push eax
+    mov eax, ecx
+    push edx
+    mov edx, 0
+    call vga_off               ; edi_vga = edi (but we need edi for output)
+    pop edx
+    pop eax
+    ; edi now points to VGA row -- save our output dest
+    mov esi, edi               ; esi = VGA source
+    ; Restore edi to output buffer
+    pop ecx
+    pop edx
+    pop ebx
+    push ebx
+    push edx
+    push ecx
+    ; Calculate output buffer position
+    push eax
+    movzx eax, byte [hist_entry_cnt]
+    dec eax
+    imul eax, HIST_ENTRY_SIZE
+    lea edi, [hist_entries + eax + HIST_OUT_OFF]
+    pop eax
+    ; Advance edi to current line offset (each line up to 32 chars + null)
+    push edx
+    push eax
+    mov eax, edx
+    imul eax, 33               ; 32 chars + null per line
+    add edi, eax
+    pop eax
+    pop edx
+    ; Copy chars from VGA (every other byte is char, skip attribute)
+    push ecx
+    mov ecx, 32                ; max chars per output line
+.co_char:
+    mov al, [esi]
+    cmp al, ' '
+    jl .co_space
+    jmp .co_store
+.co_space:
+    mov al, ' '
+.co_store:
+    mov [edi], al
+    add esi, 2                 ; skip VGA attribute byte
+    inc edi
+    dec ecx
+    jnz .co_char
+    ; Trim trailing spaces and null-terminate
+    dec edi
+.co_trim:
+    cmp byte [edi], ' '
+    jne .co_trimmed
+    cmp edi, hist_entries      ; safety bound
+    jle .co_trimmed
+    dec edi
+    jmp .co_trim
+.co_trimmed:
+    inc edi
+    mov byte [edi], 0
+    pop ecx
+
+    pop ecx
+    pop edx
+    pop ebx
+    inc edx
+    inc ecx
+    jmp .co_line
+
+.co_none:
+    ; No output lines
+    movzx eax, byte [hist_entry_cnt]
+    dec eax
+    imul eax, HIST_ENTRY_SIZE
+    mov byte [hist_entries + eax + HIST_OLINES_OFF], 0
+.co_done:
+    pop edi
+    pop esi
+    pop edx
+    pop ecx
+    pop ebx
+    pop eax
+    ret
+
+; ═══════════════════════════════════════════════════
+; Expand animation for history entry
+; ecx = hist entry index
+; ═══════════════════════════════════════════════════
+expand_animation:
+    push eax
+    push ebx
+    push ecx
+    push edx
+    push esi
+    push edi
+
+    ; Mark as expanded
+    imul edx, ecx, HIST_ENTRY_SIZE
+    mov byte [hist_entries + edx + HIST_EXP_OFF], 1
+
+    ; Get number of output lines
+    movzx ebx, byte [hist_entries + edx + HIST_OLINES_OFF]
+    test ebx, ebx
+    jz .ea_done
+
+    ; Redraw with animation: draw each output line with fade
+    ; First redraw to show arrow change
+    call draw_hist_panel
+
+    ; Now animate: for each output line, fade in
+    ; Find screen row of this entry's first output line
+    ; We need to figure out which row the entry is on
+    ; For simplicity, just redraw with increasing brightness
+    ; Step through fade colors: dark -> medium -> bright
+    xor edi, edi             ; output line index
+.ea_line:
+    cmp edi, ebx
+    jge .ea_final
+
+    ; Wait with ease-out delay
+    push eax
+    cmp edi, 4
+    jg .ea_def_delay
+    movzx eax, byte [ease_out_5 + edi]
+    jmp .ea_do_wait
+.ea_def_delay:
+    mov eax, 5
+.ea_do_wait:
+    call wait_ticks
+    pop eax
+
+    ; Redraw panel (the line is already there, just visible)
+    call draw_hist_panel
+
+    inc edi
+    jmp .ea_line
+
+.ea_final:
+    call draw_hist_panel
+.ea_done:
+    pop edi
+    pop esi
+    pop edx
+    pop ecx
+    pop ebx
+    pop eax
+    ret
+
+; ═══════════════════════════════════════════════════
+; Collapse animation for history entry
+; ecx = hist entry index
+; ═══════════════════════════════════════════════════
+collapse_animation:
+    push eax
+    push ebx
+    push ecx
+    push edx
+    push esi
+    push edi
+
+    imul edx, ecx, HIST_ENTRY_SIZE
+    movzx ebx, byte [hist_entries + edx + HIST_OLINES_OFF]
+    test ebx, ebx
+    jz .ca_mark
+
+    ; Animate fade out: briefly flash darker colors
+    ; Quick reverse: redraw a couple times with delays
+    mov edi, ebx
+    dec edi
+.ca_line:
+    cmp edi, 0
+    jl .ca_mark
+
+    push eax
+    cmp edi, 4
+    jg .ca_def_delay
+    movzx eax, byte [ease_in_5 + edi]
+    jmp .ca_do_wait
+.ca_def_delay:
+    mov eax, 5
+.ca_do_wait:
+    call wait_ticks
+    pop eax
+
+    dec edi
+    jmp .ca_line
+
+.ca_mark:
+    ; Mark as collapsed
+    imul edx, ecx, HIST_ENTRY_SIZE
+    mov byte [hist_entries + edx + HIST_EXP_OFF], 0
+
+    call draw_hist_panel
+
+    pop edi
+    pop esi
+    pop edx
+    pop ecx
+    pop ebx
+    pop eax
+    ret
+
+; ═══════════════════════════════════════════════════
+; Right panel focus loop
+; ═══════════════════════════════════════════════════
+right_panel_loop:
+    push eax
+
+    ; Set focus to right panel
+    mov byte [focus_panel], 1
+    ; Set selected to newest entry if count > 0
+    movzx eax, byte [hist_entry_cnt]
+    test eax, eax
+    jz .rpl_exit
+    dec eax
+    mov [hist_selected], al
+    call draw_hist_panel
+
+.rpl_input:
+    call pit_poll
+    call read_key
+    test al, al
+    jz .rpl_input
+
+    cmp al, 0xFD             ; Ctrl+Alt+Left -> back to left
+    je .rpl_exit
+
+    cmp al, 0xFC             ; Up arrow
+    je .rpl_up
+
+    cmp al, 0xFB             ; Down arrow
+    je .rpl_down
+
+    cmp al, 0xFA             ; Enter -> toggle expand
+    je .rpl_enter
+
+    jmp .rpl_input
+
+.rpl_up:
+    movzx eax, byte [hist_selected]
+    movzx ecx, byte [hist_entry_cnt]
+    dec ecx
+    cmp eax, ecx
+    jge .rpl_input            ; already at top (newest)
+    inc byte [hist_selected]
+    call draw_hist_panel
+    jmp .rpl_input
+
+.rpl_down:
+    cmp byte [hist_selected], 0
+    je .rpl_input             ; already at bottom (oldest)
+    dec byte [hist_selected]
+    call draw_hist_panel
+    jmp .rpl_input
+
+.rpl_enter:
+    movzx ecx, byte [hist_selected]
+    cmp ecx, 0
+    jl .rpl_input
+    movzx eax, byte [hist_entry_cnt]
+    cmp ecx, eax
+    jge .rpl_input
+
+    ; Toggle expand/collapse
+    imul edx, ecx, HIST_ENTRY_SIZE
+    cmp byte [hist_entries + edx + HIST_EXP_OFF], 0
+    jne .rpl_collapse
+    ; Expand
+    call expand_animation
+    jmp .rpl_input
+.rpl_collapse:
+    call collapse_animation
+    jmp .rpl_input
+
+.rpl_exit:
+    mov byte [focus_panel], 0
+    call draw_hist_panel
+    ; Restore cursor to left pane
+    call lp_cursor
     pop eax
     ret
 
 ; ═══════════════════════════════════════════════════
 ; Keyboard (polling)
 ; ═══════════════════════════════════════════════════
+; Returns: al = ASCII char, or special codes:
+;   0xFF = up arrow (recall), 9 = tab, 0xFE = Ctrl+Alt+Right,
+;   0xFD = Ctrl+Alt+Left, 0xFC = arrow up (hist nav),
+;   0xFB = arrow down (hist nav), 0xFA = Enter (hist)
+;   0 = nothing
 read_key:
     push edx
     in al, KBD_STATUS
@@ -1046,11 +1593,61 @@ read_key:
     ; Release?
     test al, 0x80
     jnz .rk_rel
+    ; Ctrl press?
+    cmp al, SC_CTRL
+    je .rk_ctrl_on
+    ; Alt press?
+    cmp al, SC_ALT
+    je .rk_alt_on
     ; Shift?
     cmp al, SC_LSHIFT
     je .rk_son
     cmp al, SC_RSHIFT
     je .rk_son
+
+    ; Check Ctrl+Alt+Arrow combos
+    cmp byte [ctrl_held], 0
+    je .rk_no_ctrlalt
+    cmp byte [alt_held], 0
+    je .rk_no_ctrlalt
+    ; Ctrl+Alt held -- check arrows
+    cmp al, SC_RIGHT
+    je .rk_ca_right
+    cmp al, SC_LEFT
+    je .rk_ca_left
+    jmp .rk_no_ctrlalt
+.rk_ca_right:
+    mov al, 0xFE
+    jmp .rk_done
+.rk_ca_left:
+    mov al, 0xFD
+    jmp .rk_done
+
+.rk_no_ctrlalt:
+    ; If right panel focused, handle nav keys
+    cmp byte [focus_panel], 1
+    jne .rk_normal
+    ; Right panel mode: Up/Down/Enter
+    cmp al, SC_UP
+    je .rk_hist_up
+    cmp al, SC_DOWN
+    je .rk_hist_down
+    cmp al, SC_ENTER
+    je .rk_hist_enter
+    ; Ignore other keys when right panel focused
+    xor al, al
+    jmp .rk_done
+.rk_hist_up:
+    mov al, 0xFC
+    jmp .rk_done
+.rk_hist_down:
+    mov al, 0xFB
+    jmp .rk_done
+.rk_hist_enter:
+    mov al, 0xFA
+    jmp .rk_done
+
+.rk_normal:
     ; Up arrow?
     cmp al, SC_UP
     je .rk_up
@@ -1072,16 +1669,36 @@ read_key:
     mov byte [shift_held], 1
     xor al, al
     jmp .rk_done
+.rk_ctrl_on:
+    mov byte [ctrl_held], 1
+    xor al, al
+    jmp .rk_done
+.rk_alt_on:
+    mov byte [alt_held], 1
+    xor al, al
+    jmp .rk_done
 .rk_rel:
     and al, 0x7F
     cmp al, SC_LSHIFT
     je .rk_soff
     cmp al, SC_RSHIFT
     je .rk_soff
+    cmp al, SC_CTRL
+    je .rk_ctrl_off
+    cmp al, SC_ALT
+    je .rk_alt_off
     xor al, al
     jmp .rk_done
 .rk_soff:
     mov byte [shift_held], 0
+    xor al, al
+    jmp .rk_done
+.rk_ctrl_off:
+    mov byte [ctrl_held], 0
+    xor al, al
+    jmp .rk_done
+.rk_alt_off:
+    mov byte [alt_held], 0
     xor al, al
     jmp .rk_done
 .rk_up:
@@ -1276,6 +1893,11 @@ parse_args:
 ; ═══════════════════════════════════════════════════
 ; Command Loop
 ; ═══════════════════════════════════════════════════
+cmd_done:
+    ; Capture output from the last command execution
+    call capture_output
+    call draw_hist_panel
+
 cmd_loop:
     mov esi, prompt
     mov bl, COL_PROMPT
@@ -1292,6 +1914,8 @@ cmd_loop:
     call read_key
     test al, al
     jz .rl
+    cmp al, 0xFE             ; Ctrl+Alt+Right -> right panel
+    je .focus_right
     cmp al, 0xFF
     je .recall
     cmp al, 9
@@ -1381,6 +2005,10 @@ cmd_loop:
     inc ecx
     jmp .tab_rd
 
+.focus_right:
+    call right_panel_loop
+    jmp .rl
+
 .exec:
     movzx ecx, byte [cmd_len]
     mov byte [cmd_buf + ecx], 0
@@ -1400,6 +2028,11 @@ cmd_loop:
 
     mov esi, cmd_buf
     call add_hist
+
+    ; Save current left_row before command execution for output capture
+    mov al, [left_row]
+    mov [pre_cmd_row], al
+
     call parse_args
 
     ; Match exact commands
@@ -1470,7 +2103,7 @@ cmd_loop:
     mov esi, cmd_buf
     mov bl, COL_ERR
     call lp_println
-    jmp cmd_loop
+    jmp cmd_done
 
 ; ── help ──
 .cmd_help:
@@ -1510,11 +2143,11 @@ cmd_loop:
     call lp_println
     mov esi, h16
     call lp_println
-    jmp cmd_loop
+    jmp cmd_done
 
 .cmd_clear:
     call lp_clear
-    jmp cmd_loop
+    jmp cmd_done
 
 .cmd_info:
     mov esi, info1
@@ -1529,20 +2162,20 @@ cmd_loop:
     call lp_println
     mov esi, info5
     call lp_println
-    jmp cmd_loop
+    jmp cmd_done
 
 .cmd_hello:
     mov esi, hello_msg
     mov bl, COL_OK
     call lp_println
-    jmp cmd_loop
+    jmp cmd_done
 
 .cmd_pwd:
     call build_path
     mov esi, pathbuf
     mov bl, COL_VER
     call lp_println
-    jmp cmd_loop
+    jmp cmd_done
 
 .cmd_reboot:
     lidt [.null_idt]
@@ -1566,7 +2199,7 @@ cmd_loop:
     mov esi, s_seconds
     mov bl, COL_OUTPUT
     call lp_println
-    jmp cmd_loop
+    jmp cmd_done
 
 .cmd_mem:
     mov esi, s_total
@@ -1605,7 +2238,7 @@ cmd_loop:
     mov esi, s_pages
     mov bl, COL_OUTPUT
     call lp_println
-    jmp cmd_loop
+    jmp cmd_done
 
 ; ── ls ──
 .cmd_ls:
@@ -1644,7 +2277,7 @@ cmd_loop:
     inc ebx
     jmp .ls_lp
 .ls_done:
-    jmp cmd_loop
+    jmp cmd_done
 
 ; ── cd ──
 .cmd_cd:
@@ -1657,7 +2290,7 @@ cmd_loop:
     jne .cd_nr
     mov byte [fs_cwd], 0
     call update_panel
-    jmp cmd_loop
+    jmp cmd_done
 .cd_nr:
     ; cd ..
     mov esi, arg1
@@ -1675,7 +2308,7 @@ cmd_loop:
 .cd_par:
     mov [fs_cwd], al
     call update_panel
-    jmp cmd_loop
+    jmp cmd_done
 .cd_named:
     mov esi, arg1
     movzx edx, byte [fs_cwd]
@@ -1687,21 +2320,21 @@ cmd_loop:
     jne .cd_nd
     mov [fs_cwd], al
     call update_panel
-    jmp cmd_loop
+    jmp cmd_done
 .cd_nf:
     mov esi, e_nf
     mov bl, COL_ERR
     call lp_print
     mov esi, arg1
     call lp_println
-    jmp cmd_loop
+    jmp cmd_done
 .cd_nd:
     mov esi, e_ndir
     mov bl, COL_ERR
     call lp_print
     mov esi, arg1
     call lp_println
-    jmp cmd_loop
+    jmp cmd_done
 
 ; ── mkdir ──
 .cmd_mkdir:
@@ -1719,12 +2352,12 @@ cmd_loop:
     call fs_add_entry
     add esp, 12
     call update_panel
-    jmp cmd_loop
+    jmp cmd_done
 .mk_ex:
     mov esi, e_exist
     mov bl, COL_ERR
     call lp_println
-    jmp cmd_loop
+    jmp cmd_done
 
 ; ── touch ──
 .cmd_touch:
@@ -1742,7 +2375,7 @@ cmd_loop:
     call fs_add_entry
     add esp, 12
     call update_panel
-    jmp cmd_loop
+    jmp cmd_done
 
 ; ── write ──
 .cmd_write:
@@ -1777,17 +2410,17 @@ cmd_loop:
     call fs_set_content
     add esp, 8
     call update_panel
-    jmp cmd_loop
+    jmp cmd_done
 .wr_isdir:
     mov esi, e_isdir
     mov bl, COL_ERR
     call lp_println
-    jmp cmd_loop
+    jmp cmd_done
 .wr_full:
     mov esi, e_full
     mov bl, COL_ERR
     call lp_println
-    jmp cmd_loop
+    jmp cmd_done
 
 ; ── cat ──
 .cmd_cat:
@@ -1806,19 +2439,19 @@ cmd_loop:
     jz cmd_loop
     mov bl, COL_OUTPUT
     call lp_println
-    jmp cmd_loop
+    jmp cmd_done
 .cat_nf:
     mov esi, e_nf
     mov bl, COL_ERR
     call lp_print
     mov esi, arg1
     call lp_println
-    jmp cmd_loop
+    jmp cmd_done
 .cat_dir:
     mov esi, e_isdir
     mov bl, COL_ERR
     call lp_println
-    jmp cmd_loop
+    jmp cmd_done
 
 ; ── rm ──
 .cmd_rm:
@@ -1855,21 +2488,21 @@ cmd_loop:
     mov esi, e_notempty
     mov bl, COL_ERR
     call lp_println
-    jmp cmd_loop
+    jmp cmd_done
 .rm_empty:
     pop ebx
     pop eax
 .rm_do:
     mov byte [fs_tab + ebx + FS_TYPE], FS_FREE
     call update_panel
-    jmp cmd_loop
+    jmp cmd_done
 .rm_nf:
     mov esi, e_nf
     mov bl, COL_ERR
     call lp_print
     mov esi, arg1
     call lp_println
-    jmp cmd_loop
+    jmp cmd_done
 
 ; ── stat ──
 .cmd_stat:
@@ -1906,11 +2539,11 @@ cmd_loop:
     mov esi, s_bytes
     mov bl, COL_OUTPUT
     call lp_println
-    jmp cmd_loop
+    jmp cmd_done
 .st_nf:
     mov esi, e_nf
     mov bl, COL_ERR
     call lp_print
     mov esi, arg1
     call lp_println
-    jmp cmd_loop
+    jmp cmd_done
