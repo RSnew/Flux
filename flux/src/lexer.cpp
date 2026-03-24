@@ -103,6 +103,7 @@ std::vector<Token> Lexer::readStringWithInterp() {
         if (c == '\\') {
             char next = peek();
             if (next == 'n')  { advance(); segment += '\n'; }
+            else if (next == 'r')  { advance(); segment += '\r'; }
             else if (next == 't')  { advance(); segment += '\t'; }
             else if (next == '"')  { advance(); segment += '"'; }
             else if (next == '\\') { advance(); segment += '\\'; }

@@ -19,18 +19,28 @@
 #include <mutex>    // std::mutex, std::once_flag
 #include <algorithm> // std::sort, std::transform
 #include <filesystem> // File operations (C++17)
+#include <regex>      // std::regex, std::regex_search, std::regex_replace
 
 namespace fs = std::filesystem;
 
 // POSIX socket（Http 模块使用）
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <netdb.h>
 #include <unistd.h>
+#include <sys/utsname.h>  // uname()
+#include <sys/wait.h>     // WEXITSTATUS
 
-// OpenSSL（HTTPS 支持）
+// OpenSSL（HTTPS 支持 + Crypto 模块）
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+#include <openssl/rand.h>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+#include <openssl/rand.h>
 
 // ═══════════════════════════════════════════════════════════
 // JSON 解析器（手写递归下降）
@@ -1592,6 +1602,859 @@ static ServerState* getServerFromAddr(Value& v) {
     return reinterpret_cast<ServerState*>(v.addr);
 }
 
+// ═══════════════════════════════════════════════════════════
+// Regex 模块 — C++ <regex> 包装
+// ═══════════════════════════════════════════════════════════
+static std::unordered_map<std::string, StdlibFn> makeRegexModule() {
+    return {
+        // Regex.match(pattern, str) → Bool
+        {"match", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2 || args[0].type != Value::Type::String
+                                || args[1].type != Value::Type::String)
+                throw std::runtime_error("Regex.match(pattern, str) — requires 2 String args");
+            try {
+                std::regex re(args[0].string);
+                return Value::Bool(std::regex_search(args[1].string, re));
+            } catch (const std::regex_error& e) {
+                throw std::runtime_error(std::string("Regex.match: invalid pattern — ") + e.what());
+            }
+        }},
+
+        // Regex.isMatch(pattern, str) → Bool  (alias for match)
+        // Note: "test" is a reserved keyword in Flux, so we use "isMatch" instead.
+        {"isMatch", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2 || args[0].type != Value::Type::String
+                                || args[1].type != Value::Type::String)
+                throw std::runtime_error("Regex.isMatch(pattern, str) — requires 2 String args");
+            try {
+                std::regex re(args[0].string);
+                return Value::Bool(std::regex_search(args[1].string, re));
+            } catch (const std::regex_error& e) {
+                throw std::runtime_error(std::string("Regex.isMatch: invalid pattern — ") + e.what());
+            }
+        }},
+
+        // Regex.find(pattern, str) → String | null
+        {"find", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2 || args[0].type != Value::Type::String
+                                || args[1].type != Value::Type::String)
+                throw std::runtime_error("Regex.find(pattern, str) — requires 2 String args");
+            try {
+                std::regex re(args[0].string);
+                std::smatch m;
+                if (std::regex_search(args[1].string, m, re))
+                    return Value::Str(m[0].str());
+                return Value::Nil();
+            } catch (const std::regex_error& e) {
+                throw std::runtime_error(std::string("Regex.find: invalid pattern — ") + e.what());
+            }
+        }},
+
+        // Regex.findAll(pattern, str) → Array[String]
+        {"findAll", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2 || args[0].type != Value::Type::String
+                                || args[1].type != Value::Type::String)
+                throw std::runtime_error("Regex.findAll(pattern, str) — requires 2 String args");
+            try {
+                std::regex re(args[0].string);
+                auto arr = std::make_shared<std::vector<Value>>();
+                auto begin = std::sregex_iterator(args[1].string.begin(),
+                                                   args[1].string.end(), re);
+                auto end = std::sregex_iterator();
+                for (auto it = begin; it != end; ++it)
+                    arr->push_back(Value::Str((*it)[0].str()));
+                return Value::Arr(arr);
+            } catch (const std::regex_error& e) {
+                throw std::runtime_error(std::string("Regex.findAll: invalid pattern — ") + e.what());
+            }
+        }},
+
+        // Regex.replace(pattern, str, replacement) → String
+        {"replace", [](std::vector<Value> args) -> Value {
+            if (args.size() < 3 || args[0].type != Value::Type::String
+                                || args[1].type != Value::Type::String
+                                || args[2].type != Value::Type::String)
+                throw std::runtime_error("Regex.replace(pattern, str, replacement) — requires 3 String args");
+            try {
+                std::regex re(args[0].string);
+                return Value::Str(std::regex_replace(args[1].string, re, args[2].string));
+            } catch (const std::regex_error& e) {
+                throw std::runtime_error(std::string("Regex.replace: invalid pattern — ") + e.what());
+            }
+        }},
+
+        // Regex.split(pattern, str) → Array[String]
+        {"split", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2 || args[0].type != Value::Type::String
+                                || args[1].type != Value::Type::String)
+                throw std::runtime_error("Regex.split(pattern, str) — requires 2 String args");
+            try {
+                std::regex re(args[0].string);
+                auto arr = std::make_shared<std::vector<Value>>();
+                std::sregex_token_iterator begin(args[1].string.begin(),
+                                                  args[1].string.end(), re, -1);
+                std::sregex_token_iterator end;
+                for (auto it = begin; it != end; ++it)
+                    arr->push_back(Value::Str(it->str()));
+                return Value::Arr(arr);
+            } catch (const std::regex_error& e) {
+                throw std::runtime_error(std::string("Regex.split: invalid pattern — ") + e.what());
+            }
+        }},
+
+        // Regex.groups(pattern, str) → Array[String]  (capture groups, excluding group 0)
+        {"groups", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2 || args[0].type != Value::Type::String
+                                || args[1].type != Value::Type::String)
+                throw std::runtime_error("Regex.groups(pattern, str) — requires 2 String args");
+            try {
+                std::regex re(args[0].string);
+                std::smatch m;
+                auto arr = std::make_shared<std::vector<Value>>();
+                if (std::regex_search(args[1].string, m, re)) {
+                    for (size_t i = 1; i < m.size(); ++i)
+                        arr->push_back(Value::Str(m[i].str()));
+                }
+                return Value::Arr(arr);
+            } catch (const std::regex_error& e) {
+                throw std::runtime_error(std::string("Regex.groups: invalid pattern — ") + e.what());
+            }
+        }},
+    };
+}
+
+// ═══════════════════════════════════════════════════════════
+// OS 模块 — 进程执行与系统交互
+// ═══════════════════════════════════════════════════════════
+static std::unordered_map<std::string, StdlibFn> makeOSModule() {
+    return {
+        // OS.exec(command) → String — 执行命令，返回 stdout
+        {"exec", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::String)
+                throw std::runtime_error("OS.exec(command) — command must be a String");
+            std::string cmd = args[0].string;
+            std::string result;
+            {
+                GILRelease release;
+                FILE* pipe = popen(cmd.c_str(), "r");
+                if (!pipe)
+                    throw std::runtime_error("OS.exec: failed to execute command");
+                char buf[4096];
+                while (fgets(buf, sizeof(buf), pipe))
+                    result += buf;
+                pclose(pipe);
+            }
+            // 去掉尾部换行
+            while (!result.empty() && result.back() == '\n')
+                result.pop_back();
+            return Value::Str(result);
+        }},
+
+        // OS.execStatus(command) → Number — 执行命令，返回退出码
+        {"execStatus", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::String)
+                throw std::runtime_error("OS.execStatus(command) — command must be a String");
+            std::string cmd = args[0].string;
+            int exitCode;
+            {
+                GILRelease release;
+                int status = system(cmd.c_str());
+                #ifdef _WIN32
+                exitCode = status;
+                #else
+                exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+                #endif
+            }
+            return Value::Num((double)exitCode);
+        }},
+
+        // OS.pid() → Number — 当前进程 ID
+        {"pid", [](std::vector<Value>) -> Value {
+            return Value::Num((double)getpid());
+        }},
+
+        // OS.platform() → String — "darwin", "linux", etc.
+        {"platform", [](std::vector<Value>) -> Value {
+            struct utsname info;
+            if (uname(&info) != 0)
+                return Value::Str("unknown");
+            std::string sys = info.sysname;
+            std::transform(sys.begin(), sys.end(), sys.begin(),
+                           [](unsigned char c){ return std::tolower(c); });
+            return Value::Str(sys);
+        }},
+
+        // OS.arch() → String — "arm64", "x86_64", etc.
+        {"arch", [](std::vector<Value>) -> Value {
+            struct utsname info;
+            if (uname(&info) != 0)
+                return Value::Str("unknown");
+            return Value::Str(info.machine);
+        }},
+
+        // OS.hostname() → String
+        {"hostname", [](std::vector<Value>) -> Value {
+            char buf[256];
+            if (gethostname(buf, sizeof(buf)) != 0)
+                return Value::Str("unknown");
+            return Value::Str(buf);
+        }},
+
+        // OS.cwd() → String — 当前工作目录
+        {"cwd", [](std::vector<Value>) -> Value {
+            char buf[4096];
+            if (getcwd(buf, sizeof(buf)) == nullptr)
+                throw std::runtime_error("OS.cwd: failed to get current directory");
+            return Value::Str(buf);
+        }},
+
+        // OS.chdir(path) → Bool
+        {"chdir", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::String)
+                throw std::runtime_error("OS.chdir(path) — path must be a String");
+            return Value::Bool(chdir(args[0].string.c_str()) == 0);
+        }},
+
+        // OS.args() → Array[String] — 命令行参数（占位）
+        {"args", [](std::vector<Value>) -> Value {
+            return Value::Array();
+        }},
+
+        // OS.exit(code) → Nil — 退出进程
+        {"exit", [](std::vector<Value> args) -> Value {
+            int code = 0;
+            if (!args.empty() && args[0].type == Value::Type::Number)
+                code = (int)args[0].number;
+            std::exit(code);
+            return Value::Nil();
+        }},
+
+        // OS.signal(sig, handler) → Nil — 信号处理占位
+        {"signal", [](std::vector<Value>) -> Value {
+            return Value::Nil();
+        }},
+
+        // OS.tmpdir() → String — 临时目录路径
+        {"tmpdir", [](std::vector<Value>) -> Value {
+            const char* tmp = std::getenv("TMPDIR");
+            if (tmp) return Value::Str(tmp);
+            tmp = std::getenv("TMP");
+            if (tmp) return Value::Str(tmp);
+            tmp = std::getenv("TEMP");
+            if (tmp) return Value::Str(tmp);
+            return Value::Str("/tmp");
+        }},
+
+        // OS.homedir() → String — 用户主目录
+        {"homedir", [](std::vector<Value>) -> Value {
+            const char* home = std::getenv("HOME");
+            if (home) return Value::Str(home);
+            #ifdef _WIN32
+            const char* userprofile = std::getenv("USERPROFILE");
+            if (userprofile) return Value::Str(userprofile);
+            #endif
+            return Value::Str("");
+        }},
+    };
+}
+
+// ═══════════════════════════════════════════════════════════
+// Crypto 模块 — OpenSSL 加密 / 哈希 / 编码
+// ═══════════════════════════════════════════════════════════
+
+// 辅助：字节数组转十六进制字符串
+static std::string bytesToHex(const unsigned char* data, size_t len) {
+    static const char hex[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(len * 2);
+    for (size_t i = 0; i < len; ++i) {
+        result += hex[(data[i] >> 4) & 0x0F];
+        result += hex[data[i] & 0x0F];
+    }
+    return result;
+}
+
+// 辅助：通用 EVP 摘要
+static std::string evpDigest(const std::string& algo, const std::string& input) {
+    const EVP_MD* md = EVP_get_digestbyname(algo.c_str());
+    if (!md)
+        throw std::runtime_error("Crypto: unknown digest algorithm: " + algo);
+    unsigned char hash[EVP_MAX_MD_SIZE];
+    unsigned int hashLen = 0;
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx) throw std::runtime_error("Crypto: EVP_MD_CTX_new failed");
+    EVP_DigestInit_ex(ctx, md, nullptr);
+    EVP_DigestUpdate(ctx, input.data(), input.size());
+    EVP_DigestFinal_ex(ctx, hash, &hashLen);
+    EVP_MD_CTX_free(ctx);
+    return bytesToHex(hash, hashLen);
+}
+
+static std::unordered_map<std::string, StdlibFn> makeCryptoModule() {
+    return {
+        // Crypto.sha256(str) → String (hex)
+        {"sha256", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::String)
+                throw std::runtime_error("Crypto.sha256(str) — str must be a String");
+            return Value::Str(evpDigest("sha256", args[0].string));
+        }},
+
+        // Crypto.sha512(str) → String (hex)
+        {"sha512", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::String)
+                throw std::runtime_error("Crypto.sha512(str) — str must be a String");
+            return Value::Str(evpDigest("sha512", args[0].string));
+        }},
+
+        // Crypto.md5(str) → String (hex)
+        {"md5", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::String)
+                throw std::runtime_error("Crypto.md5(str) — str must be a String");
+            return Value::Str(evpDigest("md5", args[0].string));
+        }},
+
+        // Crypto.hmac(algo, key, data) → String (hex)
+        {"hmac", [](std::vector<Value> args) -> Value {
+            if (args.size() < 3 ||
+                args[0].type != Value::Type::String ||
+                args[1].type != Value::Type::String ||
+                args[2].type != Value::Type::String)
+                throw std::runtime_error("Crypto.hmac(algo, key, data) — all args must be Strings");
+            const std::string& algo = args[0].string;
+            const std::string& key  = args[1].string;
+            const std::string& data = args[2].string;
+            const EVP_MD* md = EVP_get_digestbyname(algo.c_str());
+            if (!md)
+                throw std::runtime_error("Crypto.hmac: unknown algorithm: " + algo);
+            unsigned char result[EVP_MAX_MD_SIZE];
+            unsigned int resultLen = 0;
+            HMAC(md,
+                 key.data(), (int)key.size(),
+                 (const unsigned char*)data.data(), data.size(),
+                 result, &resultLen);
+            return Value::Str(bytesToHex(result, resultLen));
+        }},
+
+        // Crypto.base64encode(str) → String
+        {"base64encode", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::String)
+                throw std::runtime_error("Crypto.base64encode(str) — str must be a String");
+            const std::string& input = args[0].string;
+            size_t outLen = 4 * ((input.size() + 2) / 3) + 1;
+            std::vector<unsigned char> out(outLen);
+            int written = EVP_EncodeBlock(out.data(),
+                                          (const unsigned char*)input.data(),
+                                          (int)input.size());
+            return Value::Str(std::string(out.begin(), out.begin() + written));
+        }},
+
+        // Crypto.base64decode(str) → String
+        {"base64decode", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::String)
+                throw std::runtime_error("Crypto.base64decode(str) — str must be a String");
+            const std::string& input = args[0].string;
+            size_t outLen = 3 * ((input.size() + 3) / 4) + 1;
+            std::vector<unsigned char> out(outLen);
+            int written = EVP_DecodeBlock(out.data(),
+                                          (const unsigned char*)input.data(),
+                                          (int)input.size());
+            if (written < 0)
+                throw std::runtime_error("Crypto.base64decode: invalid base64 input");
+            // Trim padding bytes caused by '=' chars
+            size_t padding = 0;
+            if (input.size() >= 1 && input.back() == '=') ++padding;
+            if (input.size() >= 2 && input[input.size() - 2] == '=') ++padding;
+            return Value::Str(std::string(out.begin(), out.begin() + written - padding));
+        }},
+
+        // Crypto.uuid() → String (v4 UUID)
+        {"uuid", [](std::vector<Value> /*args*/) -> Value {
+            unsigned char bytes[16];
+            if (RAND_bytes(bytes, 16) != 1)
+                throw std::runtime_error("Crypto.uuid: RAND_bytes failed");
+            bytes[6] = (bytes[6] & 0x0F) | 0x40;  // version 4
+            bytes[8] = (bytes[8] & 0x3F) | 0x80;  // variant 1
+            char buf[37];
+            std::snprintf(buf, sizeof(buf),
+                "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                bytes[0], bytes[1], bytes[2], bytes[3],
+                bytes[4], bytes[5],
+                bytes[6], bytes[7],
+                bytes[8], bytes[9],
+                bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]);
+            return Value::Str(std::string(buf));
+        }},
+
+        // Crypto.randomBytes(n) → String (hex-encoded)
+        {"randomBytes", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::Number)
+                throw std::runtime_error("Crypto.randomBytes(n) — n must be a Number");
+            int n = (int)args[0].number;
+            if (n <= 0 || n > 1024)
+                throw std::runtime_error("Crypto.randomBytes(n) — n must be 1..1024");
+            std::vector<unsigned char> bytes(n);
+            if (RAND_bytes(bytes.data(), n) != 1)
+                throw std::runtime_error("Crypto.randomBytes: RAND_bytes failed");
+            return Value::Str(bytesToHex(bytes.data(), bytes.size()));
+        }},
+    };
+}
+
+// ═══════════════════════════════════════════════════════════
+// Socket 模块 — POSIX TCP/UDP 原始套接字
+// ═══════════════════════════════════════════════════════════
+static std::unordered_map<std::string, StdlibFn> makeSocketModule() {
+    return {
+        // ── TCP Client ──────────────────────────────────────
+
+        // Socket.connect(host, port) → Number (socket fd)
+        {"connect", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2 || args[0].type != Value::Type::String
+                                || args[1].type != Value::Type::Number)
+                throw std::runtime_error("Socket.connect(host, port) — host must be String, port must be Number");
+            std::string host = args[0].string;
+            int port = (int)args[1].number;
+
+            struct sockaddr_storage addr{};
+            socklen_t addrLen = 0;
+            if (!dnsLookupCached(host, port, addr, addrLen))
+                throw std::runtime_error("Socket.connect: DNS lookup failed for '" + host + "'");
+
+            int fd;
+            {
+                GILRelease release;
+                fd = ::socket(addr.ss_family, SOCK_STREAM, 0);
+                if (fd < 0) throw std::runtime_error("Socket.connect: socket() failed");
+                if (::connect(fd, (struct sockaddr*)&addr, addrLen) < 0) {
+                    ::close(fd);
+                    throw std::runtime_error("Socket.connect: connect failed to " + host + ":" + std::to_string(port));
+                }
+            }
+            return Value::Num((double)fd);
+        }},
+
+        // Socket.send(sock, data) → Number (bytes sent)
+        {"send", [](std::vector<Value> args) -> Value {
+            if (args.size() < 2 || args[0].type != Value::Type::Number
+                                || args[1].type != Value::Type::String)
+                throw std::runtime_error("Socket.send(sock, data) — sock must be Number, data must be String");
+            int fd = (int)args[0].number;
+            const std::string& data = args[1].string;
+            ssize_t sent;
+            { GILRelease release; sent = ::send(fd, data.c_str(), data.size(), 0); }
+            if (sent < 0) throw std::runtime_error("Socket.send: send() failed");
+            return Value::Num((double)sent);
+        }},
+
+        // Socket.recv(sock, maxBytes) → String
+        {"recv", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::Number)
+                throw std::runtime_error("Socket.recv(sock, maxBytes) — sock must be Number");
+            int fd = (int)args[0].number;
+            int maxBytes = (args.size() > 1 && args[1].type == Value::Type::Number)
+                           ? (int)args[1].number : 4096;
+            if (maxBytes <= 0 || maxBytes > 1048576) maxBytes = 4096;
+
+            std::vector<char> buf(maxBytes);
+            ssize_t n;
+            { GILRelease release; n = ::recv(fd, buf.data(), buf.size(), 0); }
+            if (n < 0) throw std::runtime_error("Socket.recv: recv() failed");
+            return Value::Str(std::string(buf.data(), (size_t)n));
+        }},
+
+        // Socket.close(sock) → Bool
+        {"close", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::Number)
+                throw std::runtime_error("Socket.close(sock) — sock must be Number");
+            int fd = (int)args[0].number;
+            int rc = ::close(fd);
+            return Value::Bool(rc == 0);
+        }},
+
+        // ── TCP Server ──────────────────────────────────────
+
+        // Socket.listen(port, backlog=10) → Number (server fd)
+        {"listen", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::Number)
+                throw std::runtime_error("Socket.listen(port, backlog=10) — port must be Number");
+            int port = (int)args[0].number;
+            int backlog = (args.size() > 1 && args[1].type == Value::Type::Number)
+                          ? (int)args[1].number : 10;
+
+            int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+            if (fd < 0) throw std::runtime_error("Socket.listen: socket() failed");
+
+            int opt = 1;
+            ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+            struct sockaddr_in addr{};
+            addr.sin_family = AF_INET;
+            addr.sin_addr.s_addr = INADDR_ANY;
+            addr.sin_port = htons((uint16_t)port);
+
+            if (::bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+                ::close(fd);
+                throw std::runtime_error("Socket.listen: bind() failed on port " + std::to_string(port));
+            }
+            if (::listen(fd, backlog) < 0) {
+                ::close(fd);
+                throw std::runtime_error("Socket.listen: listen() failed");
+            }
+            return Value::Num((double)fd);
+        }},
+
+        // Socket.accept(serverSock) → Number (client fd)
+        {"accept", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::Number)
+                throw std::runtime_error("Socket.accept(serverSock) — serverSock must be Number");
+            int serverFd = (int)args[0].number;
+            struct sockaddr_in clientAddr{};
+            socklen_t clientLen = sizeof(clientAddr);
+            int clientFd;
+            { GILRelease release; clientFd = ::accept(serverFd, (struct sockaddr*)&clientAddr, &clientLen); }
+            if (clientFd < 0) throw std::runtime_error("Socket.accept: accept() failed");
+            return Value::Num((double)clientFd);
+        }},
+
+        // ── UDP ─────────────────────────────────────────────
+
+        // Socket.udpNew() → Number (udp socket fd)
+        {"udpNew", [](std::vector<Value>) -> Value {
+            int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+            if (fd < 0) throw std::runtime_error("Socket.udpNew: socket() failed");
+            return Value::Num((double)fd);
+        }},
+
+        // Socket.sendTo(sock, host, port, data) → Number (bytes sent)
+        {"sendTo", [](std::vector<Value> args) -> Value {
+            if (args.size() < 4 || args[0].type != Value::Type::Number
+                                || args[1].type != Value::Type::String
+                                || args[2].type != Value::Type::Number
+                                || args[3].type != Value::Type::String)
+                throw std::runtime_error("Socket.sendTo(sock, host, port, data)");
+            int fd = (int)args[0].number;
+            std::string host = args[1].string;
+            int port = (int)args[2].number;
+            const std::string& data = args[3].string;
+
+            struct sockaddr_storage addr{};
+            socklen_t addrLen = 0;
+            if (!dnsLookupCached(host, port, addr, addrLen))
+                throw std::runtime_error("Socket.sendTo: DNS lookup failed for '" + host + "'");
+
+            ssize_t sent;
+            { GILRelease release; sent = ::sendto(fd, data.c_str(), data.size(), 0, (struct sockaddr*)&addr, addrLen); }
+            if (sent < 0) throw std::runtime_error("Socket.sendTo: sendto() failed");
+            return Value::Num((double)sent);
+        }},
+
+        // Socket.recvFrom(sock, maxBytes) → Map { data, host, port }
+        {"recvFrom", [](std::vector<Value> args) -> Value {
+            if (args.empty() || args[0].type != Value::Type::Number)
+                throw std::runtime_error("Socket.recvFrom(sock, maxBytes)");
+            int fd = (int)args[0].number;
+            int maxBytes = (args.size() > 1 && args[1].type == Value::Type::Number)
+                           ? (int)args[1].number : 4096;
+            if (maxBytes <= 0 || maxBytes > 1048576) maxBytes = 4096;
+
+            std::vector<char> buf(maxBytes);
+            struct sockaddr_in srcAddr{};
+            socklen_t srcLen = sizeof(srcAddr);
+            ssize_t n;
+            { GILRelease release; n = ::recvfrom(fd, buf.data(), buf.size(), 0, (struct sockaddr*)&srcAddr, &srcLen); }
+            if (n < 0) throw std::runtime_error("Socket.recvFrom: recvfrom() failed");
+
+            auto m = std::make_shared<std::unordered_map<std::string, Value>>();
+            (*m)["data"] = Value::Str(std::string(buf.data(), (size_t)n));
+
+            char hostBuf[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &srcAddr.sin_addr, hostBuf, sizeof(hostBuf));
+            (*m)["host"] = Value::Str(std::string(hostBuf));
+            (*m)["port"] = Value::Num((double)ntohs(srcAddr.sin_port));
+
+            return Value::MapOf(m);
+        }},
+
+        // ── Utility ─────────────────────────────────────────
+
+        // Socket.setOption(sock, option, value) → Bool
+        {"setOption", [](std::vector<Value> args) -> Value {
+            if (args.size() < 3 || args[0].type != Value::Type::Number
+                                || args[1].type != Value::Type::String)
+                throw std::runtime_error("Socket.setOption(sock, option, value)");
+            int fd = (int)args[0].number;
+            std::string option = args[1].string;
+
+            int optName = 0;
+            int level = SOL_SOCKET;
+            if (option == "SO_REUSEADDR")       optName = SO_REUSEADDR;
+            else if (option == "SO_REUSEPORT")  optName = SO_REUSEPORT;
+            else if (option == "SO_KEEPALIVE")  optName = SO_KEEPALIVE;
+            else if (option == "SO_RCVBUF")     optName = SO_RCVBUF;
+            else if (option == "SO_SNDBUF")     optName = SO_SNDBUF;
+            else if (option == "SO_BROADCAST")  optName = SO_BROADCAST;
+            else throw std::runtime_error("Socket.setOption: unknown option '" + option + "'");
+
+            int val = 0;
+            if (args[2].type == Value::Type::Number)   val = (int)args[2].number;
+            else if (args[2].type == Value::Type::Bool) val = args[2].boolean ? 1 : 0;
+            else throw std::runtime_error("Socket.setOption: value must be Number or Bool");
+
+            int rc = ::setsockopt(fd, level, optName, &val, sizeof(val));
+            return Value::Bool(rc == 0);
+        }},
+    };
+}
+
+// ═══════════════════════════════════════════════════════════
+// WS 模块 — WebSocket 客户端 (RFC 6455)
+// ═══════════════════════════════════════════════════════════
+
+struct WSConnection {
+    int         fd = -1;
+    SSL*        ssl = nullptr;
+    bool        useTLS = false;
+    bool        open = false;
+    std::mutex  mu;
+
+    int rawSend(const void* data, size_t len) {
+        if (useTLS && ssl) return SSL_write(ssl, data, (int)len);
+        return (int)::send(fd, data, len, 0);
+    }
+    int rawRecv(void* buf, size_t len) {
+        if (useTLS && ssl) return SSL_read(ssl, buf, (int)len);
+        return (int)::recv(fd, buf, len, 0);
+    }
+    bool readExact(void* buf, size_t n) {
+        size_t got = 0;
+        while (got < n) {
+            int r = rawRecv((char*)buf + got, n - got);
+            if (r <= 0) return false;
+            got += (size_t)r;
+        }
+        return true;
+    }
+    void cleanup() {
+        open = false;
+        if (ssl) { SSL_shutdown(ssl); SSL_free(ssl); ssl = nullptr; }
+        if (fd >= 0) { ::close(fd); fd = -1; }
+    }
+};
+
+static std::mutex g_wsMutex;
+static std::vector<std::unique_ptr<WSConnection>> g_wsConns;
+
+static WSConnection* getWS(Value& v) {
+    if (v.type != Value::Type::Addr || v.addr == 0)
+        throw std::runtime_error("WS: invalid WebSocket handle");
+    return reinterpret_cast<WSConnection*>(v.addr);
+}
+
+static bool wsSendFrame(WSConnection* ws, uint8_t opcode, const std::string& payload) {
+    std::lock_guard<std::mutex> lk(ws->mu);
+    if (!ws->open) return false;
+    size_t plen = payload.size();
+    std::vector<uint8_t> frame;
+    frame.push_back(0x80 | opcode);
+    if (plen <= 125) {
+        frame.push_back(0x80 | (uint8_t)plen);
+    } else if (plen <= 65535) {
+        frame.push_back(0x80 | 126);
+        frame.push_back((uint8_t)(plen >> 8));
+        frame.push_back((uint8_t)(plen & 0xFF));
+    } else {
+        frame.push_back(0x80 | 127);
+        for (int i = 7; i >= 0; --i)
+            frame.push_back((uint8_t)((plen >> (i * 8)) & 0xFF));
+    }
+    uint8_t mask[4];
+    for (int i = 0; i < 4; i++) mask[i] = (uint8_t)(std::rand() & 0xFF);
+    frame.insert(frame.end(), mask, mask + 4);
+    for (size_t i = 0; i < plen; i++)
+        frame.push_back((uint8_t)payload[i] ^ mask[i % 4]);
+    int sent = ws->rawSend(frame.data(), frame.size());
+    return sent == (int)frame.size();
+}
+
+static std::pair<uint8_t, std::string> wsRecvFrame(WSConnection* ws) {
+    uint8_t hdr[2];
+    if (!ws->readExact(hdr, 2)) return {0, ""};
+    uint8_t opcode = hdr[0] & 0x0F;
+    bool    masked = (hdr[1] & 0x80) != 0;
+    uint64_t plen  = hdr[1] & 0x7F;
+    if (plen == 126) {
+        uint8_t ext[2];
+        if (!ws->readExact(ext, 2)) return {0, ""};
+        plen = ((uint64_t)ext[0] << 8) | ext[1];
+    } else if (plen == 127) {
+        uint8_t ext[8];
+        if (!ws->readExact(ext, 8)) return {0, ""};
+        plen = 0;
+        for (int i = 0; i < 8; i++) plen = (plen << 8) | ext[i];
+    }
+    uint8_t mask[4] = {};
+    if (masked && !ws->readExact(mask, 4)) return {0, ""};
+    if (plen > 16 * 1024 * 1024) return {0, ""};
+    std::string payload(plen, '\0');
+    if (plen > 0) {
+        if (!ws->readExact(&payload[0], plen)) return {0, ""};
+        if (masked) {
+            for (size_t i = 0; i < plen; i++)
+                payload[i] ^= mask[i % 4];
+        }
+    }
+    return {opcode, std::move(payload)};
+}
+
+static std::unordered_map<std::string, StdlibFn> makeWebSocketModule() {
+    std::unordered_map<std::string, StdlibFn> m;
+
+    m["connect"] = [](std::vector<Value> args) -> Value {
+        if (args.empty() || args[0].type != Value::Type::String)
+            throw std::runtime_error("WS.connect(url) — url must be a String");
+        std::string url = args[0].string;
+        bool useTLS = false;
+        std::string u = url;
+        if (u.size() >= 6 && u.substr(0, 6) == "wss://") {
+            useTLS = true; u = u.substr(6);
+        } else if (u.size() >= 5 && u.substr(0, 5) == "ws://") {
+            u = u.substr(5);
+        } else {
+            throw std::runtime_error("WS.connect: url must start with ws:// or wss://");
+        }
+        int port = useTLS ? 443 : 80;
+        size_t sl = u.find('/');
+        std::string host = (sl == std::string::npos) ? u : u.substr(0, sl);
+        std::string path = (sl == std::string::npos) ? "/" : u.substr(sl);
+        size_t co = host.find(':');
+        if (co != std::string::npos) {
+            port = std::stoi(host.substr(co + 1));
+            host = host.substr(0, co);
+        }
+
+        struct sockaddr_storage saddr{};
+        socklen_t addrLen = 0;
+        if (!dnsLookupCached(host, port, saddr, addrLen))
+            throw std::runtime_error("WS.connect: DNS lookup failed for '" + host + "'");
+        int sock = ::socket(saddr.ss_family, SOCK_STREAM, 0);
+        if (sock < 0) throw std::runtime_error("WS.connect: socket() failed");
+        if (::connect(sock, (struct sockaddr*)&saddr, addrLen) < 0) {
+            ::close(sock);
+            throw std::runtime_error("WS.connect: TCP connect failed to " + host);
+        }
+
+        SSL* ssl = nullptr;
+        if (useTLS) {
+            SSL_CTX* ctx = getGlobalSSLCtx();
+            if (!ctx) { ::close(sock); throw std::runtime_error("WS.connect: SSL_CTX not available"); }
+            ssl = SSL_new(ctx);
+            SSL_set_fd(ssl, sock);
+            SSL_set_tlsext_host_name(ssl, host.c_str());
+            if (SSL_connect(ssl) <= 0) {
+                SSL_free(ssl); ::close(sock);
+                throw std::runtime_error("WS.connect: TLS handshake failed with " + host);
+            }
+        }
+
+        auto conn = std::make_unique<WSConnection>();
+        conn->fd = sock; conn->ssl = ssl; conn->useTLS = useTLS; conn->open = true;
+
+        // Sec-WebSocket-Key: 16 random bytes → base64 (OpenSSL)
+        unsigned char keyBytes[16];
+        for (int i = 0; i < 16; i++) keyBytes[i] = (unsigned char)(std::rand() & 0xFF);
+        unsigned char keyB64[32];
+        int keyLen = EVP_EncodeBlock(keyB64, keyBytes, 16);
+        std::string wsKey((char*)keyB64, keyLen);
+
+        std::string req =
+            "GET " + path + " HTTP/1.1\r\n"
+            "Host: " + host + "\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            "Sec-WebSocket-Key: " + wsKey + "\r\n"
+            "Sec-WebSocket-Version: 13\r\n"
+            "\r\n";
+        int sent = conn->rawSend(req.c_str(), req.size());
+        if (sent <= 0) {
+            conn->cleanup();
+            throw std::runtime_error("WS.connect: failed to send upgrade request");
+        }
+
+        std::string response;
+        char buf[1];
+        while (response.find("\r\n\r\n") == std::string::npos) {
+            int r = conn->rawRecv(buf, 1);
+            if (r <= 0) {
+                conn->cleanup();
+                throw std::runtime_error("WS.connect: connection closed during handshake");
+            }
+            response += buf[0];
+            if (response.size() > 4096) {
+                conn->cleanup();
+                throw std::runtime_error("WS.connect: handshake response too large");
+            }
+        }
+        if (response.find("101") == std::string::npos) {
+            conn->cleanup();
+            throw std::runtime_error("WS.connect: server did not return 101\n" + response.substr(0, 200));
+        }
+
+        WSConnection* ptr = conn.get();
+        { std::lock_guard<std::mutex> lk(g_wsMutex); g_wsConns.push_back(std::move(conn)); }
+        return Value::AddrVal(reinterpret_cast<uintptr_t>(ptr));
+    };
+
+    m["send"] = [](std::vector<Value> args) -> Value {
+        if (args.size() < 2)
+            throw std::runtime_error("WS.send(ws, message) — requires 2 args");
+        auto* ws = getWS(args[0]);
+        std::string msg = args[1].toString();
+        bool ok;
+        { GILRelease release; ok = wsSendFrame(ws, 0x01, msg); }
+        return Value::Bool(ok);
+    };
+
+    m["recv"] = [](std::vector<Value> args) -> Value {
+        if (args.empty())
+            throw std::runtime_error("WS.recv(ws) — requires ws handle");
+        auto* ws = getWS(args[0]);
+        std::pair<uint8_t, std::string> frame;
+        { GILRelease release; frame = wsRecvFrame(ws); }
+        uint8_t opcode = frame.first;
+        if (opcode == 0x08 || (opcode == 0 && frame.second.empty())) {
+            ws->open = false;
+            return Value::Nil();
+        }
+        if (opcode == 0x09) {
+            wsSendFrame(ws, 0x0A, frame.second);
+            { GILRelease release; frame = wsRecvFrame(ws); }
+            if (frame.first == 0x08 || (frame.first == 0 && frame.second.empty())) {
+                ws->open = false; return Value::Nil();
+            }
+        }
+        return Value::Str(std::move(frame.second));
+    };
+
+    m["close"] = [](std::vector<Value> args) -> Value {
+        if (args.empty())
+            throw std::runtime_error("WS.close(ws) — requires ws handle");
+        auto* ws = getWS(args[0]);
+        if (!ws->open) return Value::Bool(false);
+        wsSendFrame(ws, 0x08, "");
+        ws->cleanup();
+        return Value::Bool(true);
+    };
+
+    m["isOpen"] = [](std::vector<Value> args) -> Value {
+        if (args.empty())
+            throw std::runtime_error("WS.isOpen(ws) — requires ws handle");
+        auto* ws = getWS(args[0]);
+        return Value::Bool(ws->open);
+    };
+
+    return m;
+}
+
 void Interpreter::registerStdlib() {
     registerStdlibModule("File", makeFileModule());
     registerStdlibModule("Json", makeJsonModule());
@@ -1608,6 +2471,11 @@ void Interpreter::registerStdlib() {
     registerStdlibModule("String", makeStringModule());
     registerStdlibModule("hw",     makeHwModule());
     registerStdlibModule("Specify", makeSpecifyModule());
+    registerStdlibModule("Regex",   makeRegexModule());
+    registerStdlibModule("OS",      makeOSModule());
+    registerStdlibModule("Crypto",  makeCryptoModule());
+    registerStdlibModule("Socket",  makeSocketModule());
+    registerStdlibModule("WS",      makeWebSocketModule());
 
     // ── Server 模块（动态路由 HTTP 服务器）────────────────────
     Interpreter* self = this;

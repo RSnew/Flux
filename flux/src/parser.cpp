@@ -848,6 +848,7 @@ NodePtr Parser::parsePrimary() {
                     else if (check(TokenType::AWAIT))      { consume(); member = "await"; }
                     else if (check(TokenType::FUNC))
                                                            { consume(); member = "func"; }
+                    else if (check(TokenType::PLATFORM))   { consume(); member = "platform"; }
                     else throw ParseError("expected member name after '.'", current().line);
                 }
 
