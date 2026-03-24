@@ -236,6 +236,8 @@ AI Agent 可通过 `flux inspect --json` 发现合约，无需解析源码。
 | v2 | AI 原生类型 | `specify` 声明、`Specify.validate/describe/schema`、合约编程 | 已完成 |
 | v2 | 原生编译 | `flux compile` 编译为 x86_64/arm64/riscv64 二进制、`flux profile` | 已完成 |
 | M  | 自举 | 用 Flux 编写的字节码编译器 + VM（27 项测试） | 已完成 |
+| N  | 地址操作 | 指针解引用 `ptr[i]` 读写、MIR DerefLoad/DerefStore | 已完成 |
+| O  | FluxOS | 裸机 x86 微内核：VGA 显示、键盘输入、Shell、命令历史 | 已完成 |
 
 ## 设计哲学 — 为什么不用 Rust / C++？
 
