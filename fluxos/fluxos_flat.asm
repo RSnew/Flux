@@ -60,7 +60,7 @@ logo4: db "|  _| | |_| |>  < ", 0
 logo5: db "|_| |_|\__,_/_/\_\", 0
 
 ; Right-side info
-dir_dot:    db "./", 0
+dir_dot:    db ".", 0
 dir_home:   db "~", 0
 version:    db "v1.0", 0
 cur_dir:    db "/fluxos", 0
