@@ -717,6 +717,14 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
             auto it = obj.map->find(idx.toString());
             return it != obj.map->end() ? it->second : Value::Nil();
         }
+        // ── Addr 指针解引用 ptr[offset] → 读 1 字节 ────────
+        if (obj.type == Value::Type::Addr) {
+            if (idx.type != Value::Type::Number)
+                throw std::runtime_error("ptr[]: index must be a Number");
+            uintptr_t target = obj.addr + (uintptr_t)idx.number;
+            unsigned char byte = *reinterpret_cast<unsigned char*>(target);
+            return Value::Num((double)byte);
+        }
         throw std::runtime_error("cannot index into " + obj.toString());
     }
 
@@ -747,8 +755,18 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
             (*obj.map)[idx.toString()] = val;
             return val;
         }
+        // ── Addr 指针写入 ptr[offset] = byte ────────────────
+        if (obj.type == Value::Type::Addr) {
+            if (idx.type != Value::Type::Number)
+                throw std::runtime_error("ptr[]=: index must be a Number");
+            if (val.type != Value::Type::Number)
+                throw std::runtime_error("ptr[]=: value must be a Number (byte)");
+            uintptr_t target = obj.addr + (uintptr_t)idx.number;
+            *reinterpret_cast<unsigned char*>(target) = (unsigned char)(int)val.number;
+            return val;
+        }
         if (obj.type != Value::Type::Array || !obj.array)
-            throw std::runtime_error("cannot index-assign into non-array");
+            throw std::runtime_error("cannot index-assign into non-array/addr");
         int i = (int)idx.number;
         if (i < 0) i = (int)obj.array->size() + i;
         if (i < 0 || i >= (int)obj.array->size())

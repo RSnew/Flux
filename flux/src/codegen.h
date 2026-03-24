@@ -619,6 +619,50 @@ private:
             emitInst("ret");
             break;
         }
+        case MIROp::DerefLoad: {
+            // deref_load %addr, %offset → read 1 byte at addr+offset
+            if (inst.operands.size() < 2 || inst.dest < 0) break;
+            int addr = allocReg(inst.operands[0]);
+            int off  = allocReg(inst.operands[1]);
+            int d    = allocReg(inst.dest);
+            // Convert addr from double (xmm) to integer in rax
+            emitInst("cvttsd2si " + xmm(addr) + ", %rax");
+            // Convert offset from double to integer in rcx
+            emitInst("cvttsd2si " + xmm(off) + ", %rcx");
+            emitInst("addq %rcx, %rax");
+            // Load 1 byte, zero-extend to rax
+            emitInst("movzbq (%rax), %rax");
+            // Convert back to double in dest xmm
+            emitInst("cvtsi2sd %rax, " + xmm(d));
+            break;
+        }
+        case MIROp::DerefStore: {
+            // deref_store %addr, %offset, %val → write 1 byte
+            if (inst.operands.size() < 3) break;
+            int addr = allocReg(inst.operands[0]);
+            int off  = allocReg(inst.operands[1]);
+            int val  = allocReg(inst.operands[2]);
+            // Convert addr to integer
+            emitInst("cvttsd2si " + xmm(addr) + ", %rax");
+            // Convert offset to integer
+            emitInst("cvttsd2si " + xmm(off) + ", %rcx");
+            emitInst("addq %rcx, %rax");
+            // Convert value to integer byte
+            emitInst("cvttsd2si " + xmm(val) + ", %rdx");
+            emitInst("movb %dl, (%rax)");
+            break;
+        }
+        case MIROp::AsmBlock: {
+            // Emit raw assembly text from constStr
+            // Each line separated by newline
+            emitComment("inline asm block");
+            std::istringstream ss(inst.constStr);
+            std::string line;
+            while (std::getline(ss, line)) {
+                if (!line.empty()) emitInst(line);
+            }
+            break;
+        }
         default:
             emitComment("unsupported MIR op: " + std::to_string((int)inst.op));
             break;

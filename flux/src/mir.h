@@ -50,6 +50,11 @@ enum class MIROp {
     // Struct
     StructCreate,   // %r = struct_create <type> {fields...}
     MethodCall,     // %r = method_call %obj.<method>(%args...)
+    // Pointer dereference (Addr type)
+    DerefLoad,      // %r = deref_load %addr, %offset  (read 1 byte)
+    DerefStore,     // deref_store %addr, %offset, %val (write 1 byte)
+    // Inline assembly
+    AsmBlock,       // emit raw assembly text (constStr holds asm lines)
     // Phi
     Phi,            // %r = phi [bb1: %v1, bb2: %v2]
 };
@@ -436,7 +441,8 @@ inline void mirPassDeadCodeElim(MIRFunction& fn) {
                     if (inst.op == MIROp::Store || inst.op == MIROp::Call ||
                         inst.op == MIROp::AsyncCall || inst.op == MIROp::Return ||
                         inst.op == MIROp::Branch || inst.op == MIROp::Jump ||
-                        inst.op == MIROp::IndexSet || inst.op == MIROp::FieldSet)
+                        inst.op == MIROp::IndexSet || inst.op == MIROp::FieldSet ||
+                        inst.op == MIROp::DerefStore || inst.op == MIROp::AsmBlock)
                         return false;
                     return inst.dest >= 0 && used.find(inst.dest) == used.end();
                 }),

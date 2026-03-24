@@ -238,6 +238,8 @@ AI agents can use `flux inspect --json` to discover contracts without parsing so
 | v2 | AI-Native Types | `specify` declarations, `Specify.validate/describe/schema`, contract-based programming | Done |
 | v2 | Native Compilation | `flux compile` to x86_64/arm64/riscv64 binary, `flux profile` | Done |
 | M  | Self-hosting | Flux bytecode compiler + VM written in Flux (27 tests) | Done |
+| N  | Addr Operations | Pointer dereference `ptr[i]` read/write, MIR DerefLoad/DerefStore | Done |
+| O  | FluxOS | Bare-metal x86 microkernel: VGA, keyboard, shell, history | Done |
 
 ## Design Philosophy — Why Not Rust / C++?
 
