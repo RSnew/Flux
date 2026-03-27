@@ -224,6 +224,11 @@ std::shared_ptr<NativeFunc> BytecodeJIT::compileAsLoop(
 std::shared_ptr<NativeFunc> BytecodeJIT::compile(
     const std::string& name, Chunk& chunk, FnDecl* fnDecl) {
 
+    // BytecodeJIT 生成 x86-64 机器码，在非 x86-64 平台上禁用
+#if !defined(__x86_64__) && !defined(_M_X64)
+    return nullptr;
+#endif
+
     if (!canJIT(chunk, name)) return nullptr;
 
     // ── 快速路径: 检测简单累积递归并转换为循环 ──
