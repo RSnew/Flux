@@ -119,6 +119,24 @@ double flux_call_function(const char* name, double* args, int nargs) {
     } catch (...) { return 0.0; }
 }
 
+// 支持混合参数类型的桥接函数
+// strArgs[i] 非 null 时使用字符串参数，否则使用 numArgs[i]
+double flux_call_function_mixed(const char* name, double* numArgs,
+                                 const char** strArgs, int nargs) {
+    if (!g_llvm_interp || !name) return 0.0;
+    try {
+        std::vector<Value> vargs;
+        for (int i = 0; i < nargs; i++) {
+            if (strArgs && strArgs[i])
+                vargs.push_back(Value::Str(strArgs[i]));
+            else
+                vargs.push_back(Value::Num(numArgs ? numArgs[i] : 0.0));
+        }
+        Value r = g_llvm_interp->callFunction(name, std::move(vargs));
+        return (r.type == Value::Type::Number) ? r.number : 0.0;
+    } catch (...) { return 0.0; }
+}
+
 double flux_call_module(const char* mod, const char* fn, double* args, int nargs) {
     if (!g_llvm_interp || !mod || !fn) return 0.0;
     try {
@@ -275,6 +293,8 @@ struct LLVMJITCompiler::Impl {
 
         module->getOrInsertFunction("flux_call_function",
             llvm::FunctionType::get(d, {s, dblPtrTy(), i32}, false));
+        module->getOrInsertFunction("flux_call_function_mixed",
+            llvm::FunctionType::get(d, {s, dblPtrTy(), llvm::PointerType::getUnqual(*ctx), i32}, false));
         module->getOrInsertFunction("flux_call_module",
             llvm::FunctionType::get(d, {s, s, dblPtrTy(), i32}, false));
 
@@ -429,11 +449,22 @@ struct LLVMJITCompiler::Impl {
         auto it = functions.find(name);
         if (it != functions.end()) {
             auto* fn = it->second;
+            auto* fnTy = fn->getFunctionType();
             std::vector<llvm::Value*> args;
-            for (auto& a : call->args) {
-                auto* v = compileExpr(a.get());
+            for (size_t i = 0; i < call->args.size(); i++) {
+                auto* v = compileExpr(call->args[i].get());
                 if (!v) v = llvm::ConstantFP::get(doubleTy(), 0.0);
-                if (v->getType() != doubleTy()) v = llvm::ConstantFP::get(doubleTy(), 0.0);
+                // 根据目标函数的参数类型进行匹配转换
+                if (i < fnTy->getNumParams()) {
+                    auto* expectedTy = fnTy->getParamType(i);
+                    if (v->getType() != expectedTy) {
+                        // 类型不匹配时尝试安全转换
+                        if (expectedTy->isDoubleTy() && v->getType()->isIntegerTy())
+                            v = builder->CreateSIToFP(v, doubleTy());
+                        else if (expectedTy->isDoubleTy())
+                            v = llvm::ConstantFP::get(doubleTy(), 0.0);
+                    }
+                }
                 args.push_back(v);
             }
             while (args.size() < fn->arg_size())
@@ -442,31 +473,75 @@ struct LLVMJITCompiler::Impl {
             return builder->CreateCall(fn, args, name + "_ret");
         }
 
-        // Bridge to interpreter
-        auto* bridgeFn = module->getFunction("flux_call_function");
-        if (bridgeFn && !name.empty()) {
+        // Bridge to interpreter — 编译参数并检测类型
+        if (!name.empty()) {
             int nargs = (int)call->args.size();
             auto* nameStr = builder->CreateGlobalString(name, "fn");
-            if (nargs > 0) {
-                auto* arrTy = llvm::ArrayType::get(doubleTy(), nargs);
-                auto* arr = builder->CreateAlloca(arrTy, nullptr, "args");
+
+            // 先编译所有参数
+            std::vector<llvm::Value*> compiledArgs;
+            bool hasStrArgs = false;
+            for (int i = 0; i < nargs; i++) {
+                auto* v = compileExpr(call->args[i].get());
+                if (v && v->getType() == i8PtrTy()) hasStrArgs = true;
+                compiledArgs.push_back(v);
+            }
+
+            if (hasStrArgs && nargs > 0) {
+                // 使用 mixed 桥接：同时传递 double 和 string 参数
+                auto* mixedFn = module->getFunction("flux_call_function_mixed");
+                auto* numArrTy = llvm::ArrayType::get(doubleTy(), nargs);
+                auto* numArr = builder->CreateAlloca(numArrTy, nullptr, "numargs");
+                auto* strArrTy = llvm::ArrayType::get(i8PtrTy(), nargs);
+                auto* strArr = builder->CreateAlloca(strArrTy, nullptr, "strargs");
+
                 for (int i = 0; i < nargs; i++) {
-                    auto* v = compileExpr(call->args[i].get());
-                    if (!v || v->getType() != doubleTy())
-                        v = llvm::ConstantFP::get(doubleTy(), 0.0);
-                    builder->CreateStore(v, builder->CreateConstGEP2_32(arrTy, arr, 0, i));
+                    auto* v = compiledArgs[i];
+                    if (v && v->getType() == i8PtrTy()) {
+                        builder->CreateStore(v, builder->CreateConstGEP2_32(strArrTy, strArr, 0, i));
+                        builder->CreateStore(llvm::ConstantFP::get(doubleTy(), 0.0),
+                                             builder->CreateConstGEP2_32(numArrTy, numArr, 0, i));
+                    } else {
+                        if (!v || v->getType() != doubleTy())
+                            v = llvm::ConstantFP::get(doubleTy(), 0.0);
+                        builder->CreateStore(v, builder->CreateConstGEP2_32(numArrTy, numArr, 0, i));
+                        builder->CreateStore(
+                            llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(i8PtrTy())),
+                            builder->CreateConstGEP2_32(strArrTy, strArr, 0, i));
+                    }
                 }
-                return builder->CreateCall(bridgeFn, {
+                return builder->CreateCall(mixedFn, {
                     nameStr,
-                    builder->CreateConstGEP2_32(arrTy, arr, 0, 0),
+                    builder->CreateConstGEP2_32(numArrTy, numArr, 0, 0),
+                    builder->CreateConstGEP2_32(strArrTy, strArr, 0, 0),
                     llvm::ConstantInt::get(i32Ty(), nargs)
                 }, "call_ret");
-            } else {
-                return builder->CreateCall(bridgeFn, {
-                    nameStr,
-                    llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(dblPtrTy())),
-                    llvm::ConstantInt::get(i32Ty(), 0)
-                }, "call_ret");
+            }
+
+            // 纯数值桥接
+            auto* bridgeFn = module->getFunction("flux_call_function");
+            if (bridgeFn) {
+                if (nargs > 0) {
+                    auto* arrTy = llvm::ArrayType::get(doubleTy(), nargs);
+                    auto* arr = builder->CreateAlloca(arrTy, nullptr, "args");
+                    for (int i = 0; i < nargs; i++) {
+                        auto* v = compiledArgs[i];
+                        if (!v || v->getType() != doubleTy())
+                            v = llvm::ConstantFP::get(doubleTy(), 0.0);
+                        builder->CreateStore(v, builder->CreateConstGEP2_32(arrTy, arr, 0, i));
+                    }
+                    return builder->CreateCall(bridgeFn, {
+                        nameStr,
+                        builder->CreateConstGEP2_32(arrTy, arr, 0, 0),
+                        llvm::ConstantInt::get(i32Ty(), nargs)
+                    }, "call_ret");
+                } else {
+                    return builder->CreateCall(bridgeFn, {
+                        nameStr,
+                        llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(dblPtrTy())),
+                        llvm::ConstantInt::get(i32Ty(), 0)
+                    }, "call_ret");
+                }
             }
         }
         return llvm::ConstantFP::get(doubleTy(), 0.0);
@@ -851,8 +926,24 @@ struct LLVMJITCompiler::Impl {
     }
 
     // ── Function compilation ──────────────────────────────
+    // 检查函数是否为纯数值函数（所有参数类型已知且非 Any/Unknown/String）
+    bool isNumericFn(HIRFnDecl* fn) {
+        for (auto& p : fn->params) {
+            if (p.type.kind == HIRType::Any || p.type.kind == HIRType::Unknown ||
+                p.type.kind == HIRType::String)
+                return false;
+        }
+        return true;
+    }
+
     llvm::Function* compileFnDecl(HIRFnDecl* fn) {
-        std::vector<llvm::Type*> pts(fn->params.size(), doubleTy());
+        // 含有 Any/Unknown/String 参数的函数回退到解释器桥接
+        // 因为 LLVM JIT 只支持纯数值运算
+        if (!isNumericFn(fn)) return nullptr;
+
+        // 根据参数实际类型生成函数签名
+        std::vector<llvm::Type*> pts;
+        for (auto& p : fn->params) pts.push_back(mapType(p.type));
         auto* ft = llvm::FunctionType::get(doubleTy(), pts, false);
         auto* llvmFn = llvm::Function::Create(ft, llvm::Function::ExternalLinkage,
                                                 fn->name, module.get());
@@ -869,7 +960,8 @@ struct LLVMJITCompiler::Impl {
         for (auto& arg : llvmFn->args()) {
             if (pi < (int)fn->params.size()) {
                 arg.setName(fn->params[pi].name);
-                auto* a = createEntryAlloca(llvmFn, fn->params[pi].name, doubleTy());
+                auto* paramTy = mapType(fn->params[pi].type);
+                auto* a = createEntryAlloca(llvmFn, fn->params[pi].name, paramTy);
                 builder->CreateStore(&arg, a);
                 declareVar(fn->params[pi].name, a, fn->params[pi].type);
             }
@@ -953,6 +1045,7 @@ struct LLVMJITCompiler::Impl {
         add("flux_map_set",           (void*)(void(*)(void*,const char*,double))&flux_map_set);
         add("flux_map_get",           (void*)(double(*)(void*,const char*))&flux_map_get);
         add("flux_call_function",     (void*)(double(*)(const char*,double*,int))&flux_call_function);
+        add("flux_call_function_mixed", (void*)(double(*)(const char*,double*,const char**,int))&flux_call_function_mixed);
         add("flux_call_module",       (void*)(double(*)(const char*,const char*,double*,int))&flux_call_module);
         add("flux_load_state",        (void*)(double(*)(const char*))&flux_load_state);
         add("flux_store_state",       (void*)(void(*)(const char*,double))&flux_store_state);

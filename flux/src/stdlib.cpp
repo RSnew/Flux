@@ -2476,6 +2476,7 @@ void Interpreter::registerStdlib() {
     registerStdlibModule("Crypto",  makeCryptoModule());
     registerStdlibModule("Socket",  makeSocketModule());
     registerStdlibModule("WS",      makeWebSocketModule());
+    registerStdlibModule("log",     makeLogModule());
 
     // ── Server 模块（动态路由 HTTP 服务器）────────────────────
     Interpreter* self = this;

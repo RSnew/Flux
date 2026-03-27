@@ -105,12 +105,7 @@ func divide(a, b) {
 
 print("10 / 4 = " + str(divide(10, 4)))
 
-// ── 9. !var / !func hot-reload force override ──────────────
-var version = "1.0"
-!var version = "1.1"   // always overwrite on reload
-print("version: " + version)
-
-// ── 10. Struct method dispatch via ModuleCall syntax ───────
+// ── 9. Struct method dispatch via ModuleCall syntax ─────────
 // p.move(dx, dy) calls the move method
 p.move(10, 20)
 print("After move: x=" + str(p.x) + " y=" + str(p.y))

@@ -7,6 +7,7 @@
 #include <sstream>
 #include <unordered_map>
 #include <stdexcept>
+#include <cstring>
 
 // ═══════════════════════════════════════════════════════════
 // 目标架构
@@ -89,6 +90,8 @@ public:
 private:
     int nextReg_ = 0;
     std::unordered_map<int, int> regMap_;  // SSA value → register
+    std::unordered_map<std::string, int> varOffsets_; // 局部变量 → 栈偏移
+    int nextVarOffset_ = 16; // 从 sp+16 开始（跳过保存的 x29/x30）
 
     int allocReg(int valueId) {
         auto it = regMap_.find(valueId);
@@ -105,12 +108,15 @@ private:
         emitLine(".global " + fn.name);
         emitLabel(fn.name);
 
-        // Function prologue
+        // Function prologue — 预留 256 字节栈空间给局部变量
         emitInst("stp x29, x30, [sp, #-16]!");
         emitInst("mov x29, sp");
+        emitInst("sub sp, sp, #256");
 
         regMap_.clear();
         nextReg_ = 0;
+        varOffsets_.clear();
+        nextVarOffset_ = 16;
 
         // Map parameters to registers
         for (int i = 0; i < (int)fn.params.size() && i < 8; i++) {
@@ -133,9 +139,27 @@ private:
         case MIROp::Const: {
             if (inst.dest < 0) break;
             int r = allocReg(inst.dest);
-            // Load double constant via literal pool
             emitComment("const " + std::to_string(inst.constNum));
-            emitInst("ldr " + dReg(r) + ", =" + std::to_string((long long)inst.constNum));
+            if (inst.constNum == 0.0) {
+                emitInst("movi " + dReg(r) + ", #0");
+            } else if (inst.constNum == 1.0) {
+                emitInst("fmov " + dReg(r) + ", #1.0");
+            } else if (inst.constNum == 2.0) {
+                emitInst("fmov " + dReg(r) + ", #2.0");
+            } else {
+                // 用整数寄存器加载 64 位立即数，再转移到浮点寄存器
+                long long bits;
+                double val = inst.constNum;
+                std::memcpy(&bits, &val, 8);
+                emitInst("mov x9, #" + std::to_string(bits & 0xFFFF));
+                if ((bits >> 16) & 0xFFFF)
+                    emitInst("movk x9, #" + std::to_string((bits >> 16) & 0xFFFF) + ", lsl #16");
+                if ((bits >> 32) & 0xFFFF)
+                    emitInst("movk x9, #" + std::to_string((bits >> 32) & 0xFFFF) + ", lsl #32");
+                if ((bits >> 48) & 0xFFFF)
+                    emitInst("movk x9, #" + std::to_string((bits >> 48) & 0xFFFF) + ", lsl #48");
+                emitInst("fmov " + dReg(r) + ", x9");
+            }
             break;
         }
         case MIROp::Add: {
@@ -174,24 +198,117 @@ private:
             if (inst.dest < 0) break;
             int r = allocReg(inst.dest);
             // 查找参数
+            bool found = false;
             for (int i = 0; i < (int)fn.params.size(); i++) {
                 if (fn.params[i].first == inst.name) {
                     if (r != i) emitInst("fmov " + dReg(r) + ", " + dReg(i));
+                    found = true;
                     break;
                 }
             }
+            // 查找局部变量（从栈加载）
+            if (!found && varOffsets_.count(inst.name)) {
+                int off = varOffsets_[inst.name];
+                emitComment("load var " + inst.name);
+                emitInst("ldr " + dReg(r) + ", [sp, #" + std::to_string(off) + "]");
+            }
+            break;
+        }
+        case MIROp::Store: {
+            // store %val → <name>：将值存入栈上局部变量
+            if (inst.operands.empty()) break;
+            int src = allocReg(inst.operands[0]);
+            if (!varOffsets_.count(inst.name)) {
+                varOffsets_[inst.name] = nextVarOffset_;
+                nextVarOffset_ += 8;
+            }
+            int off = varOffsets_[inst.name];
+            emitComment("store var " + inst.name);
+            emitInst("str " + dReg(src) + ", [sp, #" + std::to_string(off) + "]");
+            break;
+        }
+        case MIROp::Call: {
+            // %r = call <name>(%args...)：调用函数
+            emitComment("call " + inst.name);
+            // 将参数放入 d0..d7（ARM64 浮点调用约定）
+            for (int i = 0; i < (int)inst.operands.size() && i < 8; i++) {
+                int src = allocReg(inst.operands[i]);
+                if (src != i) emitInst("fmov " + dReg(i) + ", " + dReg(src));
+            }
+            emitInst("bl " + inst.name);
+            // 返回值在 d0
+            if (inst.dest >= 0) {
+                int d = allocReg(inst.dest);
+                if (d != 0) emitInst("fmov " + dReg(d) + ", d0");
+            }
+            break;
+        }
+        case MIROp::Mod: {
+            if (inst.operands.size() < 2 || inst.dest < 0) break;
+            int d = allocReg(inst.dest);
+            int l = allocReg(inst.operands[0]);
+            int r = allocReg(inst.operands[1]);
+            // ARM64: a % b = a - (a/b)*b
+            emitComment("mod");
+            emitInst("fdiv " + dReg(d) + ", " + dReg(l) + ", " + dReg(r));
+            emitInst("frintm " + dReg(d) + ", " + dReg(d));  // floor
+            emitInst("fmul " + dReg(d) + ", " + dReg(d) + ", " + dReg(r));
+            emitInst("fsub " + dReg(d) + ", " + dReg(l) + ", " + dReg(d));
+            break;
+        }
+        case MIROp::Eq: case MIROp::Ne: case MIROp::Lt:
+        case MIROp::Le: case MIROp::Gt: case MIROp::Ge: {
+            if (inst.operands.size() < 2 || inst.dest < 0) break;
+            int d = allocReg(inst.dest);
+            int l = allocReg(inst.operands[0]);
+            int r = allocReg(inst.operands[1]);
+            emitInst("fcmp " + dReg(l) + ", " + dReg(r));
+            std::string cond;
+            switch (inst.op) {
+            case MIROp::Eq: cond = "eq"; break;
+            case MIROp::Ne: cond = "ne"; break;
+            case MIROp::Lt: cond = "mi"; break;
+            case MIROp::Le: cond = "ls"; break;
+            case MIROp::Gt: cond = "gt"; break;
+            case MIROp::Ge: cond = "ge"; break;
+            default: cond = "eq"; break;
+            }
+            // 将比较结果转换为 1.0 / 0.0
+            emitInst("fmov " + dReg(d) + ", #1.0");
+            emitInst("b." + cond + " .Lcmp_" + std::to_string(inst.dest));
+            emitInst("fmov " + dReg(d) + ", xzr");
+            emitLine(".Lcmp_" + std::to_string(inst.dest) + ":");
+            break;
+        }
+        case MIROp::Negate: {
+            if (inst.operands.empty() || inst.dest < 0) break;
+            int d = allocReg(inst.dest);
+            int s = allocReg(inst.operands[0]);
+            emitInst("fneg " + dReg(d) + ", " + dReg(s));
+            break;
+        }
+        case MIROp::Not: {
+            if (inst.operands.empty() || inst.dest < 0) break;
+            int d = allocReg(inst.dest);
+            int s = allocReg(inst.operands[0]);
+            // !x: if x==0 then 1.0 else 0.0
+            emitInst("fcmp " + dReg(s) + ", #0.0");
+            emitInst("fmov " + dReg(d) + ", #1.0");
+            emitInst("b.eq .Lnot_" + std::to_string(inst.dest));
+            emitInst("fmov " + dReg(d) + ", xzr");
+            emitLine(".Lnot_" + std::to_string(inst.dest) + ":");
             break;
         }
         case MIROp::Branch: {
             if (inst.operands.empty()) break;
             int cond = allocReg(inst.operands[0]);
             emitInst("fcmp " + dReg(cond) + ", #0.0");
-            emitInst("b.eq .L_bb" + std::to_string(inst.falseBlock));
-            emitInst("b .L_bb" + std::to_string(inst.targetBlock));
+            emitInst("b.eq .L" + fn.name + "_bb" + std::to_string(inst.falseBlock));
+            emitInst("b .L" + fn.name + "_bb" + std::to_string(inst.targetBlock));
             break;
         }
         case MIROp::Jump: {
-            emitInst("b .L_bb" + std::to_string(inst.targetBlock));
+            emitInst("b .L" + fn.name + "_bb" + std::to_string(inst.targetBlock));
             break;
         }
         case MIROp::Return: {
@@ -199,6 +316,7 @@ private:
                 int r = allocReg(inst.operands[0]);
                 if (r != 0) emitInst("fmov d0, " + dReg(r));
             }
+            emitInst("add sp, sp, #256");
             emitInst("ldp x29, x30, [sp], #16");
             emitInst("ret");
             break;
@@ -739,12 +857,30 @@ inline bool compileToBinary(const MIRProgram& mir, const CompileOptions& opts) {
         std::cerr << "[compile] Generated " << archName(opts.arch) << " assembly → " << asmFile << "\n";
     }
 
-    // 3) 选择汇编器和链接器命令
+    // 3) 选择汇编器和链接器命令（根据宿主平台）
     std::string assembler, linker;
+#ifdef __APPLE__
+    // macOS: 使用原生工具链（Xcode / CommandLineTools）
+    switch (opts.arch) {
+    case TargetArch::X86_64:
+        assembler = "as -arch x86_64";
+        linker = "clang -arch x86_64";
+        break;
+    case TargetArch::ARM64:
+        assembler = "as -arch arm64";
+        linker = "clang -arch arm64";
+        break;
+    case TargetArch::RISCV64:
+        assembler = "riscv64-linux-gnu-as";  // macOS 无原生 RISC-V 支持
+        linker = "riscv64-linux-gnu-gcc";
+        break;
+    }
+#else
+    // Linux: 原生或交叉编译工具链
     switch (opts.arch) {
     case TargetArch::X86_64:
         assembler = "as";
-        linker = "gcc";  // 用 gcc 驱动链接，简化 .so 生成
+        linker = "gcc";
         break;
     case TargetArch::ARM64:
         assembler = "aarch64-linux-gnu-as";
@@ -755,6 +891,7 @@ inline bool compileToBinary(const MIRProgram& mir, const CompileOptions& opts) {
         linker = "riscv64-linux-gnu-gcc";
         break;
     }
+#endif
 
     // 4) 汇编: .s → .o（.so 模式需要 -fPIC）
     std::string objFile = opts.output + ".o";
@@ -774,14 +911,20 @@ inline bool compileToBinary(const MIRProgram& mir, const CompileOptions& opts) {
         // 生成共享库
         linkCmd = linker + " -shared -nostdlib -o " + opts.output + " " + objFile + " 2>&1";
     } else {
-        // 生成可执行文件（静态链接，用 ld 直接链接）
+        // 生成可执行文件
         std::string ld;
+#ifdef __APPLE__
+        // macOS: 使用 clang 驱动链接
+        ld = linker;
+        linkCmd = ld + " -o " + opts.output + " " + objFile + " -lSystem 2>&1";
+#else
         switch (opts.arch) {
         case TargetArch::X86_64:  ld = "ld"; break;
         case TargetArch::ARM64:   ld = "aarch64-linux-gnu-ld"; break;
         case TargetArch::RISCV64: ld = "riscv64-linux-gnu-ld"; break;
         }
         linkCmd = ld + " -static -o " + opts.output + " " + objFile + " 2>&1";
+#endif
     }
     if (opts.verbose) {
         std::cerr << "[compile] " << linkCmd << "\n";
