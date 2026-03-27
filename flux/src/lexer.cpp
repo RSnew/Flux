@@ -45,6 +45,7 @@ const std::unordered_map<std::string, TokenType> Lexer::keywords_ = {
     {"specify",    TokenType::SPECIFY},
     {"requires",   TokenType::REQUIRES},
     {"ensures",    TokenType::ENSURES},
+    {"sanitize",   TokenType::SANITIZE},
 };
 
 Lexer::Lexer(const std::string& source) : source_(source) {}

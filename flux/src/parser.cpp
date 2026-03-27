@@ -191,6 +191,20 @@ NodePtr Parser::parseTopLevel() {
             return std::make_unique<ProfiledFnDecl>(std::move(fn));
         }
 
+        // @sanitize func — taint clearing (APC Phase 2)
+        if (check(TokenType::SANITIZE) ||
+            (check(TokenType::IDENTIFIER) && current().value == "sanitize")) {
+            consume();
+            skipNewlines();
+            if (!check(TokenType::FUNC))
+                throw ParseError("@sanitize must be followed by func declaration", current().line);
+            auto fn = parseFnDecl();
+            // Set isSanitize flag on the FnDecl
+            if (auto* fd = dynamic_cast<FnDecl*>(fn.get()))
+                fd->isSanitize = true;
+            return fn;
+        }
+
         // @platform("arm64") { ... }
         if (check(TokenType::PLATFORM)) {
             consume();

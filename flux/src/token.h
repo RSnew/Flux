@@ -34,6 +34,7 @@ enum class TokenType {
     SPECIFY,        // specify 类型声明
     REQUIRES,       // requires 前置条件（合约）
     ENSURES,        // ensures 后置条件（合约）
+    SANITIZE,       // @sanitize taint clearing (APC Phase 2)
     // 运算符
     PLUS, MINUS, STAR, SLASH, PERCENT,
     EQ, NEQ, LT, GT, LEQ, GEQ,

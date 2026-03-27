@@ -119,6 +119,8 @@ struct FnDecl : ASTNode {
     // 合约（Design by Contract）
     std::vector<NodePtr> preconditions_;   // requires { ... }
     std::vector<NodePtr> postconditions_;  // ensures { ... }
+    // @sanitize — taint clearing (APC Phase 2)
+    bool isSanitize = false;
     FnDecl(std::string n, std::vector<Param> p, std::string rt, std::vector<NodePtr> b)
         : name(std::move(n)), params(std::move(p)), returnType(std::move(rt)), body(std::move(b)) {}
 };

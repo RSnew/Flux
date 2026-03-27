@@ -2,6 +2,7 @@
 #include "ast.h"
 #include "concurrency.h"
 #include "threadpool.h"
+#include "taint.h"
 #include <unordered_map>
 #include <unordered_set>
 #include <string>
@@ -436,4 +437,7 @@ private:
 
     // ── --no-test 模式标志 ────────────────────────────────
     bool noTest_ = false;
+
+    // ── APC Phase 2: Cross-module taint tracking ────────────
+    TaintTracker taintTracker_;
 };

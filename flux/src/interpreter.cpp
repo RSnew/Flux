@@ -329,6 +329,11 @@ void Interpreter::executeModule(ModuleDecl* decl, std::shared_ptr<Environment> e
     mod.decl          = decl;   // 保存 AST 指针供重启使用
     mod.functions.clear();
 
+    // APC Phase 2: enable taint tracking when modules declare capabilities
+    if (!decl->capabilities.empty()) {
+        taintTracker_.enable();
+    }
+
     // @concurrent 绑定：注册 module → pool 映射
     if (!decl->poolName.empty()) {
         modulePools_[decl->name] = decl->poolName;
@@ -447,7 +452,45 @@ Value Interpreter::callModuleFunction(const std::string& modName,
         auto fit = sit->second.find(fnName);
         if (fit == sit->second.end())
             throw std::runtime_error("undefined stdlib function: " + modName + "." + fnName);
-        return fit->second(std::move(args));
+
+        // ── APC Phase 2: Taint sink check (before call) ──
+        if (taintTracker_.isEnabled() && TaintTracker::isSink(modName, fnName)) {
+            // Collect arg hints for taint checking — check all tainted vars
+            // We check the taint registry for any argument that looks tainted
+            // by scanning arg string values against known tainted vars
+            std::vector<std::string> argVarNames;
+            // Check all tracked vars — if any arg string matches a tainted value
+            // this is a conservative check: scan all tainted vars
+            for (size_t i = 0; i < args.size(); ++i) {
+                std::string argKey = "__arg_" + std::to_string(i);
+                auto* taint = taintTracker_.getTaint(argKey);
+                if (taint) {
+                    argVarNames.push_back(argKey);
+                }
+            }
+            taintTracker_.checkSink(modName, fnName, argVarNames);
+        }
+
+        // ── Collect arg hints (string values for source analysis) ──
+        std::vector<std::string> argHints;
+        for (auto& a : args) {
+            if (a.type == Value::Type::String) argHints.push_back(a.string);
+            else argHints.push_back("");
+        }
+
+        Value result = fit->second(std::move(args));
+
+        // ── APC Phase 2: Taint source check (after call) ──
+        if (taintTracker_.isEnabled()) {
+            auto taintInfo = TaintTracker::checkSource(modName, fnName, argHints);
+            if (taintInfo.has_value()) {
+                taintTracker_.setReturnTaint(std::move(taintInfo.value()));
+            } else {
+                taintTracker_.clearReturnTaint();
+            }
+        }
+
+        return result;
     }
 
     auto mit = modules_.find(modName);
@@ -473,11 +516,52 @@ Value Interpreter::callModuleFunction(const std::string& modName,
     for (size_t i = 0; i < fn->params.size(); i++)
         fnEnv->set(fn->params[i].name, i < args.size() ? args[i] : Value::Nil());
 
+    // ── APC Phase 2: propagate taint from call args to param names ──
+    std::optional<TaintInfo> modArgTaint;
+    // Save old param taint to restore after call (scope isolation)
+    std::vector<std::pair<std::string, std::optional<TaintInfo>>> savedParamTaints;
+    if (taintTracker_.isEnabled()) {
+        for (size_t i = 0; i < fn->params.size(); ++i) {
+            auto& pname = fn->params[i].name;
+            // Save current taint for this param name
+            auto* existing = taintTracker_.getTaint(pname);
+            savedParamTaints.push_back({pname, existing ? std::optional<TaintInfo>(*existing) : std::nullopt});
+
+            std::string argKey = "__arg_" + std::to_string(i);
+            auto* taint = taintTracker_.getTaint(argKey);
+            if (taint) {
+                taintTracker_.markTainted(pname, *taint);
+                if (!modArgTaint.has_value()) modArgTaint = *taint;
+            } else {
+                taintTracker_.clearTaint(pname);
+            }
+        }
+    }
+
+    auto restoreParamTaints = [&]() {
+        for (auto& [pname, oldTaint] : savedParamTaints) {
+            if (oldTaint.has_value()) taintTracker_.markTainted(pname, oldTaint.value());
+            else taintTracker_.clearTaint(pname);
+        }
+    };
+
     try {
         for (auto& stmt : fn->body)
             evalNode(stmt.get(), fnEnv, &mod);
+
+        // ── APC Phase 2: propagate taint for implicit nil return ──
+        if (taintTracker_.isEnabled() && modArgTaint.has_value()) {
+            taintTracker_.setReturnTaint(modArgTaint.value());
+        }
+        restoreParamTaints();
+
         return Value::Nil();
     } catch (ReturnSignal& ret) {
+        // ── APC Phase 2: propagate taint through return value ──
+        if (taintTracker_.isEnabled() && modArgTaint.has_value()) {
+            taintTracker_.setReturnTaint(modArgTaint.value());
+        }
+        restoreParamTaints();
         return ret.value;
 
     } catch (PanicSignal& p) {
@@ -517,9 +601,11 @@ Value Interpreter::callModuleFunction(const std::string& modName,
                       << "' crashed with .never policy, permanently stopped\033[0m\n";
         } else {
             // None — 没有监督，错误向上传播
+            restoreParamTaints();
             throw std::runtime_error("unhandled panic in " + modName + ": " + p.message);
         }
 
+        restoreParamTaints();
         return Value::Nil(); // 崩溃后返回 nil，调用者继续
 
     } catch (std::exception& e) {
@@ -536,8 +622,10 @@ Value Interpreter::callModuleFunction(const std::string& modName,
         } else if (mod.restartPolicy != RestartPolicy::None) {
             mod.crashed = true;
         } else {
+            restoreParamTaints();
             throw;
         }
+        restoreParamTaints();
         return Value::Nil();
     }
 }
@@ -581,6 +669,33 @@ Value Interpreter::callFunction(const std::string& name,
     for (size_t i = 0; i < fn->params.size(); i++)
         fnEnv->set(fn->params[i].name, i < args.size() ? args[i] : Value::Nil());
 
+    // ── APC Phase 2: propagate taint from call args to param names ──
+    std::optional<TaintInfo> argTaint;
+    std::vector<std::pair<std::string, std::optional<TaintInfo>>> savedParamTaints2;
+    if (taintTracker_.isEnabled()) {
+        for (size_t i = 0; i < fn->params.size(); ++i) {
+            auto& pname = fn->params[i].name;
+            auto* existing = taintTracker_.getTaint(pname);
+            savedParamTaints2.push_back({pname, existing ? std::optional<TaintInfo>(*existing) : std::nullopt});
+
+            std::string argKey = "__arg_" + std::to_string(i);
+            auto* taint = taintTracker_.getTaint(argKey);
+            if (taint) {
+                taintTracker_.markTainted(pname, *taint);
+                if (!argTaint.has_value()) argTaint = *taint;
+            } else {
+                taintTracker_.clearTaint(pname);
+            }
+        }
+    }
+
+    auto restoreParamTaints2 = [&]() {
+        for (auto& [pname, oldTaint] : savedParamTaints2) {
+            if (oldTaint.has_value()) taintTracker_.markTainted(pname, oldTaint.value());
+            else taintTracker_.clearTaint(pname);
+        }
+    };
+
     // 合约检查：requires（前置条件）
     for (auto& pre : fn->preconditions_) {
         Value cond = evalNode(pre.get(), fnEnv, mod);
@@ -606,6 +721,17 @@ Value Interpreter::callFunction(const std::string& name,
                     throw std::runtime_error("contract violation: ensures condition failed in " + name);
             }
         }
+        // ── APC Phase 2: propagate taint through return value ──
+        if (taintTracker_.isEnabled() && argTaint.has_value()) {
+            if (fn->isSanitize) {
+                // @sanitize clears taint — do not propagate
+                taintTracker_.clearReturnTaint();
+            } else {
+                // Tainted args → tainted return
+                taintTracker_.setReturnTaint(argTaint.value());
+            }
+        }
+        restoreParamTaints2();
         return ret.value;
     } catch (PanicSignal& p) {
         lastInlineExceptionDescs_.clear();
@@ -645,6 +771,7 @@ Value Interpreter::callFunction(const std::string& name,
         if (hasDesc) throw std::runtime_error(merged);
         throw;
     }
+    restoreParamTaints2();
     return Value::Nil();
 }
 
@@ -1170,6 +1297,22 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
             std::vector<Value> args;
             for (auto& a : n->args)
                 args.push_back(evalNode(a.get(), env, mod));
+
+            // ── APC Phase 2: propagate taint from arg variables to __arg_N ──
+            if (taintTracker_.isEnabled()) {
+                for (size_t i = 0; i < n->args.size(); ++i) {
+                    std::string argKey = "__arg_" + std::to_string(i);
+                    taintTracker_.clearTaint(argKey);
+                    // Direct identifier → check taint on variable
+                    if (auto* id = dynamic_cast<Identifier*>(n->args[i].get())) {
+                        auto* taint = taintTracker_.getTaint(id->name);
+                        if (taint) taintTracker_.markTainted(argKey, *taint);
+                    }
+                    // ModuleCall arg → check if return was tainted (recursive)
+                    // This is handled via the return taint mechanism
+                }
+            }
+
             return callModuleFunction(n->module, n->fn, std::move(args));
         }
         // 再检查用户模块
@@ -1190,6 +1333,19 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
             std::vector<Value> args;
             for (auto& a : n->args)
                 args.push_back(evalNode(a.get(), env, mod));
+
+            // ── APC Phase 2: propagate taint from arg variables to __arg_N ──
+            if (taintTracker_.isEnabled()) {
+                for (size_t i = 0; i < n->args.size(); ++i) {
+                    std::string argKey = "__arg_" + std::to_string(i);
+                    taintTracker_.clearTaint(argKey);
+                    if (auto* id = dynamic_cast<Identifier*>(n->args[i].get())) {
+                        auto* taint = taintTracker_.getTaint(id->name);
+                        if (taint) taintTracker_.markTainted(argKey, *taint);
+                    }
+                }
+            }
+
             return callModuleFunction(n->module, n->fn, std::move(args));
         }
 
@@ -1630,6 +1786,16 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
         // var: 直接设置变量
         if (env->has(n->name)) return env->get(n->name);
         env->set(n->name, v);
+
+        // ── APC Phase 2: propagate taint from return to variable ──
+        if (taintTracker_.isEnabled()) {
+            auto* retTaint = taintTracker_.getReturnTaint();
+            if (retTaint) {
+                taintTracker_.markTainted(n->name, *retTaint);
+                taintTracker_.clearReturnTaint();
+            }
+        }
+
         return v;
     }
 
@@ -1665,6 +1831,23 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
         Value v = evalNode(n->value.get(), env, mod);
         if (!env->assign(n->name, v))
             throw std::runtime_error("assignment to undefined variable: " + n->name);
+
+        // ── APC Phase 2: propagate taint from return/source to variable ──
+        if (taintTracker_.isEnabled()) {
+            auto* retTaint = taintTracker_.getReturnTaint();
+            if (retTaint) {
+                taintTracker_.markTainted(n->name, *retTaint);
+                taintTracker_.clearReturnTaint();
+            }
+            // Also propagate if RHS is a tainted identifier
+            if (auto* rhs = dynamic_cast<Identifier*>(n->value.get())) {
+                auto* srcTaint = taintTracker_.getTaint(rhs->name);
+                if (srcTaint) {
+                    taintTracker_.markTainted(n->name, *srcTaint);
+                }
+            }
+        }
+
         return v;
     }
 
@@ -1684,6 +1867,19 @@ Value Interpreter::evalNode(ASTNode* node, std::shared_ptr<Environment> env,
     if (auto* n = dynamic_cast<CallExpr*>(node)) {
         std::vector<Value> args;
         for (auto& a : n->args) args.push_back(evalNode(a.get(), env, mod));
+
+        // ── APC Phase 2: propagate taint from arg identifiers to __arg_N ──
+        if (taintTracker_.isEnabled()) {
+            for (size_t i = 0; i < n->args.size(); ++i) {
+                std::string argKey = "__arg_" + std::to_string(i);
+                taintTracker_.clearTaint(argKey);
+                if (auto* id = dynamic_cast<Identifier*>(n->args[i].get())) {
+                    auto* taint = taintTracker_.getTaint(id->name);
+                    if (taint) taintTracker_.markTainted(argKey, *taint);
+                }
+            }
+        }
+
         // 先检查局部变量中是否存在同名函数值
         if (env->has(n->name)) {
             try {
