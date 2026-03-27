@@ -35,7 +35,8 @@ private:
     NodePtr parseMigrateBlock();
     NodePtr parseModuleDecl(RestartPolicy rp = RestartPolicy::None, int maxRetries = 3,
                              std::string poolName = "", int poolQueue = 100,
-                             std::string poolOverflow = "block");
+                             std::string poolOverflow = "block",
+                             std::vector<CapabilityDecl> caps = {});
     NodePtr parseThreadPoolDecl();
     NodePtr parseExceptionDecl();   // exception 关键字
     // Phase 5-7 新语法

@@ -20,6 +20,7 @@
 #include "llvm_jit.h"
 #include "docgen.h"
 #include "linter.h"
+#include "apc.h"
 
 #include <iostream>
 #include <fstream>
@@ -58,6 +59,8 @@ static void printBanner(const std::string& file) {
 // ── 编译并执行（热更新时复用解释器状态）──────────────────
 static bool g_useVM  = false;   // --vm 标志
 static bool g_noTest = false;   // --no-test 标志
+static bool g_apcStrict = false;  // --apc 标志（strict mode: all modules must declare capabilities）
+static bool g_noApc     = false;  // --no-apc 标志（disable APC checking entirely）
 
 static void runSource(const std::string& source, Interpreter& interp, bool isReload) {
     interp.setNoTest(g_noTest);
@@ -82,6 +85,23 @@ static void runSource(const std::string& source, Interpreter& interp, bool isRel
             }
             std::cerr << "\n";
             return;
+        }
+
+        // ── APC check (after type check, before execution) ──
+        if (!g_noApc) {
+            APCChecker apc;
+            apc.setStrict(g_apcStrict);
+            auto apcViolations = apc.check(program.get());
+            if (!apcViolations.empty()) {
+                std::cerr << CLR_RED CLR_BOLD
+                          << "\n\xE2\x9B\x94 APC violations found — execution blocked:\n"
+                          << CLR_RESET;
+                for (auto& v : apcViolations) {
+                    std::cerr << CLR_RED << "   " << v.what() << CLR_RESET << "\n";
+                }
+                std::cerr << "\n";
+                return;
+            }
         }
 
         if (isReload) {
@@ -1235,6 +1255,8 @@ static void printHelp() {
         << "\n"
         << CLR_BOLD << "Flags:\n" << CLR_RESET
         << "  --no-test                   Strip all test declarations\n"
+        << "  --apc                       Strict APC: require all modules to declare capabilities\n"
+        << "  --no-apc                    Disable APC checking entirely\n"
         << "\n"
         << CLR_BOLD << "Package Manager (Feature L):\n" << CLR_RESET
         << "  flux new    <name>          Create a new Flux project\n"
@@ -1272,6 +1294,8 @@ int main(int argc, char* argv[]) {
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--no-test") { g_noTest = true; continue; }
+        if (a == "--apc")     { g_apcStrict = true; continue; }
+        if (a == "--no-apc")  { g_noApc = true; continue; }
         args.push_back(a);
     }
     if (args.empty()) {

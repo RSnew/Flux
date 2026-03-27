@@ -55,7 +55,61 @@ NodePtr Parser::parseThreadPoolDecl() {
 NodePtr Parser::parseTopLevel() {
     // @annotation 处理
     if (check(TokenType::AT)) {
-        consume(); // @
+        // ── @requires 可以出现多次，收集到 capabilities 列表 ──
+        std::vector<CapabilityDecl> capabilities;
+        while (check(TokenType::AT)) {
+            // 预读：AT + REQUIRES → 解析 @requires 声明
+            if (peek(1).type == TokenType::REQUIRES ||
+                (peek(1).type == TokenType::IDENTIFIER && peek(1).value == "requires")) {
+                consume(); // @
+                consume(); // requires
+                expect(TokenType::LPAREN, "expected '(' after @requires");
+                // 解析 Module.permission: "scope" 或 Module: level
+                std::string capModule = expect(TokenType::IDENTIFIER, "expected module name in @requires").value;
+                std::string capPerm;
+                std::string capScope;
+                if (match(TokenType::DOT)) {
+                    // Module.permission form
+                    capPerm = expect(TokenType::IDENTIFIER, "expected permission after '.'").value;
+                } else {
+                    // Module: level form (shorthand)
+                    capPerm = "";  // filled from colon value below
+                }
+                if (match(TokenType::COLON)) {
+                    // scope string or level keyword
+                    if (check(TokenType::STRING)) {
+                        capScope = consume().value;
+                    } else if (check(TokenType::IDENTIFIER)) {
+                        std::string level = consume().value;
+                        if (capPerm.empty()) capPerm = level;  // Module: none/all/allow
+                        else capScope = level;
+                    } else {
+                        // no scope
+                    }
+                }
+                // If permission still empty after Module: form, default to "all"
+                if (capPerm.empty()) capPerm = "all";
+                expect(TokenType::RPAREN, "expected ')' after @requires");
+                capabilities.push_back({capModule, capPerm, capScope});
+                skipNewlines();
+                continue;
+            }
+            break;  // Not a @requires, proceed to other annotation parsing
+        }
+
+        // If we collected capabilities but next token is not @, parse the module
+        if (!capabilities.empty()) {
+            // After @requires, expect either another @annotation or module
+            if (check(TokenType::AT)) {
+                consume(); // @
+            } else if (check(TokenType::MODULE)) {
+                return parseModuleDecl(RestartPolicy::None, 3, "", 100, "block", std::move(capabilities));
+            } else {
+                throw ParseError("@requires must be followed by module declaration or another annotation", current().line);
+            }
+        } else {
+            consume(); // @
+        }
 
         // @threadpool(name: "io-pool", size: 4)
         if (check(TokenType::THREADPOOL)) {
@@ -94,7 +148,7 @@ NodePtr Parser::parseTopLevel() {
 
             if (!check(TokenType::MODULE))
                 throw ParseError("@concurrent must be followed by module declaration", current().line);
-            return parseModuleDecl(RestartPolicy::None, 3, poolName, poolQueue, poolOverflow);
+            return parseModuleDecl(RestartPolicy::None, 3, poolName, poolQueue, poolOverflow, std::move(capabilities));
         }
 
         // @supervised(restart: .always, maxRetries: 3)
@@ -124,7 +178,7 @@ NodePtr Parser::parseTopLevel() {
 
             if (!check(TokenType::MODULE))
                 throw ParseError("@supervised must be followed by module declaration", current().line);
-            return parseModuleDecl(rp, maxRetries);
+            return parseModuleDecl(rp, maxRetries, "", 100, "block", std::move(capabilities));
         }
 
         // @profile fn/func — 性能分析装饰器
@@ -143,7 +197,7 @@ NodePtr Parser::parseTopLevel() {
             return parsePlatformDecl();
         }
 
-        throw ParseError("unknown annotation (expected supervised, concurrent, threadpool, profile, or platform)", current().line);
+        throw ParseError("unknown annotation (expected requires, supervised, concurrent, threadpool, profile, or platform)", current().line);
     }
 
     // func (function declaration)
@@ -209,7 +263,8 @@ NodePtr Parser::parseMigrateBlock() {
 
 NodePtr Parser::parseModuleDecl(RestartPolicy rp, int maxRetries,
                                   std::string poolName, int poolQueue,
-                                  std::string poolOverflow) {
+                                  std::string poolOverflow,
+                                  std::vector<CapabilityDecl> caps) {
     expect(TokenType::MODULE, "expected 'module'");
     std::string name = expect(TokenType::IDENTIFIER, "expected module name").value;
     skipNewlines();
@@ -228,7 +283,7 @@ NodePtr Parser::parseModuleDecl(RestartPolicy rp, int maxRetries,
     expect(TokenType::RBRACE, "expected '}' to close module");
     while (match(TokenType::NEWLINE)) {}
     return std::make_unique<ModuleDecl>(name, std::move(body), rp, maxRetries,
-                                        poolName, poolQueue, poolOverflow);
+                                        poolName, poolQueue, poolOverflow, std::move(caps));
 }
 
 // persistent { visits: 0, errors: 0 }

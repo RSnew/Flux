@@ -165,6 +165,13 @@ struct ThreadPoolDecl : ASTNode {
     explicit ThreadPoolDecl(std::string n, int s) : name(std::move(n)), size(s) {}
 };
 
+// ── @requires 能力声明（APC — Agent Permission Contract）───
+struct CapabilityDecl {
+    std::string module;      // "File" / "Http" / "Asm" / "Env" / "Net"
+    std::string permission;  // "read" / "write" / "none" / "all" / "allow"
+    std::string scope;       // "/tmp/**" or empty
+};
+
 // ── module MyModule { ... } ───────────────────────────────
 // 可附加 @concurrent(pool: ..., queue: ..., overflow: ...)
 struct ModuleDecl : ASTNode {
@@ -176,13 +183,17 @@ struct ModuleDecl : ASTNode {
     std::string          poolName;
     int                  poolQueue    = 100;
     std::string          poolOverflow = "block";   // "block" | "drop" | "error"
+    // @requires 能力声明（APC）
+    std::vector<CapabilityDecl> capabilities;
 
     ModuleDecl(std::string n, std::vector<NodePtr> b,
                RestartPolicy rp = RestartPolicy::None, int mr = 3,
-               std::string pn = "", int pq = 100, std::string po = "block")
+               std::string pn = "", int pq = 100, std::string po = "block",
+               std::vector<CapabilityDecl> caps = {})
         : name(std::move(n)), body(std::move(b))
         , restartPolicy(rp), maxRetries(mr)
-        , poolName(std::move(pn)), poolQueue(pq), poolOverflow(std::move(po)) {}
+        , poolName(std::move(pn)), poolQueue(pq), poolOverflow(std::move(po))
+        , capabilities(std::move(caps)) {}
 };
 
 // ── ModuleName.functionName(args) ─────────────────────────
